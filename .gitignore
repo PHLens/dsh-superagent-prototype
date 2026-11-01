@@ -3,3 +3,5 @@ lib/
 .artifacts/
 .env
 coverage/
+# Local host evidence includes executable paths and command diagnostics.
+.superagent-host/
