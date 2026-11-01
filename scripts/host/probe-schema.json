@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:dsh-superagent:host-probe:1",
+  "title": "Local isolated host probe evidence (contains private local paths)",
+  "type": "object",
+  "required": ["schemaVersion", "baseline", "capability", "status", "command", "expected", "actual", "host", "context", "cleanup", "startedAt", "finishedAt", "budgetMs", "execution", "error", "capabilities"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "baseline": { "const": "7a68779c32e8dcf2ef9f4c942fdc7c24b25c05bb" },
+    "capability": { "type": "string", "minLength": 1 },
+    "status": { "$ref": "#/$defs/status" },
+    "command": { "type": "array", "items": { "type": "string" } },
+    "expected": { "type": "string", "minLength": 1 },
+    "actual": { "type": ["object", "null"] },
+    "host": {
+      "type": "object", "required": ["node", "platform", "architecture", "dsh"],
+      "properties": {
+        "node": { "type": "string" }, "platform": { "type": "string" },
+        "architecture": { "type": "string" }, "dsh": { "type": ["string", "null"] }
+      }, "additionalProperties": false
+    },
+    "context": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["profile", "dshHome", "stateDir", "workspace", "port", "outboundDisabled", "startedAt"],
+          "properties": {
+            "profile": { "type": "string", "pattern": "^probe-" },
+            "dshHome": { "type": "string" }, "stateDir": { "type": "string" },
+            "workspace": { "type": "string" },
+            "port": { "anyOf": [{ "type": "integer", "minimum": 20000, "maximum": 53817 }, { "type": "integer", "minimum": 53819, "maximum": 59999 }] },
+            "outboundDisabled": { "const": true }, "startedAt": { "type": "string", "format": "date-time" }
+          }, "additionalProperties": false
+        }
+      ]
+    },
+    "cleanup": {
+      "type": "object", "required": ["processes", "directory", "port"],
+      "properties": {
+        "processes": { "$ref": "#/$defs/status" },
+        "directory": { "$ref": "#/$defs/status" },
+        "port": { "$ref": "#/$defs/status" }
+      }, "additionalProperties": false
+    },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "finishedAt": { "type": "string", "format": "date-time" },
+    "budgetMs": { "type": "integer", "minimum": 1, "maximum": 120000 },
+    "execution": { "oneOf": [{ "$ref": "#/$defs/execution" }, { "type": "null" }] },
+    "versionExecution": { "$ref": "#/$defs/execution" },
+    "error": { "type": ["string", "null"] },
+    "capabilities": {
+      "type": "object", "required": ["session", "skills", "web"],
+      "properties": {
+        "session": { "$ref": "#/$defs/status" }, "skills": { "$ref": "#/$defs/status" }, "web": { "$ref": "#/$defs/status" }
+      }, "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "status": { "enum": ["passed", "failed", "unsupported", "untested"] },
+    "execution": {
+      "type": "object",
+      "required": ["command", "exitCode", "signal", "error", "timedOut", "interrupted", "durationMs", "output", "truncated", "processesGone", "cleanup", "cleanupError"],
+      "properties": {
+        "command": { "type": "array", "items": { "type": "string" } },
+        "exitCode": { "type": ["integer", "null"] }, "signal": { "type": ["string", "null"] },
+        "error": { "type": ["string", "null"] }, "cleanupError": { "type": ["string", "null"] },
+        "timedOut": { "type": "boolean" }, "interrupted": { "type": "boolean" },
+        "durationMs": { "type": "number", "minimum": 0 }, "output": { "type": "string", "maxLength": 65536 },
+        "truncated": { "type": "boolean" }, "processesGone": { "type": "boolean" }, "cleanup": { "$ref": "#/$defs/status" }
+      }, "additionalProperties": false
+    }
+  }
+}
