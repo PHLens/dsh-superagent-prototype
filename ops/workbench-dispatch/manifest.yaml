@@ -1,0 +1,1384 @@
+{
+  "version": 1,
+  "revision": "workbench-v1",
+  "repository": "PHLens/dsh-superagent-prototype",
+  "capabilities": [
+    {
+      "id": "native.session-workspace",
+      "status": "untested",
+      "description": "0C: Real isolated host Session create/reopen across restart, actual workspace/cwd/realpath and mismatched mapping rejection."
+    },
+    {
+      "id": "native.permission-preset",
+      "status": "untested",
+      "description": "0C: Real host permission preset persistence and observation after Session reopen."
+    },
+    {
+      "id": "native.skill-read",
+      "status": "untested",
+      "description": "0D: Real host skill registration and exact versioned body reads."
+    },
+    {
+      "id": "native.global-skill-suppression",
+      "status": "untested",
+      "description": "0D: Observed suppression of global skill visibility and denied out-of-scope reads."
+    },
+    {
+      "id": "native.descendant-permissions",
+      "status": "untested",
+      "description": "0D: Observed descendant permission inheritance and denied out-of-scope reads."
+    },
+    {
+      "id": "native.browser-bundle",
+      "status": "untested",
+      "description": "0E: Actual browser bundle injection through the installed host loader."
+    },
+    {
+      "id": "native.client-slots",
+      "status": "untested",
+      "description": "0E: Actual host client slot registration and rendering."
+    },
+    {
+      "id": "native.local-auth",
+      "status": "untested",
+      "description": "0E: Valid authenticated write, unauthenticated write rejection and exact wrong-origin rejection, independently observed."
+    },
+    {
+      "id": "native.transport",
+      "status": "untested",
+      "description": "0E: Selected native SSE/WS handshake and reconnect; excludes application durable replay and real remote access."
+    },
+    {
+      "id": "native.attachments",
+      "status": "untested",
+      "description": "3D own isolated probe: Real host attachment behavior with bounded transfer and project ownership; not inferred from 0E or fixture tests."
+    },
+    {
+      "id": "dispatch.user-sender",
+      "status": "untested",
+      "description": "D1: Authorized external OAuth sender identity, dedicated canary chat membership and native message/idempotency evidence."
+    }
+  ],
+  "tasks": [
+    {
+      "id": "0A",
+      "title": "Reproduce and bound local toolchain readiness",
+      "prompt": "Implement Task 0A: Reproduce and bound local toolchain readiness. Record node, pnpm, dsh, CPU/OS, lock hash, package graph, executable provenance, exact commands, cleanup and independent typecheck/testStartup/build statuses. Bound recording to 120 seconds. Change the lockfile only when a reproduced optional/native binding failure and package graph prove the repair is required. This task establishes toolchain evidence, not native host compatibility. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from agent/host-toolchain-gate-13bc1102708a. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "scripts/host/record-toolchain.mjs",
+          "tests/host-toolchain.spec.ts",
+          "docs/superpowers/verification/2026-11-01-toolchain.md"
+        ],
+        "modify": [
+          "pnpm-lock.yaml"
+        ],
+        "test": [
+          "tests/host-toolchain.spec.ts"
+        ]
+      },
+      "dependsOn": [],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "agent/host-toolchain-gate-13bc1102708a",
+      "acceptance": [
+        "pnpm test -- tests/host-toolchain.spec.ts",
+        "node scripts/host/record-toolchain.mjs --out .superagent-host/toolchain.json",
+        "pnpm typecheck",
+        "pnpm build"
+      ],
+      "verification": [
+        "The evidence test first fails for the missing writer, then passes; recording is bounded to 120 seconds and package presence alone never implies passed.",
+        "Sanitized toolchain report distinguishes actual passes from the first native/optional binding failure. Every failure names a finite repair, owner, affected consumers and exact retest command; raw executable paths stay in local ignored evidence.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "0B",
+      "title": "Build the isolated host probe launcher",
+      "prompt": "Implement Task 0B: Build the isolated host probe launcher. Produce ProbeContext and per-capability evidence with capability/status/command/expected/actual/host/context/cleanup. Launch only the minimal host plugin, without runtime.ts, setup.ts or business Sources. Create a fresh temporary profile/state/workspace, disable outbound delivery, choose an unused port distinct from protected service ports, kill the child after 120 seconds and clean only owned temporary state. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/0B. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "scripts/host/run-isolated-probe.mjs",
+          "scripts/host/probe-host-plugin.ts",
+          "scripts/host/probe-schema.json",
+          "tests/host-probe-launcher.spec.ts"
+        ],
+        "modify": [
+          "docs/superpowers/verification/2026-11-01-host-compatibility.md"
+        ],
+        "test": [
+          "tests/host-probe-launcher.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "0A"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/0B",
+      "acceptance": [
+        "pnpm test -- tests/host-probe-launcher.spec.ts",
+        "node scripts/host/run-isolated-probe.mjs --capability launcher --json .superagent-host/launcher.json"
+      ],
+      "verification": [
+        "Failure-first launcher tests cover isolation, timeout, owned-directory cleanup and exit evidence even on startup failure.",
+        "Two real runs use different temporary profile/state/workspace contexts and leave existing operator and application profiles unchanged; local raw paths are sanitized before versioning.",
+        "Repeat node scripts/host/run-isolated-probe.mjs --capability launcher --json .superagent-host/launcher.json",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "0C",
+      "title": "Probe native Session, Workspace and permission persistence",
+      "prompt": "Implement Task 0C: Probe native Session, Workspace and permission persistence. Use ProbeContext to create and persist a Session, stop/restart the real host, reopen it, inspect actual cwd/realpath and permission preset, and reject mismatched workspace mappings. Add only host probe behavior; missing native features receive evidence and repair tasks, not application workarounds. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/0C. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "tests/native-session-probe.spec.ts"
+        ],
+        "modify": [
+          "scripts/host/probe-host-plugin.ts",
+          "docs/superpowers/verification/2026-11-01-host-compatibility.md"
+        ],
+        "test": [
+          "tests/native-session-probe.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "0B"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/0C",
+      "acceptance": [
+        "pnpm test -- tests/native-session-probe.spec.ts"
+      ],
+      "verification": [
+        "Separate real native.session-workspace and native.permission-preset observations include host version, context, commands, actual results and cleanup.",
+        "Fixture assertions validate evidence handling only. Native results remain untested until actually exercised; failed or unsupported results name affected consumers, repair owner and retest command.",
+        "Run the isolated native Session/Workspace/preset probe twice through scripts/host/run-isolated-probe.mjs; record the exact supported invocation in the compatibility report.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "0D",
+      "title": "Probe native skills, global visibility and permission inheritance",
+      "prompt": "Implement Task 0D: Probe native skills, global visibility and permission inheritance. Probe real registration/read of exact skill bodies and versions, suppression of global skills, descendant permission inheritance and denied out-of-scope reads. Distinguish declared TypeScript interfaces from observed host behavior. Application catalog enforcement belongs to 1H; subagent entrypoints remain disabled pending 2D. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/0D. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "tests/native-skill-probe.spec.ts"
+        ],
+        "modify": [
+          "scripts/host/probe-host-plugin.ts",
+          "docs/superpowers/verification/2026-11-01-host-compatibility.md"
+        ],
+        "test": [
+          "tests/native-skill-probe.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "0B"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/0D",
+      "acceptance": [
+        "pnpm test -- tests/native-skill-probe.spec.ts"
+      ],
+      "verification": [
+        "Record independent native.skill-read, native.global-skill-suppression and native.descendant-permissions results with exact bodies/versions, denied-read observations and cleanup.",
+        "Fixture tests do not pass native capabilities; failures include affected consumers, repair owner and exact retest command.",
+        "Run the isolated skill/permission probe through scripts/host/run-isolated-probe.mjs and record its exact supported invocation.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "0E",
+      "title": "Probe native browser bundle, slots, local auth and transport",
+      "prompt": "Implement Task 0E: Probe native browser bundle, slots, local auth and transport. Use a temporary profile and minimal local client to probe actual bundle injection, client slots, a valid authenticated write, unauthenticated rejection, exact wrong-origin rejection and selected SSE/WS handshake/reconnect. A rejection caused only by a missing header is insufficient authentication evidence. Modify tsdown.config.ts only for an evidenced declaration issue. Do not infer remote access, durable replay or attachments. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/0E. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "tests/native-web-probe.spec.ts"
+        ],
+        "modify": [
+          "scripts/host/probe-host-plugin.ts",
+          "tsdown.config.ts",
+          "docs/superpowers/verification/2026-11-01-host-compatibility.md"
+        ],
+        "test": [
+          "tests/native-web-probe.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "0B"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/0E",
+      "acceptance": [
+        "pnpm test -- tests/native-web-probe.spec.ts"
+      ],
+      "verification": [
+        "Provide separate native.browser-bundle, native.client-slots, native.local-auth and native.transport records with selected transport, exact response/status, host version, context and cleanup.",
+        "Real valid/invalid requests establish authentication boundaries; fixture passes cannot establish native compatibility.",
+        "Run the isolated native Web/auth/transport probe through scripts/host/run-isolated-probe.mjs and record its exact supported invocation.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "1A",
+      "title": "Define project, attempt, lease, report and authority contracts",
+      "prompt": "Implement Task 1A: Define project, attempt, lease, report and authority contracts. Consume existing ActorRef/ChannelRef/Ticket/Assignment/Attention/Trigger/Repositories types. Produce branded project/task/plan/authorization/assignment/attempt/lease/artifact ids, Attempt, Lease, ExecutionReport, ReportEffect and pure runtime ownership validators. Reject stale leases/reports and preserve report immutability without database access. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/1A. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "src/core/project-model.ts",
+          "src/core/project-ids.ts",
+          "src/core/attempts.ts",
+          "src/core/reports.ts",
+          "tests/project-model.spec.ts",
+          "tests/attempts.spec.ts"
+        ],
+        "modify": [
+          "src/core/index.ts"
+        ],
+        "test": [
+          "tests/project-model.spec.ts",
+          "tests/attempts.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "0A"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/1A",
+      "acceptance": [
+        "pnpm test -- tests/project-model.spec.ts tests/attempts.spec.ts",
+        "pnpm typecheck"
+      ],
+      "verification": [
+        "Failure-first tests demonstrate stable ids, required project ownership, fresh leases, immutable reports and stale-report rejection.",
+        "No Session, browser, skill or remote capability is required for these pure contracts.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "1B",
+      "title": "Add transactional stores with pre-migration snapshot and rollback",
+      "prompt": "Implement Task 1B: Add transactional stores with pre-migration snapshot and rollback. Implement schema 12 project/channel/artifact/attempt persistence and ProjectStore/ChannelStore/ArtifactStore using existing atomic/outbox boundaries. Snapshot before changing the schema version; preserve legacy tables. Separate source/account/native-event identity from project routing and enforce ownership/uniqueness transactionally. Roll back injected migration failures and restore backup only into outbound-disabled isolated state. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/1B. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "src/app/project-store.ts",
+          "src/app/channel-store.ts",
+          "src/app/artifact-store.ts",
+          "src/app/backup.ts",
+          "tests/project-store.spec.ts"
+        ],
+        "modify": [
+          "src/app/migration.ts",
+          "src/app/store.ts",
+          "src/kv.ts",
+          "tests/migration.spec.ts",
+          "tests/store.spec.ts"
+        ],
+        "test": [
+          "tests/project-store.spec.ts",
+          "tests/migration.spec.ts",
+          "tests/store.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "1A"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/1B",
+      "acceptance": [
+        "pnpm test -- tests/project-store.spec.ts tests/migration.spec.ts tests/store.spec.ts",
+        "pnpm typecheck"
+      ],
+      "verification": [
+        "Schema 11 to 12 migration preserves legacy data; duplicate events and unique routing return consistent records.",
+        "Injected failure leaves the prior schema/data intact, pre-migration snapshot metadata is verifiable, and isolated restore performs no external delivery.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "1C",
+      "title": "Implement immutable PlanRevision and Authorization idempotency",
+      "prompt": "Implement Task 1C: Implement immutable PlanRevision and Authorization idempotency. Produce confirmPlan, revokePlan and sameOperationResult with immutable revisions and transactional authorization. Bind business uniqueness to project, plan revision, verified stable actor and confirmation intent; message id alone is insufficient. Reject conflicting operation payloads, expired/superseded plans and unverified actors; explicit run-again creates a new intent. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/1C. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "src/core/plans.ts",
+          "tests/plans.spec.ts",
+          "tests/authorization.spec.ts"
+        ],
+        "modify": [
+          "src/core/intake.ts",
+          "src/app/project-store.ts"
+        ],
+        "test": [
+          "tests/plans.spec.ts",
+          "tests/authorization.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "1B"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/1C",
+      "acceptance": [
+        "pnpm test -- tests/plans.spec.ts tests/authorization.spec.ts"
+      ],
+      "verification": [
+        "Changed message ids for the same confirmation return the original authorization, while conflicting client operation content fails.",
+        "Tests cover expired/superseded revisions, revocation, verified identity and a distinct authorization intent for run-again.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "1D",
+      "title": "Implement pause, stop, resume, retry and Attention lifecycle",
+      "prompt": "Implement Task 1D: Implement pause, stop, resume, retry and Attention lifecycle. Implement durable transitions, versioned Attention questions, atomic answer plus Effect and attempt/lease guards. Pause survives restart and requires explicit resume; stopped tasks refuse new work; retry creates a fresh attempt. Keep answers, retries, resumes and new execution intent distinct and idempotent. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/1D. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "src/core/lifecycle.ts",
+          "tests/lifecycle.spec.ts",
+          "tests/attention.spec.ts"
+        ],
+        "modify": [
+          "src/core/tickets.ts",
+          "src/core/assignments.ts",
+          "src/app/project-store.ts"
+        ],
+        "test": [
+          "tests/lifecycle.spec.ts",
+          "tests/attention.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "1C"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/1D",
+      "acceptance": [
+        "pnpm test -- tests/lifecycle.spec.ts tests/attention.spec.ts"
+      ],
+      "verification": [
+        "Restart preserves pause; stopped tasks cannot schedule work; stale attempts/leases cannot report.",
+        "Repeated Attention answers generate one accepted answer/Effect; retry allocates a new attempt under the same task.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "1E",
+      "title": "Remove the mandatory GitHub startup dependency",
+      "prompt": "Implement Task 1E: Remove the mandatory GitHub startup dependency. Separate instance readiness from optional project resource readiness. Install base runtime/Session independently of GitHub; missing Feishu/GitHub reports not_ready only to the resource consumer and cannot block local discussion. Keep operator state isolated and require actual 0C Session evidence. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/1E. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "tests/no-github-startup.spec.ts"
+        ],
+        "modify": [
+          "src/deployment.ts",
+          "src/app/setup.ts",
+          "src/app/runtime.ts"
+        ],
+        "test": [
+          "tests/no-github-startup.spec.ts",
+          "tests/runtime.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "1B",
+        "0C"
+      ],
+      "capabilities": [
+        "native.session-workspace"
+      ],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/1E",
+      "acceptance": [
+        "pnpm test -- tests/no-github-startup.spec.ts tests/runtime.spec.ts"
+      ],
+      "verification": [
+        "A no-source-credentials boot initially exposes the mandatory GitHub gate, then succeeds without that resource.",
+        "Native Session evidence is referenced separately from runtime fixtures; optional source readiness remains visible without blocking local discussion.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "1F",
+      "title": "Implement one Assignment preparation and Session mapping",
+      "prompt": "Implement Task 1F: Implement one Assignment preparation and Session mapping. Produce prepareAttempt and PreparationEvidence bound to explicit attempt/assignment/authorization/project identities. Verify workspace type, cwd, realpath, owner and actual Session mapping before reuse. Reject mismatches and preserve failed preparation residue for review instead of deleting it or rerunning blindly. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/1F. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "src/app/execution-attempts.ts",
+          "tests/attempt-preparation.spec.ts"
+        ],
+        "modify": [
+          "src/executor/dsh.ts",
+          "src/app/sessions.ts",
+          "src/app/workspaces.ts"
+        ],
+        "test": [
+          "tests/attempt-preparation.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "0C",
+        "1D"
+      ],
+      "capabilities": [
+        "native.session-workspace",
+        "native.permission-preset"
+      ],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/1F",
+      "acceptance": [
+        "pnpm test -- tests/attempt-preparation.spec.ts"
+      ],
+      "verification": [
+        "Tests cover independent cwd, valid evidence, mismatched Session mapping, failed residue and no blind reuse.",
+        "Integration evidence links the real verified host Session and permission preset to the persisted attempt mapping.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "1G",
+      "title": "Persist reports, validate Artifacts and complete the single-worker slice",
+      "prompt": "Implement Task 1G: Persist reports, validate Artifacts and complete the single-worker slice. Produce acceptExecutionReport and validateArtifactOwnership with one-Assignment completion aggregation. Require assignment/attempt/authorization/lease/operation identity and evidence-backed Artifacts. Reconcile interruption after file creation before Artifact commit without automatically repeating external effects. Reject duplicate/stale reports and cross-project Artifacts. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/1G. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "src/app/report-acceptance.ts",
+          "tests/report-acceptance.spec.ts",
+          "tests/artifact-recovery.spec.ts"
+        ],
+        "modify": [
+          "src/core/assignments.ts",
+          "src/app/artifact-store.ts",
+          "src/executor/dsh.ts"
+        ],
+        "test": [
+          "tests/report-acceptance.spec.ts",
+          "tests/artifact-recovery.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "1F"
+      ],
+      "capabilities": [
+        "native.session-workspace"
+      ],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/1G",
+      "acceptance": [
+        "pnpm test -- tests/report-acceptance.spec.ts tests/artifact-recovery.spec.ts"
+      ],
+      "verification": [
+        "Fault injection between file write and Artifact registration recovers without duplicate side effects.",
+        "Duplicate reports are idempotent, stale attempts fail, ownership is checked and completion waits for required evidence.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "1H",
+      "title": "Add immutable prompt/skill bodies and fail-closed execution manifests",
+      "prompt": "Implement Task 1H: Add immutable prompt/skill bodies and fail-closed execution manifests. Separate candidate metadata from immutable prompt/skill bodies; filter candidates by project/role/stage/resources and authorize exact body reads server-side. Produce reconstructable ExecutionContextManifest including exact loaded/candidate versions. Revoke access immediately, prevent global path leakage and reject mismatches. Keep every subagent entrypoint disabled/fail-closed until 2D. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/1H. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "src/app/skill-catalog.ts",
+          "src/app/skill-bodies.ts",
+          "src/app/execution-manifests.ts",
+          "tests/skill-catalog.spec.ts",
+          "tests/execution-manifest.spec.ts"
+        ],
+        "modify": [
+          "src/app/prompts.ts",
+          "src/app/sessions.ts",
+          "src/app/tools/tool.ts"
+        ],
+        "test": [
+          "tests/skill-catalog.spec.ts",
+          "tests/execution-manifest.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "0D",
+        "1A"
+      ],
+      "capabilities": [
+        "native.skill-read",
+        "native.global-skill-suppression"
+      ],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/1H",
+      "acceptance": [
+        "pnpm test -- tests/skill-catalog.spec.ts tests/execution-manifest.spec.ts"
+      ],
+      "verification": [
+        "Revoked/out-of-role guessed-id reads fail; no global skill path leaks; restart restores the exact body version.",
+        "Manifest mismatch fails closed and pre-2D delegation remains disabled; only consumed 0D skill capabilities gate this task.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "1I",
+      "title": "Implement project intake, coordinator replacement and completed messages",
+      "prompt": "Implement Task 1I: Implement project intake, coordinator replacement and completed messages. Normalize ChannelMessage and persist input/project resolution/effects transactionally. Store durable user messages and completed assistant messages while distinguishing drafts from saved responses. Resolve projects explicitly, retain a single coordinator decision writer, and recover/rebuild a crashed coordinator from database authority. HTTP consumers require local-auth evidence; no last-project inference. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/1I. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "src/app/project-coordinator.ts",
+          "src/app/conversation-store.ts",
+          "tests/project-intake.spec.ts",
+          "tests/coordinator-recovery.spec.ts"
+        ],
+        "modify": [
+          "src/core/intake.ts",
+          "src/core/engine.ts",
+          "src/app/http.ts"
+        ],
+        "test": [
+          "tests/project-intake.spec.ts",
+          "tests/coordinator-recovery.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "1B",
+        "1C",
+        "1D",
+        "1E",
+        "1F",
+        "1G",
+        "1H"
+      ],
+      "capabilities": [
+        "native.session-workspace",
+        "native.permission-preset",
+        "native.skill-read",
+        "native.global-skill-suppression",
+        "native.local-auth"
+      ],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/1I",
+      "acceptance": [
+        "pnpm test -- tests/project-intake.spec.ts tests/coordinator-recovery.spec.ts"
+      ],
+      "verification": [
+        "Duplicate input is idempotent; unresolved project cannot dispatch; assistant completion is durable before UI saved state.",
+        "Coordinator crash/replacement cannot produce two decision writers; Session and HTTP capability observations remain separate from fixtures.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "1J",
+      "title": "Implement ProjectKnowledge and conventions versions",
+      "prompt": "Implement Task 1J: Implement ProjectKnowledge and conventions versions. Persist immutable confirmed ProjectKnowledge and conventions versions with source message provenance, confirmation and supersession. Manual edits remain pending until accepted; use the shared normalized message view. This is versioned domain/store behavior, with no new host browser capability requirement. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/1J. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "src/core/knowledge.ts",
+          "src/app/knowledge-store.ts",
+          "tests/knowledge.spec.ts",
+          "tests/conventions.spec.ts"
+        ],
+        "modify": [
+          "src/app/resources.ts",
+          "src/client/project-conventions.tsx"
+        ],
+        "test": [
+          "tests/knowledge.spec.ts",
+          "tests/conventions.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "1B",
+        "1I"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/1J",
+      "acceptance": [
+        "pnpm test -- tests/knowledge.spec.ts tests/conventions.spec.ts"
+      ],
+      "verification": [
+        "Tests demonstrate confirmation, supersession, retained source-message provenance and pending unconfirmed manual edits.",
+        "Follow the numbered file map; the pre-existing conventions component ownership discrepancy is recorded in top-level notes.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "1K",
+      "title": "Add minimal authenticated project API, Web notifications and UI",
+      "prompt": "Implement Task 1K: Add minimal authenticated project API, Web notifications and UI. Deliver authenticated project list/conversation/task/Artifact API routes, Web notification records and a mobile-safe minimal workflow. Check actor/project authorization server-side, reject wrong origins and display saved assistant state from durable messages. Keep drafts separate. Do not add Feishu routing in this slice. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/1K. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "src/client/project-home.tsx",
+          "src/client/project-conversation.tsx",
+          "src/client/project-task.tsx",
+          "tests/project-panel.spec.tsx",
+          "tests/http-project.spec.ts"
+        ],
+        "modify": [
+          "src/app/api.ts",
+          "src/app/http.ts",
+          "src/app/notifications.ts",
+          "src/client/route.ts",
+          "src/client/app.tsx",
+          "src/client/api.ts"
+        ],
+        "test": [
+          "tests/project-panel.spec.tsx",
+          "tests/http-project.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "0E",
+        "1G",
+        "1I",
+        "1J"
+      ],
+      "capabilities": [
+        "native.browser-bundle",
+        "native.client-slots",
+        "native.local-auth"
+      ],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/1K",
+      "acceptance": [
+        "pnpm test -- tests/project-panel.spec.tsx tests/http-project.spec.ts",
+        "pnpm typecheck"
+      ],
+      "verification": [
+        "Valid authenticated reads/writes succeed; unauthenticated/wrong-origin/cross-project access fails.",
+        "Client tests cover minimal project navigation and durable saved assistant messages; real bundle/slot/auth evidence is referenced independently.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "1L",
+      "title": "Add Increment 1 backup, isolated restore and fault acceptance",
+      "prompt": "Implement Task 1L: Add Increment 1 backup, isolated restore and fault acceptance. Back up and restore DB, run files, execution manifests and exact prompt/skill bodies into isolated state with execution and outbound delivery disabled. Never replay legacy Effects/Outbox during restore. Run two-project no-GitHub authorized file-task/Artifact/Web-notification acceptance and interruption/restart review. Repair only Increment 1 failures; later capability failures need named repair work. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/1L. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "tests/increment1-recovery.spec.ts",
+          "tests/increment1-acceptance.spec.ts",
+          "docs/superpowers/verification/2026-11-01-increment1.md"
+        ],
+        "modify": [
+          "src/app/backup.ts",
+          "src/app/runtime.ts"
+        ],
+        "test": [
+          "tests/increment1-recovery.spec.ts",
+          "tests/increment1-acceptance.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "1B",
+        "1D",
+        "1F",
+        "1G",
+        "1H",
+        "1I",
+        "1J",
+        "1K"
+      ],
+      "capabilities": [
+        "native.session-workspace",
+        "native.permission-preset",
+        "native.skill-read",
+        "native.global-skill-suppression",
+        "native.browser-bundle",
+        "native.client-slots",
+        "native.local-auth"
+      ],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/1L",
+      "acceptance": [
+        "pnpm test -- tests/increment1-recovery.spec.ts tests/increment1-acceptance.spec.ts",
+        "pnpm typecheck",
+        "pnpm build"
+      ],
+      "verification": [
+        "Sanitized Increment 1 report records pass/fail/blocked/not-applicable for pause/restart, preparation failure, file/Artifact interruption, isolated restore and no external delivery.",
+        "No-GitHub project completes an authorized file task with Artifact and Web notification; two projects remain isolated; restart requires evidence review and restore neither runs work nor sends notifications.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "D0",
+      "title": "Define and validate the versioned dispatch manifest",
+      "prompt": "Implement Task D0: Define and validate the versioned dispatch manifest. Implement DispatchTask/DispatchState/CapabilityState/DeliveryRecord and manifest validation/topological sorting outside the application bundle with no src imports or new production dependency. Manifest content is JSON, a YAML 1.2 subset, parsed with built-in JSON.parse. Require unique ids, known dependencies/capabilities, exact branch/base and nonempty acceptance. Detect and report cycles without rewriting the pending 2D/2E human decision; the current manifest must be rejected as cyclic until explicitly approved correction. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from agent/versioned-task-manifest-563a3ddfae96. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "ops/workbench-dispatch/manifest.yaml",
+          "ops/workbench-dispatch/manifest.schema.json",
+          "ops/workbench-dispatch/src/model.ts",
+          "ops/workbench-dispatch/src/manifest.ts",
+          "ops/workbench-dispatch/tests/manifest.spec.ts",
+          "ops/workbench-dispatch/README.md"
+        ],
+        "test": [
+          "ops/workbench-dispatch/tests/manifest.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "0A"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "agent/versioned-task-manifest-563a3ddfae96",
+      "acceptance": [
+        "node --experimental-strip-types ops/workbench-dispatch/src/manifest.ts --check ops/workbench-dispatch/manifest.yaml",
+        "node --experimental-strip-types --test ops/workbench-dispatch/tests/manifest.spec.ts"
+      ],
+      "verification": [
+        "Focused fixtures reject duplicate ids, unknown references, missing fields/branch/base/acceptance and cycles, and accept an acyclic valid fixture.",
+        "The current full manifest check is expected to fail with the literal 2D -> 2E -> 2D cycle until the pending human-approved amendment; preserve this expected diagnostic and do not claim the production DAG passes.",
+        "All 33 defined task ids appear once; static capabilities start untested. Runtime Ticket/PR/capability observations are stored externally.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": [
+        "Human decision pending: numbered sections require both 2D -> 2E and 2E -> 2D. Preserve both until an explicitly approved plan correction; production DAG validation/automatic dispatch cannot be declared ready."
+      ]
+    },
+    {
+      "id": "D1",
+      "title": "Add external Feishu OAuth sender and canary contract",
+      "prompt": "Implement Task D1: Add external Feishu OAuth sender and canary contract. Implement sendUserMessage({chatId,text,idempotencyKey,mentionOpenId}) returning native messageId using user_access_token from an external token helper. Consume FEISHU_DISPATCH_BASE_URL, FEISHU_DISPATCH_ACCESS_TOKEN, FEISHU_DISPATCH_CHAT_ID and FEISHU_AGENT_OPEN_ID only as environment configuration. Require im:message and im:message.send_as_user and document refresh lifecycle. Never read existing bot configuration or persist tokens. Dry-run is side-effect free; dedicated authorized identity canary is a non-task message without dispatch marker or production-agent mention. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/D1. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "ops/workbench-dispatch/src/feishu-user.ts",
+          "ops/workbench-dispatch/src/feishu-canary.ts",
+          "ops/workbench-dispatch/tests/feishu-user.spec.ts"
+        ],
+        "modify": [
+          ".gitignore",
+          "ops/workbench-dispatch/README.md"
+        ],
+        "test": [
+          "ops/workbench-dispatch/tests/feishu-user.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "D0"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/D1",
+      "acceptance": [
+        "node --experimental-strip-types --test ops/workbench-dispatch/tests/feishu-user.spec.ts"
+      ],
+      "verification": [
+        "Fixture tests cover JSON payload/mention entity, UUID idempotency, absent configuration refusal, token expiry, Retry-After and duplicate responses.",
+        "Only the real authorized dedicated-chat canary can establish dispatch.user-sender: verify sender identity, membership and native message id. No task is sent before that evidence.",
+        "Run the implemented feishu-canary dry-run entrypoint and record its exact invocation in the README.",
+        "After external-send authorization, run one non-task dedicated-chat identity canary and record the exact invocation and sanitized receipt outside secret storage.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "D2",
+      "title": "Implement dependency-aware dispatch and idempotent state",
+      "prompt": "Implement Task D2: Implement dependency-aware dispatch and idempotent state. Implement computeReadyTasks/dispatchReadyTasks and --once/--watch/--dry-run/--reconcile using existing read-only Ticket APIs and gh-agent PR JSON, never internal SQLite or a fabricated create-ticket API. Require mergedAt, dev base, expected head and merge SHA, all capability gates and no manual Attention. Cap in-flight tasks at three. Send the task marker, exact goal/files/commands/deps/head/base and scope rule. Persist native messageId atomically; unknown send outcomes require reconciliation before retry. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/D2. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "ops/workbench-dispatch/src/state.ts",
+          "ops/workbench-dispatch/src/superagent.ts",
+          "ops/workbench-dispatch/src/github.ts",
+          "ops/workbench-dispatch/src/engine.ts",
+          "ops/workbench-dispatch/src/main.ts",
+          "ops/workbench-dispatch/tests/engine.spec.ts",
+          "ops/workbench-dispatch/tests/idempotency.spec.ts"
+        ],
+        "test": [
+          "ops/workbench-dispatch/tests/engine.spec.ts",
+          "ops/workbench-dispatch/tests/idempotency.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "D0",
+        "D1"
+      ],
+      "capabilities": [
+        "dispatch.user-sender"
+      ],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/D2",
+      "acceptance": [
+        "node --experimental-strip-types --test ops/workbench-dispatch/tests/engine.spec.ts ops/workbench-dispatch/tests/idempotency.spec.ts",
+        "node --experimental-strip-types ops/workbench-dispatch/src/main.ts --dry-run --once"
+      ],
+      "verification": [
+        "Open and closed-unmerged PRs never satisfy dependencies; wrong base/head or missing merge SHA is rejected.",
+        "Tests cover max-three in flight, duplicate polling, send-before-state-write crash, one-message idempotency, blocked/paused/unknown/missing/contradictory state and manual Attention.",
+        "Dry-run causes no message send, core import or runtime/database mutation; cyclic production manifest fails closed until the approved correction.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "D3",
+      "title": "Add reconciliation, launchd operation and stop controls",
+      "prompt": "Implement Task D3: Add reconciliation, launchd operation and stop controls. Implement restart-safe reconciliation, --pause/--resume/--stop-task/--status, log rotation and a sanitized launchd example with a 30-second/one-minute polling interval and external environment/keychain token helper. Reconcile task marker, Ticket, native message id and expected PR merge before retry. Do not enable the launchd job automatically or embed host paths/secrets. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/D3. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "ops/workbench-dispatch/launchd/com.phlens.superagent-dispatch.plist.example",
+          "ops/workbench-dispatch/tests/reconcile.spec.ts"
+        ],
+        "modify": [
+          "ops/workbench-dispatch/src/main.ts",
+          "ops/workbench-dispatch/src/state.ts",
+          "ops/workbench-dispatch/README.md"
+        ],
+        "test": [
+          "ops/workbench-dispatch/tests/reconcile.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "D2"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/D3",
+      "acceptance": [
+        "node --experimental-strip-types --test ops/workbench-dispatch/tests/reconcile.spec.ts",
+        "node --experimental-strip-types ops/workbench-dispatch/src/main.ts --dry-run --once",
+        "node --experimental-strip-types ops/workbench-dispatch/src/main.ts --status"
+      ],
+      "verification": [
+        "Terminate at every send/observe/write boundary and demonstrate correct state recovery without blind resend.",
+        "Status and pause/stop controls preserve external state and leave Superagent Runtime untouched; launchd example contains no secrets/private host paths and is not automatically enabled.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "D4",
+      "title": "Run dispatcher canary and enable automatic task flow",
+      "prompt": "Implement Task D4: Run dispatcher canary and enable automatic task flow. Run a no-send dry-run against read-only live Ticket state, then exactly one approved 0A dispatch canary through the external user identity, correlating trigger/message/Ticket. First reconcile live 0A PR/Ticket evidence: if already merged or previously sent, do not duplicate it and obtain an approved substitute canary decision. Exercise open/closed-unmerged/merged/blocked dependencies and watch-mode pause/restart with max three in flight. Version only sanitized evidence and documentation; enable real automatic flow only after graph correction and authorization. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/D4. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "docs/superpowers/verification/2026-11-01-dispatcher-canary.md"
+        ],
+        "modify": [
+          "ops/workbench-dispatch/README.md"
+        ]
+      },
+      "dependsOn": [
+        "D0",
+        "D1",
+        "D2",
+        "D3"
+      ],
+      "capabilities": [
+        "dispatch.user-sender"
+      ],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/D4",
+      "acceptance": [
+        "node --experimental-strip-types ops/workbench-dispatch/src/main.ts --dry-run --once",
+        "node --experimental-strip-types ops/workbench-dispatch/src/main.ts --status",
+        "node --experimental-strip-types --test ops/workbench-dispatch/tests/engine.spec.ts ops/workbench-dispatch/tests/idempotency.spec.ts ops/workbench-dispatch/tests/reconcile.spec.ts"
+      ],
+      "verification": [
+        "Dry-run sends nothing; authorized canary yields exactly one correlated Ticket and native message receipt. Live merged state is observed externally, never inferred from this static file.",
+        "Only merged expected PRs release dependencies; blocked capabilities/manual Attention prevent sends; watch stays at most three in-flight tasks and pause/restart does not duplicate work.",
+        "Sanitized canary report records exact commands, authorization/correlation evidence, dependency withholding and recovery, without private deployment details.",
+        "After approved single-task canary and corrected graph: node --experimental-strip-types ops/workbench-dispatch/src/main.ts --watch",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": [
+        "Production graph contains the pending 2D/2E cycle; automatic flow requires its approved correction.",
+        "A reported prior 0A merge must be reconciled against external live evidence before choosing the canary; no duplicate 0A dispatch is authorized by this manifest."
+      ]
+    },
+    {
+      "id": "2A",
+      "title": "Add project resources, snapshots and authorized cache access",
+      "prompt": "Implement Task 2A: Add project resources, snapshots and authorized cache access. Implement project-scoped directory/repository/data/service resources, stable snapshots, authorized cache reads and explicit missing-resource states using Increment 1 contracts. Check resource/project/attempt authorization before cache access, bind snapshot versions and prevent cross-project environment/resource reuse. This domain/resource slice adds no browser, remote or attachment host requirement. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/2A. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "src/app/resource-snapshots.ts",
+          "tests/resource-isolation.spec.ts"
+        ],
+        "modify": [
+          "src/app/resources.ts",
+          "src/app/execution-environment.ts"
+        ],
+        "test": [
+          "tests/resource-isolation.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "1A",
+        "1B",
+        "1F",
+        "1G"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/2A",
+      "acceptance": [
+        "pnpm test -- tests/resource-isolation.spec.ts"
+      ],
+      "verification": [
+        "Two-project tests prove resources and cached data cannot cross ownership boundaries, including missing/revoked resources and independent snapshots.",
+        "Snapshot identity/version and authorized environment context remain stable per attempt; Increment 2 release still requires Increment 1 acceptance.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "2B",
+      "title": "Add durable events and replay",
+      "prompt": "Implement Task 2B: Add durable events and replay. Append durable per-project event sequences transactionally with business mutations; implement reconnect cursor, replay authorization, duplicate suppression, gap detection and expired-cursor snapshot recovery. Bind HTTP streams to authenticated project scope. Application replay success is distinct from native transport evidence and remote Tailscale behavior. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/2B. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "src/app/events.ts",
+          "src/app/event-replay.ts",
+          "tests/events.spec.ts",
+          "tests/event-replay.spec.ts"
+        ],
+        "modify": [
+          "src/app/store.ts",
+          "src/app/http.ts"
+        ],
+        "test": [
+          "tests/events.spec.ts",
+          "tests/event-replay.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "1B",
+        "1K"
+      ],
+      "capabilities": [
+        "native.local-auth",
+        "native.transport"
+      ],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/2B",
+      "acceptance": [
+        "pnpm test -- tests/events.spec.ts tests/event-replay.spec.ts"
+      ],
+      "verification": [
+        "Tests cover commit ordering, monotonic sequence, cursor replay, duplicate/gap handling and unauthorized cross-project stream rejection.",
+        "Reference actual 0E transport/auth evidence separately; in-memory or fixture replay does not establish native or remote transport passes.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "2C",
+      "title": "Add multi-Assignment dependency and result aggregation",
+      "prompt": "Implement Task 2C: Add multi-Assignment dependency and result aggregation. Implement Assignment dependency DAG validation, lease ownership, blocked/runnable transitions and evidence-based aggregation across all required assignments. Preserve independent attempts and input/output versions; do not rely on latestAssignment for aggregate completion. Missing dependencies/results, stale leases and paused/stopped work must block completion or scheduling appropriately. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/2C. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "src/core/dependencies.ts",
+          "src/app/assignment-store.ts",
+          "tests/assignment-dependencies.spec.ts",
+          "tests/aggregation.spec.ts"
+        ],
+        "modify": [
+          "src/core/assignments.ts",
+          "src/core/lifecycle.ts"
+        ],
+        "test": [
+          "tests/assignment-dependencies.spec.ts",
+          "tests/aggregation.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "1A",
+        "1D",
+        "1G",
+        "2B"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/2C",
+      "acceptance": [
+        "pnpm test -- tests/assignment-dependencies.spec.ts tests/aggregation.spec.ts"
+      ],
+      "verification": [
+        "Independent assignments can progress in parallel; dependency failure and stale lease cannot falsely complete a task.",
+        "Aggregation requires every required result/artifact and dependency version, with deterministic blocked/runnable state and no cross-project ownership leak.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "2D",
+      "title": "Enable scoped subagent registration and result processing",
+      "prompt": "Implement Task 2D: Enable scoped subagent registration and result processing. Create parent-child delegation records before starting children, intersect parent/child project/resource/tool scopes, consume 2E budget contracts and require parent processing of necessary returned results before completion. Prove disabled entrypoints fail closed before this gate. Pause/revoke stops new delegation. Preserve the literal dependency on 2E until the pending human plan decision is approved. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/2D. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "tests/delegations.spec.ts",
+          "tests/subagent-scope.spec.ts"
+        ],
+        "modify": [
+          "src/app/delegations.ts",
+          "src/app/skill-catalog.ts",
+          "src/app/sessions.ts",
+          "src/core/assignments.ts"
+        ],
+        "test": [
+          "tests/delegations.spec.ts",
+          "tests/subagent-scope.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "0D",
+        "1H",
+        "2C",
+        "2E"
+      ],
+      "capabilities": [
+        "native.session-workspace",
+        "native.permission-preset",
+        "native.skill-read",
+        "native.global-skill-suppression",
+        "native.descendant-permissions"
+      ],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/2D",
+      "acceptance": [
+        "pnpm test -- tests/delegations.spec.ts tests/subagent-scope.spec.ts"
+      ],
+      "verification": [
+        "Tests demonstrate pre-gate disablement, persisted ancestry, intersected scope, rejected unauthorized reads and required result processing.",
+        "Real 0D descendant permission evidence is required separately; fixture tests cannot establish native inheritance.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": [
+        "Human decision pending: Task 2D consumes Task 2E budget contracts while Task 2E consumes Task 2D; retain both dependency edges."
+      ]
+    },
+    {
+      "id": "2E",
+      "title": "Add fair scheduling, budgets and background lifecycle",
+      "prompt": "Implement Task 2E: Add fair scheduling, budgets and background lifecycle. Implement project fairness, starvation protection, explicit wait reasons and independent model/subagent/shell/service budgets. Persist background owner/purpose/deadline/health/cleanup and reconcile after restart; timeout is not confirmed process exit. Pause and exhausted budget prevent new work. Keep the literal dependency on 2D until the pending human decision. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/2E. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "src/app/scheduler.ts",
+          "src/app/budgets.ts",
+          "tests/scheduler.spec.ts",
+          "tests/budgets.spec.ts"
+        ],
+        "modify": [
+          "src/app/passes.ts",
+          "src/core/assignments.ts"
+        ],
+        "test": [
+          "tests/scheduler.spec.ts",
+          "tests/budgets.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "2C",
+        "2D"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/2E",
+      "acceptance": [
+        "pnpm test -- tests/scheduler.spec.ts tests/budgets.spec.ts"
+      ],
+      "verification": [
+        "Tests establish fairness, budget exhaustion, pause, restart reconciliation and explicit background process-stop confirmation.",
+        "Separate counters and instance/project limits persist; live background work does not disappear merely because a worker slot or timeout ended.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": [
+        "Human decision pending: Task 2E consumes Task 2D while Task 2D consumes 2E budget contracts; retain both dependency edges."
+      ]
+    },
+    {
+      "id": "2F",
+      "title": "Add multi-repository identity and isolated code-task validation",
+      "prompt": "Implement Task 2F: Add multi-repository identity and isolated code-task validation. Namespace repository identity by account/resource/owner-repo/native number, with independent cursors/cache and project-scoped immutable subprocess/Git/worktree context. Test two repositories sharing a number and a repository linked to two projects. Run the planned code-resource validation in an isolated authorized worktree/profile and produce a human-reviewable PR artifact; no automatic merge, force push or automatic PR close. Keep private resource/deployment configuration outside versioned evidence. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/2F. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "tests/multi-repository.spec.ts",
+          "tests/github-read.spec.ts",
+          "tests/environment.spec.ts"
+        ],
+        "modify": [
+          "src/deployment.ts",
+          "src/app/execution-environment.ts",
+          "src/infra/commands.ts",
+          "src/infra/environment.ts",
+          "src/sources/github-trigger.ts",
+          "src/sources/github.ts"
+        ],
+        "test": [
+          "tests/multi-repository.spec.ts",
+          "tests/github-read.spec.ts",
+          "tests/environment.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "2A",
+        "2C"
+      ],
+      "capabilities": [
+        "native.session-workspace",
+        "native.permission-preset"
+      ],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/2F",
+      "acceptance": [
+        "pnpm test -- tests/multi-repository.spec.ts tests/github-read.spec.ts tests/environment.spec.ts",
+        "pnpm typecheck"
+      ],
+      "verification": [
+        "Repository/native-number collisions do not cross thread, task, cursor, cache or report identity; one repository mapped to two projects requires explicit task/assignment context.",
+        "Concurrent attempts retain independent cwd/account/PATH/Git/repository snapshots; validation yields a reviewable commit/PR without automated merge or private deployment information.",
+        "Run the original plan Task 11 isolated code-task acceptance with externally supplied authorized resource configuration; record sanitized exact commands and PR artifact evidence.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "2G",
+      "title": "Complete Web collaboration and exact-origin remote acceptance",
+      "prompt": "Implement Task 2G: Complete Web collaboration and exact-origin remote acceptance. Resolve the numbered src/client/* scope to the original Task 10 explicit project UI files. Deliver mobile project/task/resource/Artifact/conventions views with scoped cache, durable reconnect cursor and draft preservation. Configure one exact HTTPS Origin/Host externally and preserve host login/CSRF through the private-network reverse proxy. Verify authenticated read/write/stream/download, wrong-source rejection and reconnect from a real authorized remote device; do not version private origins or deployment paths. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/2G. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "src/client/project-list.tsx",
+          "src/client/project-resources.tsx",
+          "tests/tailscale-acceptance.spec.ts",
+          "docs/superpowers/verification/2026-11-01-tailscale.md"
+        ],
+        "modify": [
+          "src/client/route.ts",
+          "src/client/app.tsx",
+          "src/client/provider.tsx",
+          "src/client/api.ts",
+          "src/client/project-home.tsx",
+          "src/client/project-conversation.tsx",
+          "src/client/project-task.tsx",
+          "src/client/project-conventions.tsx",
+          "src/client/client.css",
+          "src/app/http.ts",
+          "src/app/events.ts"
+        ],
+        "test": [
+          "tests/tailscale-acceptance.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "0E",
+        "2A",
+        "2B",
+        "2F"
+      ],
+      "capabilities": [
+        "native.browser-bundle",
+        "native.client-slots",
+        "native.local-auth",
+        "native.transport"
+      ],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/2G",
+      "acceptance": [
+        "pnpm test -- tests/tailscale-acceptance.spec.ts",
+        "pnpm typecheck",
+        "pnpm build"
+      ],
+      "verification": [
+        "320–430px navigation, direct project links, refresh/back, independent project tabs, long content, input and project isolation pass.",
+        "Real remote device evidence covers valid auth plus unauthenticated/wrong-origin rejection, stream/download/reconnect and offline behavior; local fixtures or homepage 200 do not establish remote acceptance.",
+        "Run real tailnet-device acceptance for exact configured Origin/Host, authenticated stream/download and reconnect; record sanitized request/status evidence in the Tailscale verification report.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "3A",
+      "title": "Bind verified Feishu identity and NotificationTarget",
+      "prompt": "Implement Task 3A: Bind verified Feishu identity and NotificationTarget. Bind verified stable actors to project-scoped chat NotificationTargets with ready/not_ready/revoked state. Reuse identity/channel records and durable events, keep input Channel independent of output target, and reject wrong actor, revoked target or cross-project chat lookup. Pure binding tests require no external send or bot secret. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/3A. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "src/app/notification-targets.ts",
+          "tests/notification-targets.spec.ts"
+        ],
+        "modify": [
+          "src/sources/feishu.ts",
+          "src/sources/feishu-read.ts"
+        ],
+        "test": [
+          "tests/notification-targets.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "1I",
+        "2B"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/3A",
+      "acceptance": [
+        "pnpm test -- tests/notification-targets.spec.ts"
+      ],
+      "verification": [
+        "Verified identity binds the intended target; wrong actor/revocation/cross-project access fail closed.",
+        "Stored provenance and target readiness are explicit, and no external canary is inferred from fixture binding.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "3B",
+      "title": "Implement shared Feishu DM routing and answer correlation",
+      "prompt": "Implement Task 3B: Implement shared Feishu DM routing and answer correlation. Persist normalized input first, resolve known reply-to Attention/task mapping before explicit project, and store ambiguous/unowned messages unresolved without dispatch. Handle body/reply conflicts, native-event duplicates and bot self-message filtering; scope history/reads per message and project instead of broadcasting a shared thread. Correlate answers with current Attention versions and stable actors. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/3B. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "tests/feishu-routing.spec.ts"
+        ],
+        "modify": [
+          "src/sources/feishu-trigger.ts",
+          "src/sources/feishu-channel.ts",
+          "src/sources/feishu-read.ts",
+          "src/app/intake.ts"
+        ],
+        "test": [
+          "tests/feishu-routing.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "1I",
+        "1D",
+        "3A"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/3B",
+      "acceptance": [
+        "pnpm test -- tests/feishu-routing.spec.ts"
+      ],
+      "verification": [
+        "Known reply, explicit project, ambiguous/no project, body/reply conflict, duplicate event and unresolved input cases are deterministic.",
+        "Unresolved messages never dispatch; reply answers reach the correct task/Attention and cannot leak shared DM history between projects.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "3C",
+      "title": "Add active delivery, receipts and unknown reconciliation",
+      "prompt": "Implement Task 3C: Add active delivery, receipts and unknown reconciliation. Persist idempotent Delivery and project/task/attempt/Attention/plan mappings with native messageId and pending/sent/unknown/gone/reconciled state. Handle timeout after remote send without blind duplicate delivery; reconcile receipts and revoked/deleted chats after restart. A real authorized bot canary needs explicit external-send approval and sanitized native receipt evidence, separate from fixtures. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/3C. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "src/app/deliveries.ts",
+          "tests/delivery-reconciliation.spec.ts"
+        ],
+        "modify": [
+          "src/app/notifications.ts",
+          "src/sources/feishu-channel.ts",
+          "src/sources/registry.ts"
+        ],
+        "test": [
+          "tests/delivery-reconciliation.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "3A",
+        "3B",
+        "2B"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/3C",
+      "acceptance": [
+        "pnpm test -- tests/delivery-reconciliation.spec.ts"
+      ],
+      "verification": [
+        "Timeout-after-send, duplicate key, deleted chat and receipt lookup tests prevent duplicate work/delivery and preserve unknown until evidence resolves it.",
+        "Actual bot canary records native message receipt and reconciliation; sending alone never resolves Attention and fixtures never establish real delivery compatibility.",
+        "Only after explicit external-send approval, run one real bot delivery/receipt canary with externally supplied target configuration and record exact sanitized invocation/results.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    },
+    {
+      "id": "3D",
+      "title": "Add persistent attachments and cross-channel acceptance",
+      "prompt": "Implement Task 3D: Add persistent attachments and cross-channel acceptance. Obtain this task consumer own isolated real-host attachment evidence before relying on attachment behavior; 0E does not cover it. Persist bounded size/type/download-checked project/task-owned attachment Artifacts and backup inventory, with failed-download reconciliation. Test Web/Feishu confirmation continuity using the same plan/actor/intent authorization, target/Attention routing and delivery deduplication. This section owns graph-labeled 3E cross-channel acceptance; do not invent a 3E task. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/3D. No automatic merge or adjacent-scope work.",
+      "files": {
+        "create": [
+          "tests/attachment-ownership.spec.ts",
+          "tests/cross-channel-acceptance.spec.ts"
+        ],
+        "modify": [
+          "src/sources/feishu-image.ts",
+          "src/app/artifact-store.ts",
+          "src/app/backup.ts"
+        ],
+        "test": [
+          "tests/attachment-ownership.spec.ts",
+          "tests/cross-channel-acceptance.spec.ts"
+        ]
+      },
+      "dependsOn": [
+        "1G",
+        "3B",
+        "3C"
+      ],
+      "capabilities": [],
+      "baseBranch": "dev",
+      "expectedHead": "workbench/3D",
+      "acceptance": [
+        "pnpm test -- tests/attachment-ownership.spec.ts tests/cross-channel-acceptance.spec.ts"
+      ],
+      "verification": [
+        "Own native attachment probe establishes actual supported behavior independently of fixtures and 0E; missing/unsupported capability blocks attachment consumption and names repair owner/retest.",
+        "Tests cover ownership, size/type limits, failed download, backup inventory and duplicate cross-channel confirmation yielding one authorization/work item.",
+        "Increment 3 acceptance: Web-confirmed work notifies the bound target; replies resume only the mapped task/Attention; ambiguous inputs wait; duplicate/unknown sends do not duplicate work; attachments remain project-owned.",
+        "Run an isolated real-host attachment probe with outbound delivery disabled; record exact supported invocation, size/type/ownership results and cleanup as external capability evidence.",
+        "Exercise the authorized Web-to-Feishu confirmation/notification/reply continuity after 3C real delivery evidence; external sends require explicit approval.",
+        "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
+      ],
+      "blockedBy": []
+    }
+  ],
+  "notes": [
+    "Provenance: docs/superpowers/plans/2026-11-01-project-superagent-workbench-execution-ready.md fully defined numbered task sections are primary; docs/superpowers/plans/2026-11-01-project-superagent-workbench.md supplies architecture/contracts and the explicit client-file expansion for 2G. This manifest implements only task specifications, not live execution state.",
+    "This file is JSON, a valid YAML 1.2 subset, and must be parsed with built-in JSON.parse without a YAML dependency. Leading fields are version, revision, repository, capabilities and tasks. DispatchTask fields are restricted to the declared interface.",
+    "All capabilities start untested. External evidence may use passed, failed, unsupported, untested, not_applicable or explicitly approved amber. Fixture/test/type/package presence does not establish a native capability pass. Amber needs a recorded approved workaround for the specific consumer; no amber is approved here.",
+    "Preserve the literal 2D -> 2E -> 2D cycle from the numbered Consumes sections pending the human decision already requested. The D0 validator must report this cycle and production dispatch must fail closed; do not silently normalize it or claim the production graph validates.",
+    "The overview graph names 3E cross-channel acceptance without defining a Task 3E. The fully defined Task 3D includes attachments and cross-channel acceptance, so there is no 3E entry.",
+    "The overview and operational ordering abbreviate dependencies: 1B still requires 1A contracts despite wording suggesting parallel startup; 1L follows its full numbered acceptance dependencies. Pure contracts/storage are not gated by Session/skills/Web/remote probes. 2A depends on the specific Increment 1 contracts it consumes, rather than the aggregate 1L release task; increment release still requires 1L acceptance.",
+    "2G numbered scope src/client/* is expanded using original Task 10 to exact client files. project-list.tsx and project-resources.tsx are create; project-conventions.tsx is modify because revised 1J already assigns it. src/client/client.css is the repository's actual style entry, selected under original Task 10's explicit allowance to use the actual style entry.",
+    "Numbered sections contain create/modify ownership gaps: 1J modifies src/client/project-conventions.tsx although the original plan creates it in Task 10; 1K modifies notifications.ts while original Task 7 creates it; 2D modifies delegations.ts while original Task 6 creates it; 3B modifies app/intake.ts while original Task 4 creates it. Numbered file maps are preserved rather than silently assigning these new files to unrelated tasks. Resolve a missing-file create/modify classification before implementation within the same declared path, without widening scope.",
+    "Test paths listed as Create or Modify are also included under files.test to make focused verification explicit. 2F preserves the numbered Create classification for github-read.spec.ts and environment.spec.ts even though the original calls them Modify; check existing paths before implementing.",
+    "Conditional edits remain conditional: 0A pnpm-lock.yaml only after reproduced evidence proves a required repair; 0E tsdown.config.ts only for an evidenced bundle declaration failure. 0B preserves the numbered Modify classification for the host compatibility report even though the earlier file map calls it Create.",
+    "Commands copied exactly where specified; numbered sections saying focused tests are expanded to pnpm test -- followed by their exact test files, except external dispatcher tests use node --experimental-strip-types --test independently of root Vitest configuration. Manual probe/canary/release acceptance is recorded in verification rather than represented as an executable command. No probe selector or Feishu canary CLI absent from the plan is invented: those acceptance entries require the implementing task to record the exact supported command and actual output.",
+    "A reported 0A merge is not encoded as static completion. PR mergedAt, dev base, workbench task head, merge SHA, Ticket/message correlation and capability evidence belong to external runtime state. D4 must reconcile existing 0A evidence and obtain an approved substitute if the planned 0A canary would duplicate completed work.",
+    "Dispatcher remains an external process under ops with no src imports, Runtime injection, internal SQLite access, fabricated Ticket-create API, automatic PR merge or production dependency. Task delivery uses the existing trusted Feishu user entrypoint, not bot self-messages; no private chat ids, bot names, tokens, OAuth caches, absolute host paths or private deployment history are included.",
+    "External user-sender and active bot-delivery canaries require their stated authorization and real identity/receipt evidence. Dedicated D1 canary is a non-task message; D4 is the explicitly approved task-producing canary. Secrets, state caches, raw executable paths and deployment-specific origins/configuration remain outside Git. Version only sanitized verification evidence.",
+    "Each failed or unsupported required capability needs a finite repair with affected consumers, owner, exact retest command and re-entry condition. Unrelated tasks may proceed only on their own satisfied dependencies/capabilities; no static capability or blockedBy entry bypasses the current cycle or a manual Attention.",
+    "PR head contracts: 0A and D0 expectedHead identify their actual associated task branches without embedding merge completion state. Other workbench/<id> heads are declared planned branches and must match the actual task/Ticket association before dispatch. D0 creates the standalone README; D1 modifies it.",
+    "3D produces its own native.attachments probe evidence, so it has no entry-time native.attachments capability prerequisite. Its task-internal gate forbids attachment consumption until real isolated evidence is available; this avoids waiting for evidence the task itself must produce."
+  ]
+}
