@@ -26,7 +26,7 @@
 
 | 范围 | 已有可复用机制 | 证据与复用限制 |
 | --- | --- | --- |
-| 任务领域 | Ticket、Assignment、Input、Attention、Mandate、follow、评估与报告状态转换 | [model.ts](../../../src/core/model.ts#L125)、[engine.ts](../../../src/core/engine.ts#L69)、[evals.ts](../../../src/core/evals.ts#L70)；需改变授权、归属、多执行与完成语义 |
+| 任务领域 | Ticket、Assignment、Input、Attention、Mandate、follow、评估与报告状态转换 | [model.ts](../../../src/core/model.ts#L126)、[engine.ts](../../../src/core/engine.ts#L75)、[evals.ts](../../../src/core/evals.ts#L71)；需改变授权、归属、多执行与完成语义 |
 | 事务存储 | SQLite WAL/FULL、savepoint、afterCommit、活动工作集索引 | [store.ts](../../../src/app/store.ts#L64)；扩展 schema 与活动索引，保持单写者 |
 | 持久调度 | Effects 的 kind/key 合并、generation、防覆盖、顺序、退避与 Later | [effects.ts](../../../src/app/effects.ts#L43)、[passes.ts](../../../src/app/passes.ts#L17)；不是项目公平调度或外部精确一次保证 |
 | 通知队列 | Outbox 稳定业务消息 ID、顺序、receipt、暂停与 Source 未就绪处理 | [outbox.ts](../../../src/app/outbox.ts#L17)、[store.ts](../../../src/app/store.ts#L251)；缺原生消息映射与未知结果核对 |
@@ -41,7 +41,7 @@
 
 **A01 · 全链路项目归属和业务记录【改造合同＋新增】**
 
-现有 [Repositories](../../../src/core/ports.ts#L105)、[schema](../../../src/app/store.ts#L70) 和 [Ticket](../../../src/core/model.ts#L276) 没有 Project、主对话、知识、不可变方案授权、成果、Delivery 等完整合同。现有 [DomainEvents](../../../src/core/ports.ts#L85) 是事件接口，不是可查询的持久业务历史。
+现有 [Repositories](../../../src/core/ports.ts#L105)、[schema](../../../src/app/store.ts#L70) 和 [Ticket](../../../src/core/model.ts#L277) 没有 Project、主对话、知识、不可变方案授权、成果、Delivery 等完整合同。现有 [DomainEvents](../../../src/core/ports.ts#L85) 是事件接口，不是可查询的持久业务历史。
 
 新增规格实体及其存储/投影；任务、Assignment、输入、Attention、资源、成果、通知、事件、缓存和工具请求都必须从服务端固定上下文解析归属。主对话与任务详情引用同一规范化消息，DSH transcript 保留执行细节。增量 1 即以两个项目验证交叉查询和操作被拒绝，不能推迟到 UI 完成后补字段。
 
@@ -51,7 +51,7 @@
 
 **A03 · Mandate 不等于方案授权【改造合同＋新增】**
 
-[Mandate](../../../src/core/model.ts#L125) 和 [Eval](../../../src/core/evals.ts#L70) 已有 gate、basis、policyVersion、actor 与重复接受防护，可复用其来源记录方法；当前 accept 语义不能直接代表用户确认了具体方案。
+[Mandate](../../../src/core/model.ts#L126) 和 [Eval](../../../src/core/evals.ts#L71) 已有 gate、basis、policyVersion、actor 与重复接受防护，可复用其来源记录方法；当前 accept 语义不能直接代表用户确认了具体方案。
 
 新增不可变 PlanRevision/Authorization，事务唯一键为 `(projectId, planRevisionId, actorId, confirmationIntent)`，并绑定同一 Task。普通赞同、过期确认、被替代方案、重复消息与“明确再运行一次”分别处理。增量 1 即建立业务幂等，Web 重试只创建一个执行目标；增量 3 接入飞书时复用同一合同，跨入口重发确认也不能重复派发。
 
@@ -75,7 +75,7 @@
 
 **A07 · 全局调度需要项目公平性与可解释等待【改造合同】**
 
-[Engine](../../../src/core/engine.ts#L69) 和 [Passes](../../../src/app/passes.ts#L17) 执行全局扫描；[Effects](../../../src/app/effects.ts#L103) 按 kind 并发/顺序处理，不能直接满足项目级公平。沿用持久任务和 pass 合并，增加 project-aware 队列、实例总预算、项目占用、依赖/资源等待原因及饥饿防护。项目 coordinator 同时只能有一个决策写者，不能用全局模型锁让所有项目互相阻塞。
+[Engine](../../../src/core/engine.ts#L75) 和 [Passes](../../../src/app/passes.ts#L17) 执行全局扫描；[Effects](../../../src/app/effects.ts#L103) 按 kind 并发/顺序处理，不能直接满足项目级公平。沿用持久任务和 pass 合并，增加 project-aware 队列、实例总预算、项目占用、依赖/资源等待原因及饥饿防护。项目 coordinator 同时只能有一个决策写者，不能用全局模型锁让所有项目互相阻塞。
 
 **A08 · GitHub 就绪门禁贯穿启动和工具【改造合同】**
 
@@ -153,7 +153,7 @@ ExecutionContextManifest 保存实际已解析规则正文或可还原的内容�
 
 **A20 · 主动通知与原始回复 Channel 分离【改造合同＋新增】**
 
-[feishu-channel](../../../src/sources/feishu-channel.ts#L18) 依赖已有 messageId 回复；[SourceChannel.send](../../../src/sources/kind.ts#L105) 只返回 sent/gone，并未暴露原生发送回执。已有 Outbox receipt 因而不能可靠建立“机器人消息→项目/任务/Attention”索引。
+[feishu-channel](../../../src/sources/feishu-channel.ts#L20) 依赖已有 messageId 回复；[SourceChannel.send](../../../src/sources/kind.ts#L53) 只返回 sent/gone，并未暴露原生发送回执。已有 Outbox receipt 因而不能可靠建立“机器人消息→项目/任务/Attention”索引。
 
 新增稳定 NotificationTarget、Delivery、原生 messageId 与 project/task/attempt/Attention/PlanRevision 映射，Web 任务可主动通知已绑定 DM。保留稳定幂等键；发送成功但映射未落盘时按原生幂等/查询补齐，否则标记 unknown/待核对，收到无映射回复先保存。通知已发送不等于 Attention 已解决。
 
@@ -167,11 +167,11 @@ ExecutionContextManifest 保存实际已解析规则正文或可还原的内容�
 
 [Feishu 图片](../../../src/sources/feishu-image.ts#L47) 返回 DSH attachment 引用并清理临时目录，不等于用户已拥有 Artifact 或可从手机下载。关联 ChannelMessage、原始附件、存储对象、项目资源和成果版本，覆盖备份、保留和权限校验。
 
-[checkedImText](../../../src/sources/feishu-channel.ts#L18) 的平台长度检查可保留；通知增加明确项目/任务、目标允许字段、内容长度与摘要/认证详情链接。私有资料不能因为共用模板转发到 GitHub 等外部渠道。无需为首版增加复杂隐私系统，但各目标的可见内容边界要明确。
+[checkedImText](../../../src/infra/text.ts#L12) 的出站消息字数检查可保留；通知增加明确项目/任务、目标允许字段、内容长度与摘要/认证详情链接。私有资料不能因为共用模板转发到 GitHub 等外部渠道。无需为首版增加复杂隐私系统，但各目标的可见内容边界要明确。
 
 **A23 · 旧代码交付副作用规则不能悄悄继承【改造合同】**
 
-[work](../../../prompts/work.md#L29) 默认提交/推送/PR；[team delivery](../../../prompts/team/delivery.md#L9) 有小变更自动合并规则，另有 [重写提交、强推、同 tree 继承 approval](../../../prompts/team/delivery.md#L17) 和 [自动关闭被人类工作覆盖的 PR](../../../prompts/team/delivery.md#L26)。这些是实际内置政策，不能作为“只拆分 GitHub 技能”而原样传给新任务。
+[work](../../../prompts/work.md#L29) 默认提交/推送/PR；[team delivery](../../../prompts/team/delivery.md#L12) 有配置 merge CLI 后按条件启用小变更自动合并的规则，另有 [重写提交、强推、同 tree 继承 approval](../../../prompts/team/delivery.md#L17) 和 [自动关闭被人类工作覆盖的 PR](../../../prompts/team/delivery.md#L26)。这些是实际内置政策，不能作为“只拆分 GitHub 技能”而原样传给新任务。
 
 新版本按已确认的人工合并约定替换；提交、推送、重写历史、关闭 PR 和其他外部变更必须符合实际授权与当前远端状态。不能用技能、旧提示词或 same-tree 推断替代用户授权/真实审核状态。历史版本保留追溯；旧执行切换须经过检查点与现场核对。
 
