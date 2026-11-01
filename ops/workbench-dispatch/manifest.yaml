@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "revision": "workbench-v1",
+  "revision": "workbench-v2",
   "repository": "PHLens/dsh-superagent-prototype",
   "capabilities": [
     {
@@ -726,7 +726,7 @@
     {
       "id": "D0",
       "title": "Define and validate the versioned dispatch manifest",
-      "prompt": "Implement Task D0: Define and validate the versioned dispatch manifest. Implement DispatchTask/DispatchState/CapabilityState/DeliveryRecord and manifest validation/topological sorting outside the application bundle with no src imports or new production dependency. Manifest content is JSON, a YAML 1.2 subset, parsed with built-in JSON.parse. Require unique ids, known dependencies/capabilities, exact branch/base and nonempty acceptance. Detect and report cycles without rewriting the pending 2D/2E human decision; the current manifest must be rejected as cyclic until explicitly approved correction. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from agent/versioned-task-manifest-563a3ddfae96. No automatic merge or adjacent-scope work.",
+      "prompt": "Implement Task D0: Define and validate the versioned dispatch manifest. Implement DispatchTask/DispatchState/CapabilityState/DeliveryRecord and manifest validation/topological sorting outside the application bundle with no src imports or new production dependency. Manifest content is JSON, a YAML 1.2 subset, parsed with built-in JSON.parse. Require unique ids, known dependencies/capabilities, exact branch/base and nonempty acceptance. Detect and report cycles. Follow the resolved contract order: 2E depends only on 2C, and 2D depends on 2E. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from agent/versioned-task-manifest-563a3ddfae96. No automatic merge or adjacent-scope work.",
       "files": {
         "create": [
           "ops/workbench-dispatch/manifest.yaml",
@@ -752,13 +752,11 @@
       ],
       "verification": [
         "Focused fixtures reject duplicate ids, unknown references, missing fields/branch/base/acceptance and cycles, and accept an acyclic valid fixture.",
-        "The current full manifest check is expected to fail with the literal 2D -> 2E -> 2D cycle until the pending human-approved amendment; preserve this expected diagnostic and do not claim the production DAG passes.",
+        "The full manifest check and focused tests must pass; cyclic fixtures must still fail with an explicit cycle path.",
         "All 33 defined task ids appear once; static capabilities start untested. Runtime Ticket/PR/capability observations are stored externally.",
         "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
       ],
-      "blockedBy": [
-        "Human decision pending: numbered sections require both 2D -> 2E and 2E -> 2D. Preserve both until an explicitly approved plan correction; production DAG validation/automatic dispatch cannot be declared ready."
-      ]
+      "blockedBy": []
     },
     {
       "id": "D1",
@@ -904,11 +902,10 @@
         "Dry-run sends nothing; authorized canary yields exactly one correlated Ticket and native message receipt. Live merged state is observed externally, never inferred from this static file.",
         "Only merged expected PRs release dependencies; blocked capabilities/manual Attention prevent sends; watch stays at most three in-flight tasks and pause/restart does not duplicate work.",
         "Sanitized canary report records exact commands, authorization/correlation evidence, dependency withholding and recovery, without private deployment details.",
-        "After approved single-task canary and corrected graph: node --experimental-strip-types ops/workbench-dispatch/src/main.ts --watch",
+        "After approved single-task canary and a passing manifest check: node --experimental-strip-types ops/workbench-dispatch/src/main.ts --watch",
         "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
       ],
       "blockedBy": [
-        "Production graph contains the pending 2D/2E cycle; automatic flow requires its approved correction.",
         "A reported prior 0A merge must be reconciled against external live evidence before choosing the canary; no duplicate 0A dispatch is authorized by this manifest."
       ]
     },
@@ -1030,7 +1027,7 @@
     {
       "id": "2D",
       "title": "Enable scoped subagent registration and result processing",
-      "prompt": "Implement Task 2D: Enable scoped subagent registration and result processing. Create parent-child delegation records before starting children, intersect parent/child project/resource/tool scopes, consume 2E budget contracts and require parent processing of necessary returned results before completion. Prove disabled entrypoints fail closed before this gate. Pause/revoke stops new delegation. Preserve the literal dependency on 2E until the pending human plan decision is approved. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/2D. No automatic merge or adjacent-scope work.",
+      "prompt": "Implement Task 2D: Enable scoped subagent registration and result processing. Create parent-child delegation records before starting children, intersect parent/child project/resource/tool scopes, consume the completed 2E budget contracts and require parent processing of necessary returned results before completion. Prove disabled entrypoints fail closed before this gate. Pause/revoke stops new delegation. Task 2E is the predecessor because it defines the budget contracts consumed here. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/2D. No automatic merge or adjacent-scope work.",
       "files": {
         "create": [
           "tests/delegations.spec.ts",
@@ -1070,14 +1067,12 @@
         "Real 0D descendant permission evidence is required separately; fixture tests cannot establish native inheritance.",
         "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
       ],
-      "blockedBy": [
-        "Human decision pending: Task 2D consumes Task 2E budget contracts while Task 2E consumes Task 2D; retain both dependency edges."
-      ]
+      "blockedBy": []
     },
     {
       "id": "2E",
       "title": "Add fair scheduling, budgets and background lifecycle",
-      "prompt": "Implement Task 2E: Add fair scheduling, budgets and background lifecycle. Implement project fairness, starvation protection, explicit wait reasons and independent model/subagent/shell/service budgets. Persist background owner/purpose/deadline/health/cleanup and reconcile after restart; timeout is not confirmed process exit. Pause and exhausted budget prevent new work. Keep the literal dependency on 2D until the pending human decision. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/2E. No automatic merge or adjacent-scope work.",
+      "prompt": "Implement Task 2E: Add fair scheduling, budgets and background lifecycle. Implement project fairness, starvation protection, explicit wait reasons and independent model/subagent/shell/service budgets. Persist background owner/purpose/deadline/health/cleanup and reconcile after restart; timeout is not confirmed process exit. Pause and exhausted budget prevent new work. Consume Task 2C and provide the budget contracts required by Task 2D. Follow the execution-ready numbered task section and original architecture contracts. Limit changes to the declared file map; use failure-first focused tests for implementation, then the acceptance commands. Preserve database authority, project ownership, immutable authorization and explicit recovery. Use an isolated development state, keep credentials and deployment-specific context outside Git and task text, and provide a human-reviewable PR to dev from workbench/2E. No automatic merge or adjacent-scope work.",
       "files": {
         "create": [
           "src/app/scheduler.ts",
@@ -1095,8 +1090,7 @@
         ]
       },
       "dependsOn": [
-        "2C",
-        "2D"
+        "2C"
       ],
       "capabilities": [],
       "baseBranch": "dev",
@@ -1109,9 +1103,7 @@
         "Separate counters and instance/project limits persist; live background work does not disappear merely because a worker slot or timeout ended.",
         "Completion requires the expected PR head merged into dev with mergedAt and merge SHA, plus the stated verification evidence; an open or closed-unmerged PR and a worker ready report do not complete this task."
       ],
-      "blockedBy": [
-        "Human decision pending: Task 2E consumes Task 2D while Task 2D consumes 2E budget contracts; retain both dependency edges."
-      ]
+      "blockedBy": []
     },
     {
       "id": "2F",
@@ -1366,7 +1358,7 @@
     "Provenance: docs/superpowers/plans/2026-11-01-project-superagent-workbench-execution-ready.md fully defined numbered task sections are primary; docs/superpowers/plans/2026-11-01-project-superagent-workbench.md supplies architecture/contracts and the explicit client-file expansion for 2G. This manifest implements only task specifications, not live execution state.",
     "This file is JSON, a valid YAML 1.2 subset, and must be parsed with built-in JSON.parse without a YAML dependency. Leading fields are version, revision, repository, capabilities and tasks. DispatchTask fields are restricted to the declared interface.",
     "All capabilities start untested. External evidence may use passed, failed, unsupported, untested, not_applicable or explicitly approved amber. Fixture/test/type/package presence does not establish a native capability pass. Amber needs a recorded approved workaround for the specific consumer; no amber is approved here.",
-    "Preserve the literal 2D -> 2E -> 2D cycle from the numbered Consumes sections pending the human decision already requested. The D0 validator must report this cycle and production dispatch must fail closed; do not silently normalize it or claim the production graph validates.",
+    "The resolved interface contract order is 2C -> 2E -> 2D: 2E depends only on 2C and produces budget contracts consumed by 2D. The execution-ready plan and this inventory use that order. The validator still rejects every dependency cycle.",
     "The overview graph names 3E cross-channel acceptance without defining a Task 3E. The fully defined Task 3D includes attachments and cross-channel acceptance, so there is no 3E entry.",
     "The overview and operational ordering abbreviate dependencies: 1B still requires 1A contracts despite wording suggesting parallel startup; 1L follows its full numbered acceptance dependencies. Pure contracts/storage are not gated by Session/skills/Web/remote probes. 2A depends on the specific Increment 1 contracts it consumes, rather than the aggregate 1L release task; increment release still requires 1L acceptance.",
     "2G numbered scope src/client/* is expanded using original Task 10 to exact client files. project-list.tsx and project-resources.tsx are create; project-conventions.tsx is modify because revised 1J already assigns it. src/client/client.css is the repository's actual style entry, selected under original Task 10's explicit allowance to use the actual style entry.",
@@ -1377,7 +1369,7 @@
     "A reported 0A merge is not encoded as static completion. PR mergedAt, dev base, workbench task head, merge SHA, Ticket/message correlation and capability evidence belong to external runtime state. D4 must reconcile existing 0A evidence and obtain an approved substitute if the planned 0A canary would duplicate completed work.",
     "Dispatcher remains an external process under ops with no src imports, Runtime injection, internal SQLite access, fabricated Ticket-create API, automatic PR merge or production dependency. Task delivery uses the existing trusted Feishu user entrypoint, not bot self-messages; no private chat ids, bot names, tokens, OAuth caches, absolute host paths or private deployment history are included.",
     "External user-sender and active bot-delivery canaries require their stated authorization and real identity/receipt evidence. Dedicated D1 canary is a non-task message; D4 is the explicitly approved task-producing canary. Secrets, state caches, raw executable paths and deployment-specific origins/configuration remain outside Git. Version only sanitized verification evidence.",
-    "Each failed or unsupported required capability needs a finite repair with affected consumers, owner, exact retest command and re-entry condition. Unrelated tasks may proceed only on their own satisfied dependencies/capabilities; no static capability or blockedBy entry bypasses the current cycle or a manual Attention.",
+    "Each failed or unsupported required capability needs a finite repair with affected consumers, owner, exact retest command and re-entry condition. Unrelated tasks may proceed only on their own satisfied dependencies/capabilities; no static capability or blockedBy entry bypasses an unsatisfied dependency or a manual Attention.",
     "PR head contracts: 0A and D0 expectedHead identify their actual associated task branches without embedding merge completion state. Other workbench/<id> heads are declared planned branches and must match the actual task/Ticket association before dispatch. D0 creates the standalone README; D1 modifies it.",
     "3D produces its own native.attachments probe evidence, so it has no entry-time native.attachments capability prerequisite. Its task-internal gate forbids attachment consumption until real isolated evidence is available; this avoids waiting for evidence the task itself must produce."
   ]

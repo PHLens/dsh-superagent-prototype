@@ -2,7 +2,7 @@
 
 This directory is an external operations tool, separate from the Superagent runtime and its bundle. D0 defines the inventory and validates it; it does not send messages, create tickets, observe services, write application SQLite, or infer that a PR has merged. No credentials or service configuration are needed to run these checks.
 
-The source of task scope is the numbered task sections of [the execution-ready plan](../../docs/superpowers/plans/2026-11-01-project-superagent-workbench-execution-ready.md), with the [original implementation plan](../../docs/superpowers/plans/2026-11-01-project-superagent-workbench.md) supplying detailed later-increment files and acceptance cases. Neither historical plan is modified by this tool.
+The source of task scope is the numbered task sections of [the execution-ready plan](../../docs/superpowers/plans/2026-11-01-project-superagent-workbench-execution-ready.md), with the [original implementation plan](../../docs/superpowers/plans/2026-11-01-project-superagent-workbench.md) supplying detailed later-increment files and acceptance cases. The execution-ready plan and manifest use the resolved interface contract order described below; the original implementation plan remains unchanged.
 
 ## Format and checks
 
@@ -27,8 +27,8 @@ Every task declares `capabilities`, including an empty array for work with no na
 
 `expectedHead` declares the PR head to be checked, not evidence that a PR exists. Live ticket/PR association, merge SHAs, receipts and attempts belong in external state, not in the versioned inventory. `DeliveryRecord` keeps an unknown send distinct from task progress; reconciliation must precede a retry.
 
-## Source-plan conflict
+## Source-plan dependency order
 
-The numbered sections currently make `2D` depend on budget contracts from `2E`, while `2E` declares a dependency on `2D`. This revision preserves those source dependencies so validation fails closed with `2D -> 2E -> 2D`; an owner decision is required before the inventory is a usable DAG. The implementation and PR remain incomplete until that decision is applied and the full manifest check and focused tests pass.
+The execution-ready plan resolves the interface order as `2C -> 2E -> 2D`: Task `2E` defines the scheduling and budget contracts using Task `2C`, and Task `2D` consumes those contracts. The manifest retains cycle detection so future edits fail closed instead of silently accepting a cyclic graph.
 
 The overview's `3E` has no numbered implementation task. The manifest includes the defined `3A`–`3D` tasks; `3D` owns cross-channel acceptance. `D4` is included as the defined operational acceptance task, with explicit approval prerequisites; this tool never runs its external sends.
