@@ -95,8 +95,8 @@
 1B + 0C + 1H ── 1I ── 1K Web/API/notification
 1G + 1I + 1K + 1L ── Increment 1 release gate
 
-Increment 2: 2A resources; 2B durable events; 2C collaboration; 2D subagents;
-             2E budgets/scheduler; 2F repositories; 2G remote Web/Tailscale
+Increment 2: 2A resources; 2B durable events; 2C collaboration; 2E budgets/scheduler;
+             2D subagents; 2F repositories; 2G remote Web/Tailscale
 Increment 3: 3A identity/targets; 3B routing; 3C delivery receipts;
              3D attachments; 3E cross-channel acceptance
 ```
@@ -498,8 +498,8 @@ A release gate is `green` only when all required consumer tasks and their accept
 - Create: `tests/delegations.spec.ts`, `tests/subagent-scope.spec.ts`
 
 **Interfaces:**
-- Consumes: Task 0D, 1H, 2C and 2E budget contracts.
-- Produces: parent-child delegation, intersected scope, processed result requirement and fail-closed behavior on pause/revoke.
+- Consumes: Task 0D, 1H, 2C and the completed Task 2E budget contracts.
+- Produces: parent-child delegation, intersected scope, processed result requirement and fail-closed behavior on pause/revoke. Task 2E is the predecessor because it defines the budget contracts consumed here.
 
 - [ ] **Step 1:** Test that disabled entrypoints fail closed before this task's gate, then test parent-child scope and result processing.
 - [ ] **Step 2:** Implement registration and lifecycle.
@@ -513,8 +513,8 @@ A release gate is `green` only when all required consumer tasks and their accept
 - Create: `tests/scheduler.spec.ts`, `tests/budgets.spec.ts`
 
 **Interfaces:**
-- Consumes: Task 2C and 2D.
-- Produces: per-project fairness, model/shell/service budgets, background stop confirmation and restart reconciliation.
+- Consumes: Task 2C.
+- Produces: per-project fairness, model/shell/service budgets, background stop confirmation and restart reconciliation. Task 2D consumes these budget contracts, so 2E must complete before 2D.
 
 - [ ] **Step 1:** Test fairness, budget exhaustion, pause and background process confirmation.
 - [ ] **Step 2:** Implement scheduler and budget accounting.
