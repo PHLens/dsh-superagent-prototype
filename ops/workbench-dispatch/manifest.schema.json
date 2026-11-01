@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "External workbench dispatch manifest v1",
+  "description": "Structural schema. Duplicate ids, unknown references and dependency cycles are additionally checked by src/manifest.ts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "revision", "repository", "notes", "capabilities", "tasks"],
+  "properties": {
+    "version": { "const": 1 },
+    "revision": { "$ref": "#/$defs/text" },
+    "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+    "notes": { "$ref": "#/$defs/strings" },
+    "capabilities": { "type": "array", "items": { "$ref": "#/$defs/capability" } },
+    "tasks": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/task" } }
+  },
+  "$defs": {
+    "text": { "type": "string", "minLength": 1, "pattern": "\\S" },
+    "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$" },
+    "strings": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/text" } },
+    "paths": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^(?![/\\\\~])(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)\\S+$" }
+    },
+    "files": {
+      "type": "object", "minProperties": 1, "additionalProperties": false,
+      "properties": {
+        "create": { "$ref": "#/$defs/paths" },
+        "modify": { "$ref": "#/$defs/paths" },
+        "test": { "$ref": "#/$defs/paths" }
+      }
+    },
+    "capability": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "status", "description"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "status": { "enum": ["passed", "failed", "unsupported", "untested", "not_applicable", "amber"] },
+        "description": { "$ref": "#/$defs/text" }
+      }
+    },
+    "task": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "title", "prompt", "files", "dependsOn", "capabilities", "baseBranch", "expectedHead", "acceptance", "verification", "blockedBy"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "title": { "$ref": "#/$defs/text" },
+        "prompt": { "$ref": "#/$defs/text" },
+        "files": { "$ref": "#/$defs/files" },
+        "dependsOn": { "$ref": "#/$defs/strings" },
+        "capabilities": { "$ref": "#/$defs/strings" },
+        "baseBranch": { "const": "dev" },
+        "expectedHead": { "type": "string", "minLength": 1, "pattern": "\\S" },
+        "acceptance": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/text" } },
+        "verification": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/text" } },
+        "blockedBy": { "$ref": "#/$defs/strings" }
+      }
+    }
+  }
+}
