@@ -53,7 +53,7 @@
 
 [Mandate](../../../src/core/model.ts#L125) 和 [Eval](../../../src/core/evals.ts#L70) 已有 gate、basis、policyVersion、actor 与重复接受防护，可复用其来源记录方法；当前 accept 语义不能直接代表用户确认了具体方案。
 
-新增不可变 PlanRevision/Authorization，事务唯一键为 `(projectId, planRevisionId, actorId, confirmationIntent)`，并绑定同一 Task。普通赞同、过期确认、被替代方案、重复消息与“明确再运行一次”分别处理。增量 1 就应阻止 Web 重试与飞书重发形成两个执行目标。
+新增不可变 PlanRevision/Authorization，事务唯一键为 `(projectId, planRevisionId, actorId, confirmationIntent)`，并绑定同一 Task。普通赞同、过期确认、被替代方案、重复消息与“明确再运行一次”分别处理。增量 1 即建立业务幂等，Web 重试只创建一个执行目标；增量 3 接入飞书时复用同一合同，跨入口重发确认也不能重复派发。
 
 **A04 · 单任务多 Assignment 涉及索引和整个执行适配器【改造合同】**
 
