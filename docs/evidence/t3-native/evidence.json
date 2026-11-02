@@ -1,0 +1,65 @@
+{
+  "sourceHead": "f814e40da4ca69e11356b7b743eaa575b43d93b8",
+  "baselineHead": "bf12d02e47234ab2422133fcc7ffc8cd1054f46e",
+  "baselineMerge": "998b62cdc242232bad49ff8dea5dc930c07d167c",
+  "host": "DSH 0.2.1-rc.5",
+  "provider": "openai",
+  "model": "gpt-6.1-sol",
+  "browser": "CUA in-app browser",
+  "viewport": {
+    "width": 1280,
+    "height": 720
+  },
+  "theme": "native dark, no token overrides",
+  "position": "project panel at bottom in each capture",
+  "sameProject": true,
+  "sameMessages": true,
+  "messagesHash": "26705e5f8e39456c3184b8bf8f5a43e93413569c23b50dfa079ed653fc8e9d59",
+  "comparison": "real DSH hosts using same saved project/messages/plan snapshot; baseline reads this snapshot only, creation tested separately on after",
+  "confirmation": {
+    "at": "2026-11-02T16:15:09.964Z",
+    "counts": {
+      "tickets": 1,
+      "authorizations": 1,
+      "executionTargets": 1,
+      "assignments": 1
+    },
+    "stage": "confirmed",
+    "waitingReason": "executor-unavailable",
+    "planRevision": 1,
+    "actor": {
+      "source": "web",
+      "id": "owner"
+    },
+    "authorizationMessage": {
+      "id": "d1f947a3-ec29-4abc-a0ee-8b7614e5dd80",
+      "text": "按这个方案做"
+    },
+    "originalRequestSaved": true,
+    "confirmationMessages": [
+      {
+        "id": "d1f947a3-ec29-4abc-a0ee-8b7614e5dd80",
+        "status": "saved"
+      },
+      {
+        "id": "a66d0ede-fd70-4d46-b4fa-b672648d6e44",
+        "status": "saved"
+      }
+    ],
+    "noWorkerStarted": true
+  },
+  "screenshots": {
+    "before": {
+      "file": "before.jpg",
+      "sha256": "a125c6fb5a2a8abe1395f7e3d814072dea4848d6b6e63c59c51c6d4237295f9f"
+    },
+    "after": {
+      "file": "after.jpg",
+      "sha256": "7cc725450fcb0489cd4568b94f024319535af2ea232b3260a6b3288307ee865e"
+    },
+    "confirmed": {
+      "file": "confirmed.jpg",
+      "sha256": "e6ebef7309486452ddc6a8f553e4ca6e1fd366da76a1d2ba2f0bfebf2673aed3"
+    }
+  }
+}
