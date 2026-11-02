@@ -32,7 +32,7 @@ const TRANSIENT_TRIES = 3, TRANSIENT_BACKOFF_MS = 15_000
 /** How long a worker's background work may run on after its turn ended before it is stopped and the worker reported waiting. */
 const BACKGROUND_LIMIT_MS = 30 * 60_000
 /** How long a host stop waits for the workers' background work to stop. */
-const SHUTDOWN_STOP_MS = 10_000
+const SHUTDOWN_STOP_MS = 1_000
 /** How long a worker that goes on after a passing failure waits for a worker slot, or for processing to resume, between looks. */
 const SLOT_WAIT_MS = 5000
 /** True when an input comes from a person (a non-context human trigger or a direct text input such as a status request). */
@@ -59,7 +59,9 @@ const ticketWorktreeName = (name: string, id: string): string => `${WorktreeName
 /** Host dependencies used by `DshExecutor`. */
 export interface ExecutorHost {
   readonly attempts?: ExecutionAttempts
+  readonly masterId?: string
   checkpointFiles?(ticket: Ticket): readonly string[]
+  reportReady?(ticket: Ticket, assignment: Assignment, attempt: Attempt): boolean
   /** DSH Cordis context: agents and their events, and the subprocess service used to run prepare commands. */
   readonly context: Context
   /** Where the Executor reports what happened to Assignments and Inputs. */
@@ -292,7 +294,7 @@ export class DshExecutor implements Executor {
         if (existing?.status === 'reconcile' || this.projectLaunching.has(ticket.id)) continue
         // A ready report with an independent semantic gate is durable evidence. Resume may continue the judgment,
         // but must not re-submit the completed worker prompt or redo file actions.
-        if (assignment.report?.state === 'ready' && ['semantic-review', 'needs_judgment', 'unresolved-items', 'changes_required'].includes(assignment.waitingReason ?? '')) continue
+        if (existing && this.host.reportReady?.(ticket, assignment, existing) && ['semantic-review', 'needs_judgment', 'unresolved-items', 'changes_required'].includes(assignment.waitingReason ?? '')) continue
         if (attempts.all().some(item => item.ticketId === ticket.id && item.assignmentId !== assignment.id && item.status === 'running' && this.host.context.agents.get(item.sessionId as SessionId)?.status === 'running')) { assignment.waitingReason = 'worker-slot'; this.host.store.tickets.save(ticket); continue }
         if (this.host.paused()) { assignment.waitingReason = 'processing-paused'; this.host.store.tickets.save(ticket); continue }
         if (!assignment.contract!.inputs.every(input => input.kind !== 'dependency' || this.host.store.tickets.get(input.ticketId)?.assignments.some(item => item.id === input.assignmentId && item.state === 'ended' && item.report?.state === 'ready'))) {
@@ -313,7 +315,7 @@ export class DshExecutor implements Executor {
       await this.stopped(ticketId)
       ticket = this.host.store.tickets.get(ticketId)!; assignment = ticket.assignments.find(item => item.id === assignmentId)!
       if (this.held(ticket) || this.host.closing() || this.host.paused()) return
-      attempt = attempts.prepare(attempts.allocate(ticket, assignment))
+      attempt = attempts.prepare(attempts.allocate(ticket, assignment, { fresh: attempts.all().findLast(item => item.assignmentId === assignment.id)?.status === 'ended' }))
       const agent = await this.host.sessions.ensure(attempt.sessionId, attempt.cwd, `Project worker: ${ticket.title}`, 'worker')
       attempts.resolve(agent.id)
       if (this.host.closing() || this.host.paused() || this.held(this.host.store.tickets.get(ticketId)!)) return
@@ -357,7 +359,7 @@ export class DshExecutor implements Executor {
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
   constructor(private readonly host: ExecutorHost) {
-    this.slots = new WorkerSlots(() => [...new Set([...host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => ticket.id), ...host.attempts?.all().filter(item => item.status === 'running' && host.context.agents.get(item.sessionId as SessionId)?.status === 'running').map(item => item.ticketId) ?? []])],
+    this.slots = new WorkerSlots(() => [...new Set([...host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => ticket.id), ...host.attempts?.all().filter(item => item.status === 'running' && (host.context.agents.get(item.sessionId as SessionId)?.status === 'running' || runningJobs(host.context, item.sessionId).length > 0)).map(item => item.ticketId) ?? []])],
       () => host.store.settings().executor.maxWorkers)
     // Each launch reserves a worker slot so launches run concurrently while slots are free.
     host.effects.handle('launch', payload => this.launchQueued(payload), { limit: () => host.paused() ? 0 : this.slots.launches(),
@@ -522,6 +524,7 @@ export class DshExecutor implements Executor {
       return
     }
     agent.cancel({ kind: 'user' }, { keepInbox: false })
+    this.projectObserved.delete(attempt.id)
     this.stopWork(ticketId, 'stopped', false, attempt.sessionId)
     this.left.get(ticketId)?.collect.abort(); this.left.delete(ticketId); this.personal.delete(ticketId)
     this.track(ticketId, agent.whenIdle().then(() => {
@@ -553,11 +556,16 @@ export class DshExecutor implements Executor {
    */
   async shutdown(): Promise<boolean> {
     await Promise.allSettled(this.projectLaunching.values())
-    const ids = [...this.host.store.tickets.list().filter(ticket => !ticket.projectId).map(ticket => workerSessionId(ticket.id)), ...this.host.attempts?.all().map(item => item.sessionId) ?? []]
+    const ids = [...(this.host.masterId ? [this.host.masterId] : []), ...this.host.store.tickets.list().filter(ticket => !ticket.projectId).map(ticket => workerSessionId(ticket.id)), ...this.host.attempts?.all().map(item => item.sessionId) ?? []]
     const agents = ids.map(id => this.host.context.agents.get(id as SessionId))
       .filter((agent): agent is Agent => agent !== undefined)
     const stop = async () => {
-      await Promise.allSettled(agents.map(agent => stopBackground(this.host.context, agent.id, 'dsh-superagent stopped', true)))
+      const drained = await Promise.all(agents.map(async agent => {
+        const hadJobs = runningJobs(this.host.context, agent.id).length > 0
+        const result = await stopBackground(this.host.context, agent.id, 'dsh-superagent stopped', true).catch(() => false)
+        return !hadJobs || result
+      }))
+      if (drained.some(value => !value)) return false
       for (const { collect } of this.left.values()) collect.abort()
       const running = agents.filter(agent => agent.status !== 'idle')
       for (const agent of running) agent.cancel({ kind: 'user' }, { keepInbox: true })
@@ -566,11 +574,13 @@ export class DshExecutor implements Executor {
     return await until(stop(), undefined, SHUTDOWN_STOP_MS) !== false
   }
   /** Number of open tickets whose worker holds a worker slot: its turn runs, or its shell jobs or subagents still run after its turn ended. */
-  activeCount(): number { return this.host.store.tickets.open().filter(ticket => this.running(ticket)).length + (this.host.attempts?.all().filter(item => item.status === 'running' && this.host.context.agents.get(item.sessionId as SessionId)?.status === 'running').length ?? 0) }
+  activeCount(): number { return this.host.store.tickets.open().filter(ticket => this.running(ticket)).length + (this.host.attempts?.all().filter(item => item.status === 'running' && (this.host.context.agents.get(item.sessionId as SessionId)?.status === 'running' || runningJobs(this.host.context, item.sessionId).length > 0)).length ?? 0) }
   /** Whether a ticket's worker holds a worker slot: its turn runs, or its shell jobs or subagents do after its turn ended. */
   private running(ticket: Ticket): boolean {
     if (!runningAssignment(ticket)) return false
-    return this.host.context.agents.get(workerSessionId(ticket.id) as SessionId)?.status === 'running' || this.settling.has(ticket.id)
+    const sessionId = workerSessionId(ticket.id)
+    const except = this.left.get(ticket.id)?.jobs
+    return this.host.context.agents.get(sessionId as SessionId)?.status === 'running' || runningJobs(this.host.context, sessionId, except).length > 0 || this.settling.has(ticket.id)
   }
   /** Marks a ticket failed after its launch fails; the ticket waits until new human input or an explicit retry arrives. */
   private launchFailed(ticketId: string, assignmentId: string, error: unknown): void {
