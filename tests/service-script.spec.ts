@@ -53,10 +53,11 @@ function run(...args: string[]): Promise<{ code: number; stdout: string; stderr:
       timeout: 20_000 },
     (error, stdout, stderr) => resolve({ code: typeof error?.code === 'number' ? error.code : 0, stdout, stderr })))
 }
-const READY = { health: { runtime: { state: 'ready', detail: '' } }, setup: { problem: null, feishuProblem: null } }
+const READY = { runtime: 'ready', componentError: false, setupRequired: false }
 /** Start a mock HTTP server that returns 503 until tmux launches the service (unless always is true). */
 async function answering(state: unknown = READY, always = false): Promise<string> {
-  server = createServer((_request, response) => {
+  server = createServer((request, response) => {
+    if (request.url !== '/orchestrator/health' || request.headers['x-orchestrator-request'] !== '1') { response.writeHead(403).end(); return }
     if (!always && !existsSync(join(root, 'launched'))) { response.writeHead(503).end(); return }
     response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(state))
   })
@@ -134,32 +135,30 @@ it('keeps only the newest logs it wrote for the profile', async () => {
 }, 20_000)
 it('reports a service whose Feishu bot setup could not check as running, and reads an answer with keys missing', async () => {
   processes(service(sleeper()))
-  const feishu = { health: { runtime: { state: 'ready', detail: '' }, feishu: { state: 'paused', detail: '' } },
-    setup: { problem: null, feishuProblem: { code: 'feishuNoBot', detail: 'No bot' } } }
+  const feishu = { runtime: 'ready', componentError: false, setupRequired: false }
   expect(await run('status', '--url', await answering(feishu, true))).toMatchObject({ code: 0 })
   server!.close()
-  expect(await run('status', '--url', await answering({ health: { runtime: { state: 'ready' } } }, true))).toMatchObject({ code: 0 })
+  expect(await run('status', '--url', await answering({ runtime: 'ready' }, true))).toMatchObject({ code: 0 })
   server!.close()
-  expect(await run('status', '--url', await answering({ health: { runtime: { state: 'error' } } }, true))).toMatchObject({ code: 1 })
+  expect(await run('status', '--url', await answering({ runtime: 'error' }, true))).toMatchObject({ code: 1 })
 })
 it('exits 2 while a part such as a Source reports an error, which a restart does not fix, and prints what it reports', async () => {
   processes(service(sleeper()))
-  const github = { health: { runtime: { state: 'ready', detail: '' }, github: { state: 'error', detail: 'bad token' } }, setup: {} }
+  const github = { runtime: 'ready', componentError: true, setupRequired: false }
   const url = await answering(github, true)
   const checked = await run('status', '--url', url)
   expect(checked.code).toBe(2)
-  expect(JSON.parse(checked.stdout)).toMatchObject({ errors: { github: 'bad token' } })
+  expect(JSON.parse(checked.stdout)).toMatchObject({ errors: { component: 'component error' } })
   expect(await run('start', '--url', url, '--timeout', '10'))
-    .toMatchObject({ code: 2, stdout: expect.stringContaining('github reports an error, which a restart does not fix: bad token') })
+    .toMatchObject({ code: 2, stdout: expect.stringContaining('component reports an error, which a restart does not fix: component error') })
 }, 20_000)
 it('exits 3 while the service waits for setup, from status and from start, which a restart does not fix', async () => {
   processes(service(sleeper()))
-  const waiting = { health: { runtime: { state: 'paused', detail: '' } },
-    setup: { problem: { code: 'repositoryUnset', detail: 'The GitHub Source names no repository.' }, feishuProblem: null } }
+  const waiting = { runtime: 'paused', componentError: false, setupRequired: true }
   const url = await answering(waiting, true)
   expect(await run('status', '--url', url)).toMatchObject({ code: 3 })
   expect(await run('start', '--url', url, '--timeout', '10'))
-    .toMatchObject({ code: 3, stdout: expect.stringContaining('waiting for setup: The GitHub Source names no repository.') })
+    .toMatchObject({ code: 3, stdout: expect.stringContaining('waiting for setup; open the management panel for details.') })
 }, 20_000)
 it('restarts the service, and a restart whose graceful stop timed out does not keep recovery off', async () => {
   const url = await answering()

@@ -85,6 +85,8 @@ export const MACHINE = { stateDir: '/srv/dsh-superagent', promptMaxChars: 100000
 
 type Settings = ReturnType<typeof SettingsSchema.parse>
 export interface PanelServer {
+  projects: ApiResponse<'GET projects'>['projects']
+  conversations: Record<string, ApiResponse<'GET projects/:id/conversation'>>
   joined?: Record<string, string>; joining?: Record<string, string>
   joinError?: string
   settings: Settings; revisions: Record<string, number>
@@ -248,6 +250,8 @@ function initial(): PanelServer {
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
+    projects: [{ id: 'p1', name: 'Demo project', goal: 'A durable goal', createdAt: '2026-09-23T00:00:00Z', updatedAt: '2026-09-23T00:00:00Z' }],
+    conversations: { p1: { project: { id: 'p1', name: 'Demo project', goal: 'A durable goal', createdAt: '2026-09-23T00:00:00Z', updatedAt: '2026-09-23T00:00:00Z' }, messages: [] } },
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
@@ -291,6 +295,26 @@ const ticketOf = (id: string) =>
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
+  'GET projects': { answer: () => ({ projects: server.projects }) },
+  'POST projects': { body: true, answer: ({ body }) => {
+    const project = { id: `p${server.projects.length + 1}`, ...body, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
+    server.projects.push(project); server.conversations[project.id] = { project, messages: [] }
+    return { project }
+  } },
+  'GET projects/:id/conversation': { answer: ({ params }) => server.conversations[params.id] ?? refuse(404, 'Unknown project') },
+  'POST projects/:id/messages': { body: true, answer: ({ params, body }) => {
+    const conversation = server.conversations[params.id]
+    if (!conversation) return refuse(404, 'Unknown project')
+    const message = conversation.messages.find(item => item.id === body.requestId) ?? { id: body.requestId, projectId: params.id,
+      role: 'user' as const, text: body.text, createdAt: new Date().toISOString(), status: 'queued' as const }
+    if (!conversation.messages.includes(message)) conversation.messages.push(message)
+    return { message }
+  } },
+  'POST projects/:id/retry': { answer: ({ params }) => {
+    const conversation = server.conversations[params.id]
+    if (!conversation) return refuse(404, 'Unknown project')
+    conversation.coordinator = { status: 'running' }; return { retried: true }
+  } },
   'GET state': { answer: stateView },
   'GET overview': { answer: overviewView },
   'GET search': { query: ['q'], answer: async ({ query }) => {

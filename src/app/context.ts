@@ -7,6 +7,7 @@ export { textPage } from './cards.ts'
 export const sharedPrompt = promptFile('shared')
 export const masterPrompt = promptFile('orchestrator')
 export const workerPrompt = promptFile('worker')
+export const projectPrompt = promptFile('project')
 /** Built-in policy sections referenced by role prompts; a team may override them. */
 export const guides: Readonly<Record<string, string>> = Object.fromEntries(['subscriptions', 'replies', 'dispatch', 'work']
   .map(name => [name, promptFile(name)]))

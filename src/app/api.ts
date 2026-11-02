@@ -8,6 +8,26 @@ import type { SettingsView } from './views/settings.ts'
 import type { SourceStatusView } from './views/sources.ts'
 import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } from './views/threads.ts'
 import type { TicketListView } from './views/tickets.ts'
+import type { Project as ProjectModel } from '../core/model.ts'
+
+export type Project = ProjectModel
+export type ConversationRole = 'user' | 'assistant'
+export type ConversationMessageStatus = 'queued' | 'running' | 'answered' | 'error' | 'saved'
+export interface ConversationMessage {
+  id: string
+  projectId: string
+  role: ConversationRole
+  text: string
+  createdAt: string
+  status: ConversationMessageStatus
+  error?: string
+}
+export interface ProjectConversationView {
+  project: Project
+  messages: ConversationMessage[]
+  coordinator?: { status: 'idle' | 'running' | 'error'; error?: string }
+  draft?: { text: string }
+}
 
 export const TICKET_FILTERS = ['open', 'person', 'working', 'idle', 'ended'] as const
 export const THREAD_FILTERS = ['subscribed', 'evaluating', 'recent', 'all'] as const
@@ -40,6 +60,11 @@ export interface Api {
   'POST policy-sync/:id': { response: { policy: unknown } }
   'POST setup/check': { response: { restarting: true } }
   'GET models': { response: ModelCatalog }
+  'GET projects': { response: { projects: Project[] } }
+  'POST projects': { body: { name: string; goal: string }; response: { project: Project } }
+  'GET projects/:id/conversation': { response: ProjectConversationView }
+  'POST projects/:id/messages': { body: { requestId: string; text: string }; response: { message: ConversationMessage } }
+  'POST projects/:id/retry': { response: { retried: true } }
   'GET prompts': { query?: { revision?: number; offset?: number }; response: PromptsView }
   'PUT prompts': { body: { config: PromptConfig; baseRevision: number }; response: { revision: number; context_delivery: Delivery } }
   'POST prompts/preview': { body: PromptConfig; response: ReturnType<Prompts['preview']> }

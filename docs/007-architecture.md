@@ -161,11 +161,17 @@ Its interfaces are grouped by purpose:
 - **Outbox receipts:** `replyStatus` and `receipts`, written only by Outbox. Receipt operations are `get`, `waiting`, `behind`, `add`, `settle` and `withdraw`. `behind` checks whether an earlier message for the same Ticket and conversation is waiting with fewer than three failures. A withdrawn message settles with `channelGone` or `channelIgnored`. Read queries expose failed and dropped replies through `failingReplies`, `droppedReplies` and `droppedSince`.
 - **Typed key-value records:** `get`, `set`, `delete` and `keys`, using entries from `KV`.
 
-`afterCommit` runs an action only after the transaction commits, never after rollback. Runtime reads records in their stored shape; schema 10 records are converted once before the schema 12 transaction commits.
+`afterCommit` runs an action only after the transaction commits, never after rollback. Runtime reads records in their stored shape; schema 10 records are converted once before the schema 13 transaction commits.
 
-### Projects (T1)
+### Projects and persistent discussion (T1–T2)
 
 `Runtime.projects` exposes the internal `Projects` service: `create`, `get`, `list`, `update`, project-scoped `ticket`, `createDraft` and `awaitConfirmation`. Project IDs are server-generated and independent of names or directories. SQLite and memory adapters share the same ownership validation; the project port is separate from legacy `Repositories` so existing core callers remain compatible.
+
+The project home is the default client panel route. Creating a name and one-line goal opens the project's persistent discussion. Project APIs authenticate through the installed DSH Host Connection service's signed browser/API admission (`connection.admit`); the host's stable local owner principal owns each newly created project. A missing host admission API fails closed. The existing custom management header, loopback Host and Origin checks remain additional source protections, not authentication. Legacy unowned projects are never silently claimed.
+
+`ProjectCoordinator` keeps one asynchronous lane per project, without a global model lock or a transaction across model calls. User inputs commit before dispatch, with a project-scoped client request key. `ConversationStore` owns business messages separately from DSH execution transcripts. Completed assistant replies become `saved` only after their Session, turn and message references commit. Pending or failed inputs remain visible and retryable. A complete prompt snapshot from the existing versioned `Prompts` service is saved at each input checkpoint; changing prompt configuration cannot rewrite an in-flight input's prompt.
+
+Coordinator mappings persist Session/workspace/canonical cwd, generation and replacement history. The application verifies the actual workspace and Session cwd before using a mapping. Restart reconciles durable turn results and deduplicates already delivered inputs. Explicit retry settles the old read-only Session before replacing its generation; old generation or state-version completions fail. Shutdown cancels coordinators, waits for their turns and flushes Session persistence before closing SQLite. Coordinators use a dedicated empty preset, a complete project prompt and one bounded file-read tool jailed to their canonical workspace. No global skills, shell, worker dispatch or Ticket creation tools are bound to project discussion.
 
 Project tasks are existing Tickets with `projectId` and `projectStage` (`draft` or `awaiting-confirmation`), never another task aggregate. A draft uses an explicitly inert `mandate.projectDraft` marker, has no Assignment and creates no execution Effects. Ownership is immutable, Assignment IDs cannot be reused by another Ticket, and project Assignment history cannot be removed to bypass that check. Legacy records remain unowned and cannot be rebound to a project.
 
@@ -331,8 +337,12 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/notices.ts` | The main Session's notices and relays: `eventNotice`, `reportRelay`, `resultRelay` and `followupRelay` |
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
 | `src/app/project-store.ts` | SQLite project repository with stable ids; project lifecycle stays in the core service |
+| `src/app/conversation-store.ts` | Durable owned business conversation, input idempotency, per-project leases, mapping generations and prompt checkpoints |
+| `src/app/project-coordinator.ts` | Independent project discussion lanes, restart reconciliation, retry and coordinator lifecycle |
+| `src/app/project-session.ts` | Verified native DSH Session/workspace/cwd adapter, completed-turn projection and restricted project reads |
+| `src/app/project-auth.ts` | Fail-closed project API authentication through DSH Host Connection admission and its stable owner principal |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
-| `src/app/migration.ts` | Schema 12 boundary: converts schema 10 records to their current legacy shape; adds no inferred project or authorization to legacy history |
+| `src/app/migration.ts` | Schema 13 boundary: converts schema 10 records to their current legacy shape; adds no inferred project or authorization to legacy history |
 | `src/app/effects.ts` | Effects |
 | `src/app/versions.ts` | `Versions`: a record kept as numbered snapshots with a pointer to the current one, for the settings and the prompts |
 | `src/app/cache.ts` | `TextCache`: texts kept in memory within a size, the least recently used dropped first |
@@ -388,6 +398,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
+| `src/client/project-home.tsx` | Owned project list and the name-and-goal creation form |
+| `src/client/project-conversation.tsx` | Persistent project discussion, input status, draft distinction and retry |
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
 | `src/client/api.ts` | Calls and polls of the management API, typed by `src/app/api.ts`, and the Decision filters of the Eval status |
 | `src/client/route.ts` | The tabs, the settings groups, the typed routes that `parseRoute` reads, and the route memory with the settings group opened last |
@@ -442,8 +454,14 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |
-| `tests/migration.spec.ts` | Legacy migrations and schema 12: consistent WAL recovery snapshots, rollback, refusal of unsupported schemas and snapshot failures |
+| `tests/migration.spec.ts` | Legacy migrations and schema 13: consistent WAL recovery snapshots, rollback, refusal of unsupported schemas and snapshot failures |
 | `tests/project-store.spec.ts` | Project persistence, restart, rename/directory identity, isolation and transactional rollback |
+| `tests/project-conversation.spec.ts` | Business input/reply persistence, idempotency, ownership and project lane isolation |
+| `tests/coordinator-recovery.spec.ts` | Mapping replacement, prompt restart persistence and stale-generation/state rejection |
+| `tests/project-coordinator.spec.ts` | Project lane concurrency, durable dispatch, retry races and restart recovery |
+| `tests/project-session.spec.ts` | Completed durable turn projection, interrupted draft exclusion and Session message references |
+| `tests/project-auth.spec.ts` | Host admission, stable owner identity, authentication rejection and unavailable-host denial |
+| `tests/project-panel.spec.tsx` | Project creation, navigation, durable discussion status and retry behavior |
 | `tests/projects.spec.ts` | Project identity and Ticket/Assignment ownership; unauthorized drafts never execute |
 | `tests/no-github-startup.spec.ts` | Startup and application project APIs without external accounts; resource-specific readiness and safe environment |
 | `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |
@@ -474,6 +492,11 @@ One SQLite file, `<stateDir>/orchestrator.sqlite`, which only the Store opens.
 | `thread` | Threads: Subscriptions, the Tickets that follow it for context, queued Triggers, the Eval in progress, the count of its expiries and `meta`; the generated columns `active`, set while Triggers are queued or an Eval runs, and `subscribed`, its Source while a Ticket subscribes to it | Engine; Sources write `meta` |
 | `ticket` | Tickets with their Mandate, origin, execution, Assignments, Channels, Inputs and the Threads they follow; the generated columns `open`, set while it has not ended, and `active`, set while Inputs are undelivered or the latest Assignment is pending or running | Engine |
 | `project` | Stable id, name, goal and optional directory; names and paths do not define identity | Projects via project repository |
+| `conversation_owner` | Authenticated local owner fixed at project creation | ConversationStore |
+| `conversation_state` | Per-project semantic decision version | ConversationStore |
+| `conversation_message` | Durable user inputs, saved assistant replies, request keys, errors and native DSH message references | ConversationStore |
+| `conversation_mapping` | Active and retired Session/workspace/cwd mappings, generation and replacement reason | ConversationStore |
+| `conversation_prompt` | Input checkpoint's composed prompt text and revision | ConversationStore |
 | `decision` | Decisions, by Thread | Engine |
 | `effect` | The effect queue: per kind and key, the payload, its order, failed attempts with the last error, and when it is due | Effects; the schema 11 migration queues what earlier versions kept for the main Session |
 | `outbox` | The receipt of each message for a Channel, by id, with the Ticket it is for and its `status`, `pending`, `sent` or `dropped`, kept so an id is never queued twice; for a dropped message, when and why, as the generated column `dropped`, its time, and a reason code. A message that waits has a `reply` effect, which holds its attempts | The Outbox |
@@ -499,7 +522,7 @@ Read caches use bounded in-memory `TextCache` instances and are lost on restart.
 
 Nothing deletes old records yet, so these grow without bound: the `trigger`, `disposition` and `decision` rows; ended Tickets and their Threads; the outbox's receipts; and in `kv`, every saved settings revision and prompt version, the prompt revisions each Session worked under, and the Sources' records per Thread and per Issue or pull request.
 
-`SCHEMA_VERSION` only increases (currently 12). A newer database refuses to start; schema 10 remains the oldest supported migration boundary. Before upgrading an existing database, Store creates a consistent SQLite snapshot, including committed WAL pages, under `<database>.snapshots/`. A failed snapshot prevents migration; a failed migration rolls back its DDL and records. Schema 10 records receive their legacy shape conversion once; schema 11 records retain their shape. Schema 12 adds project storage without assigning legacy Tickets, Mandates or Effects to projects. Recovery snapshots are retained for manual recovery; T1 does not implement scheduled backup or automatic restore.
+`SCHEMA_VERSION` only increases (currently 13). A newer database refuses to start; schema 10 remains the oldest supported migration boundary. Before upgrading an existing database, Store creates a consistent SQLite snapshot, including committed WAL pages, under `<database>.snapshots/`. A failed snapshot prevents migration; a failed migration rolls back its DDL and records. Schema 10 records receive their legacy shape conversion once; schema 11 records retain their shape. Schema 12 adds project storage without assigning legacy Tickets, Mandates or Effects to projects. Schema 13 adds owned conversation messages, coordinator mapping generations, state leases and prompt checkpoints; it does not assign owners to legacy projects. Recovery snapshots are retained for manual recovery; T1 does not implement scheduled backup or automatic restore.
 
 ## Model-facing interfaces
 

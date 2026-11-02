@@ -1,5 +1,16 @@
 /* Panel layout and local UI controls styled with DSH `--dsw-alias-*` design tokens; one rule per line. */
 .dt-page { box-sizing: border-box; height: 100%; overflow: auto; scrollbar-gutter: stable; scroll-padding: 48px 0 72px; container-type: inline-size; padding: 28px clamp(24px, 4vw, 48px) 0; color: var(--dsw-alias-label-primary); }
+.dt-projects { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); }
+.dt-project-card { cursor: pointer; text-align: start; width: 100%; min-width: 0; display: flex; flex-direction: column; gap: 8px; padding: 16px; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: 12px; color: inherit; background: var(--dsw-alias-bg-layer-2); overflow-wrap: anywhere; }
+.dt-project-card strong { font-size: 16px; }
+.dt-form label { display: flex; flex-direction: column; gap: 6px; }
+.dt-conversation, .dt-conversation-history, .dt-conversation-compose { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.dt-conversation h2 { margin: 8px 0; font-size: 22px; overflow-wrap: anywhere; }
+.dt-conversation-message { border: 0.5px solid var(--dsw-alias-border-l3); padding: 16px; border-radius: 12px; overflow-wrap: anywhere; }
+.dt-conversation-user { background: var(--dsw-alias-interactive-bg-hover); }
+.dt-conversation-text { white-space: pre-wrap; line-height: 1.6; margin-top: 8px; }
+.dt-conversation-draft { border-style: dashed; color: var(--dsw-alias-label-secondary); }
+.dt-conversation-compose textarea { box-sizing: border-box; width: 100%; min-height: 100px; resize: vertical; font: inherit; color: inherit; background: var(--dsw-alias-bg-layer-2); padding: 12px; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: 10px; }
 /* Deployment page rendered inside DSH Plugin Manager, which owns scrolling and padding. */
 .dt-embedded { container-type: inline-size; color: var(--dsw-alias-label-primary); }
 /* Disable sticky positioning inside DSH Plugin Manager, where the host container owns scrolling and bottom padding. */

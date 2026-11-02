@@ -1,5 +1,5 @@
 /**
- * Migrates schema 10 records to their schema 11 shapes; schema 12 adds project storage without reassigning legacy records.
+ * Migrates schema 10 records to their schema 11 shapes; schema 12 adds project storage and schema 13 adds owned conversations and coordinator mappings without reassigning legacy records.
  * Databases older than schema 10 are rejected: this version cannot migrate them.
  */
 import { basename } from 'node:path'
@@ -17,7 +17,7 @@ import type { SettingsVersion, Store } from './store.ts'
 import { Versions } from './versions.ts'
 import { KV, type Key } from '../kv.ts'
 
-export const SCHEMA_VERSION = 12
+export const SCHEMA_VERSION = 13
 /** The oldest database schema version this build can open and migrate directly. */
 export const OLDEST_SCHEMA = 10
 /** Returns an error message explaining why `version` cannot be opened: older schemas need a new state directory. */

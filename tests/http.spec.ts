@@ -1,4 +1,5 @@
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
+import type { ProjectConnection } from '../src/app/project-auth.ts'
 import { z } from 'zod'
 import { registerHttp } from '../src/app/http.ts'
 import { PromptConflict } from '../src/app/prompts.ts'
@@ -10,9 +11,17 @@ import { SetupError } from '../src/setup.ts'
 type Handler = (req: unknown, res: unknown) => Promise<void>
 type Headers = Record<string, string | undefined>
 /** Mount management HTTP routes on a fake web server and return a request helper that includes default panel headers. */
-function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.0.1') {
+const ownerConnection: ProjectConnection = { admit: () => ({ peer: { principal: { kind: 'owner' } } }) }
+function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.0.1', connection: ProjectConnection | null = ownerConnection) {
   let handler: Handler = async () => {}
-  const ctx = { webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } } }
+  const ctx = {
+    get connection(): never { throw new Error('cannot get property connection without inject') },
+    inject: (_services: string[], callback: (child: unknown) => void) => {
+      if (connection) callback({ connection, effect: (effect: () => unknown) => effect() })
+      return () => {}
+    },
+    webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } },
+  }
   registerHttp(ctx as never, { ready: Promise.resolve(), ...runtime } as unknown as HttpHost)
   return async (method: string, path: string, body?: unknown, headers: Headers = {}) => {
     let status = 0, text = ''
@@ -24,6 +33,33 @@ function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.
     return { status, body: JSON.parse(text) as Record<string, unknown> }
   }
 }
+
+it('requires native owner admission across GET, PUT and POST before reads, body parsing or actions', async () => {
+  const models = vi.fn(async () => ({})), save = vi.fn(async () => ({ saved: true })), checkSetup = vi.fn()
+  const runtime = { models, settings: { save }, checkSetup, sources: { instances: () => [] } }
+  for (const rejection of [401, 403] as const) {
+    const admit = vi.fn(() => ({ rejection }))
+    const call = serve(runtime, '127.0.0.1', { admit })
+    for (const [method, path] of [['GET', 'models'], ['PUT', 'settings/executor'], ['POST', 'setup/check']]) {
+      expect(await call(method!, path!, 'invalid json')).toMatchObject({ status: rejection })
+    }
+    expect(admit).toHaveBeenCalledTimes(3)
+  }
+  const missing = serve(runtime, '127.0.0.1', null)
+  expect(await missing('GET', 'models')).toMatchObject({ status: 503 })
+  expect(models).not.toHaveBeenCalled(); expect(save).not.toHaveBeenCalled(); expect(checkSetup).not.toHaveBeenCalled()
+  const call = serve(runtime)
+  expect(await call('GET', 'models')).toMatchObject({ status: 200 })
+  expect(await call('PUT', 'settings/executor', { value: {}, revision: 0 })).toMatchObject({ status: 200 })
+  expect(await call('POST', 'setup/check')).toMatchObject({ status: 200 })
+  expect(models).toHaveBeenCalledTimes(1); expect(save).toHaveBeenCalledTimes(1); expect(checkSetup).toHaveBeenCalledTimes(1)
+})
+
+it('serves a minimal supervision probe without exposing state', async () => {
+  const call = serve({ health: { runtime: { state: 'ready', detail: 'private' }, github: { state: 'error', detail: 'private' } },
+    setupProblem: { code: 'private', detail: 'private' } })
+  expect(await call('GET', '../health')).toEqual({ status: 200, body: { runtime: 'ready', componentError: true, setupRequired: true } })
+})
 
 it('answers each kind of failure with its own status', async () => {
   const saves: unknown[] = []
