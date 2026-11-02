@@ -135,16 +135,50 @@ export async function supervise(command, args, { env, cwd, timeoutMs, signal }) 
     cleanup: processesGone && !cleanupError ? 'passed' : 'failed', cleanupError }
 }
 
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function validateSessionResults(create, reopen, context) {
+  if (!isObject(create) || !isObject(reopen)) throw new Error('Session results must be objects')
+  const common = ['profile', 'dshHome', 'stateDir', 'workspace', 'port']
+  for (const result of [create, reopen]) {
+    if (!common.every(key => result[key] === context[key]) || result.hostContext !== true) {
+      throw new Error('Session common observations did not match expectations')
+    }
+    if (!isObject(result.session)) throw new Error('Session result missing session evidence')
+    const session = result.session
+    if (session.id !== `${context.profile}-session` || typeof session.workspaceId !== 'string' || !session.workspaceId) {
+      throw new Error('Session identifiers are missing')
+    }
+    if (session.cwd !== context.workspace || session.workspacePath !== context.workspace || session.realpath !== context.workspace) {
+      throw new Error('Session workspace paths did not match expectations')
+    }
+    if (session.permissionPreset !== 'workspace-write' || session.sandboxMode !== 'workspace-write' || session.approvalPolicy !== 'ask') {
+      throw new Error('Session permission observations did not match expectations')
+    }
+    if (!Number.isInteger(session.eventCount) || session.eventCount < 1 || session.mappingRejected !== true || !Number.isInteger(session.pid) || session.pid < 1) {
+      throw new Error('Session event or process observations did not match expectations')
+    }
+  }
+  if (create.session.id !== reopen.session.id || create.session.workspaceId !== reopen.session.workspaceId || create.session.eventCount !== reopen.session.eventCount) {
+    throw new Error('Session identity or durable event count was not stable across restart')
+  }
+  if (create.session.pid === reopen.session.pid) throw new Error('Session restart reused the host process')
+}
+
 export async function runProbe({ capability = 'launcher', timeoutMs = 120000, command = 'dsh', signal } = {}) {
-  if (capability !== 'launcher') throw new Error('Only launcher is implemented; session/skills/web remain untested')
+  if (!['launcher', 'session'].includes(capability)) throw new Error('Only launcher and session are implemented; skills/web remain untested')
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) throw new Error('Timeout must be 1..120000 milliseconds')
   if (process.platform === 'win32') throw new Error('Process-group cleanup requires a POSIX host')
   const startedAt = new Date().toISOString(), deadline = Date.now() + timeoutMs
   const evidence = {
     schemaVersion: 1, baseline, capability, status: 'failed', command: [],
-    expected: 'Only the isolated probe plugin boots; state and loopback round trips pass; outbound is rejected; owned processes and files are removed',
+    expected: capability === 'session'
+      ? 'Native Session and Workspace persist across two isolated host processes; cwd/realpath and permission overrides survive; mismatched mapping is rejected; cleanup passes'
+      : 'Only the isolated probe plugin boots; state and loopback round trips pass; outbound is rejected; owned processes and files are removed',
     actual: null, host: { node: process.version, platform: process.platform, architecture: process.arch, dsh: null },
-    context: null, startedAt, finishedAt: null, budgetMs: timeoutMs, execution: null,
+    context: null, startedAt, finishedAt: null, budgetMs: timeoutMs, execution: null, restartExecution: null,
     cleanup: { processes: 'untested', directory: 'untested', port: 'untested' }, error: null,
     capabilities: { session: 'untested', skills: 'untested', web: 'untested' },
   }
@@ -167,9 +201,28 @@ export async function runProbe({ capability = 'launcher', timeoutMs = 120000, co
     await writeFile(join(profileDir, 'package.json'), JSON.stringify({ private: true, type: 'module', dsh: { profile: { bundles: [] } } }), { mode: 0o600, flag: 'wx' })
     await writeFile(join(profileDir, 'probe-host-plugin.ts'), await readFile(plugin), { mode: 0o600, flag: 'wx' })
     // JSON is valid YAML; no expression evaluation or imported bundle is needed.
-    await writeFile(join(profileDir, 'cordis.patch.yml'), JSON.stringify([{ insert: [{
-      id: 'isolated-probe', name: './probe-host-plugin.ts', config: context,
-    }] }]), { mode: 0o600, flag: 'wx' })
+    const patchPath = join(profileDir, 'cordis.patch.yml')
+    const writePatch = async sessionPhase => {
+      const config = sessionPhase ? { ...context, sessionPhase } : context
+      const entries = sessionPhase ? [
+        { id: 'storage', name: '@deepseek-ai/dsh-storage', config: {} },
+        { id: 'storage-json', name: '@deepseek-ai/dsh-storage-json', config: { root: join(context.stateDir, 'storage') } },
+        { id: 'storage-domain', name: '@deepseek-ai/dsh-storage-domain', config: { backend: 'json' } },
+        { id: 'session', name: '@deepseek-ai/dsh-session', config: {} },
+        { id: 'session-projection', name: '@deepseek-ai/dsh-session-projection', config: {} },
+        { id: 'session-persistence-jsonl', name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(context.stateDir, 'sessions') } },
+        { id: 'sandbox-policy', name: '@deepseek-ai/dsh-sandbox-policy', config: { mode: 'read-only', workspaceRoot: context.workspace } },
+        { id: 'subprocess-local', name: '@deepseek-ai/dsh-subprocess-local', config: {} },
+        { id: 'sandbox-local', name: '@deepseek-ai/dsh-sandbox-local', config: {} },
+        { id: 'bash-sandbox', name: '@deepseek-ai/dsh-bash-sandbox', config: { cwd: context.workspace } },
+        { id: 'user-approval', name: '@deepseek-ai/dsh-user-approval', config: { policy: 'never' } },
+        { id: 'workspace', name: '@deepseek-ai/dsh-workspace', config: {} },
+        { id: 'permission-presets', name: '@deepseek-ai/dsh-permission-presets', config: { defaultPreset: sessionPhase === 'reopen' ? 'danger-full-access' : 'workspace-write' } },
+      ] : []
+      entries.push({ id: 'isolated-probe', name: './probe-host-plugin.ts', config })
+      await writeFile(patchPath, JSON.stringify([{ insert: entries }]), { mode: 0o600, flag: sessionPhase === undefined ? 'wx' : undefined })
+    }
+    await writePatch(capability === 'session' ? 'create' : undefined)
     const execute = async args => {
       if (signal?.aborted || Date.now() >= deadline) throw new Error('Probe budget exhausted or interrupted')
       return supervise(command, args, { env, cwd: context.workspace, timeoutMs: deadline - Date.now(), signal })
@@ -182,13 +235,30 @@ export async function runProbe({ capability = 'launcher', timeoutMs = 120000, co
     evidence.command = [command, '--profile', profile]
     evidence.execution = await execute(['--profile', profile])
     evidence.cleanup.processes = evidence.execution.cleanup
-    const result = JSON.parse(await readFile(join(context.stateDir, 'result.json'), 'utf8'))
-    if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('Host result must be an object')
-    evidence.actual = result
-    const match = ['profile', 'dshHome', 'stateDir', 'workspace', 'port'].every(key => result[key] === context[key])
-    const success = match && result.stateRoundtrip === true && result.loopbackRoundtrip === true && result.outboundRejected === true && result.hostContext === true
-    if (evidence.execution.exitCode === 0 && !evidence.execution.timedOut && !evidence.execution.interrupted && success) evidence.status = 'passed'
-    else evidence.error = 'Host exit or observations did not match expectations'
+    if (capability === 'session') {
+      evidence.actual = { create: null, reopen: null }
+      evidence.actual.create = JSON.parse(await readFile(join(context.stateDir, 'result-create.json'), 'utf8'))
+      if (evidence.execution.exitCode !== 0 || evidence.execution.error || evidence.execution.timedOut || evidence.execution.interrupted || evidence.execution.cleanup !== 'passed') {
+        throw new Error('Session create host execution failed')
+      }
+      await writePatch('reopen')
+      evidence.restartExecution = await execute(['--profile', profile])
+      evidence.cleanup.processes = evidence.cleanup.processes === 'passed' && evidence.restartExecution.cleanup === 'passed' ? 'passed' : 'failed'
+      evidence.actual.reopen = JSON.parse(await readFile(join(context.stateDir, 'result-reopen.json'), 'utf8'))
+      if (evidence.restartExecution.exitCode !== 0 || evidence.restartExecution.error || evidence.restartExecution.timedOut || evidence.restartExecution.interrupted || evidence.restartExecution.cleanup !== 'passed') {
+        throw new Error('Session reopen host execution failed')
+      }
+      validateSessionResults(evidence.actual.create, evidence.actual.reopen, context)
+      evidence.status = 'passed'
+    } else {
+      const result = JSON.parse(await readFile(join(context.stateDir, 'result.json'), 'utf8'))
+      if (!isObject(result)) throw new Error('Host result must be an object')
+      evidence.actual = result
+      const match = ['profile', 'dshHome', 'stateDir', 'workspace', 'port'].every(key => result[key] === context[key])
+      const success = match && result.stateRoundtrip === true && result.loopbackRoundtrip === true && result.outboundRejected === true && result.hostContext === true
+      if (evidence.execution.exitCode === 0 && !evidence.execution.timedOut && !evidence.execution.interrupted && success) evidence.status = 'passed'
+      else evidence.error = 'Host exit or observations did not match expectations'
+    }
   } catch (error) {
     evidence.error = error.code ?? error.message
   } finally {
@@ -212,6 +282,7 @@ export async function runProbe({ capability = 'launcher', timeoutMs = 120000, co
       } catch { evidence.cleanup.port = 'failed' }
     }
     if (Object.values(evidence.cleanup).some(status => status !== 'passed')) evidence.status = 'failed'
+    if (capability === 'session') evidence.capabilities.session = evidence.status === 'passed' ? 'passed' : 'failed'
     evidence.finishedAt = new Date().toISOString()
   }
   return evidence
@@ -219,7 +290,7 @@ export async function runProbe({ capability = 'launcher', timeoutMs = 120000, co
 
 async function main() {
   const args = process.argv.slice(2)
-  if (args.length !== 4 || args[0] !== '--capability' || args[2] !== '--json') throw new Error('Usage: node scripts/host/run-isolated-probe.mjs --capability launcher --json .superagent-host/launcher.json (new output filename each run)')
+  if (args.length !== 4 || args[0] !== '--capability' || args[2] !== '--json') throw new Error('Usage: node scripts/host/run-isolated-probe.mjs --capability <launcher|session> --json .superagent-host/<new-output>.json (new output filename each run)')
   const output = resolve(args[3])
   // Claim output before spawning: refuse existing files and symlinks without booting.
   await mkdir(dirname(output), { recursive: true, mode: 0o700 })

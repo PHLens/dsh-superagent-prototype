@@ -204,7 +204,7 @@ setInterval(()=>{},1000);
   })
 
   it('refuses unsupported capabilities and invalid budgets before host startup', async () => {
-    await expect(runProbe({ capability: 'session' })).rejects.toThrow('Only launcher')
+    await expect(runProbe({ capability: 'skills' })).rejects.toThrow('Only launcher and session')
     for (const timeoutMs of [0, -1, 120001, NaN]) await expect(runProbe({ timeoutMs })).rejects.toThrow('Timeout')
   })
 

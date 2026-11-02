@@ -426,6 +426,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/health.spec.ts` | One health entry per part, each cleared by its own next success |
 | `tests/host-toolchain.spec.ts` | Toolchain evidence, command failure and timeout, native repair boundaries, and private local evidence output; fixtures do not certify host capabilities |
 | `tests/host-probe-launcher.spec.ts` | Isolated host launcher environments, minimal plugin startup, outbound guards, port and process cleanup, evidence schema and failure boundaries; fixtures do not certify native session, skills or web capabilities |
+| `tests/native-session-probe.spec.ts` | Session probe restart supervision, stable durable identity and permissions, workspace mapping checks and failed evidence admission; fixtures do not certify native host behavior |
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
