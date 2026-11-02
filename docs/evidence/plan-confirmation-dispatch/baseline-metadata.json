@@ -1,0 +1,13 @@
+{
+  "baselineRevision": "998b62cdc242232bad49ff8dea5dc930c07d167c",
+  "componentPath": "src/client/project-conversation.tsx",
+  "baselineComponentGitBlob": "86ba4a359065e55ee7bb8d7a2df7965b7117636e",
+  "baselineComponentSha256": "ba4214c83d6550d81b4a5e33bc61479dd7172593d52a5b666d2cb9a3f610b45c",
+  "beforeScreenshotSha256": "e8abb86a272bdafec921232a4f4d21fafbec238fe2d2d1948b1c9f40b0e853f3",
+  "viewport": { "width": 1280, "height": 900, "deviceScaleFactor": 1 },
+  "browser": "Microsoft Edge 156.0.4314.58 headless",
+  "theme": "light; explicit host design token values supplied in standalone harness",
+  "scenario": "Synthetic Release readiness project goal and saved user plan request with assistant acknowledgment; no production data",
+  "componentAuthenticity": "Unmodified exported ProjectConversation from git archive baseline, mounted under unmodified actual PanelProvider. Actual caller and polling hooks receive synthetic fetch Response objects. Original project CSS imported by Provider.",
+  "scopeLimit": "Standalone component capture, not a running DSH shell or end-to-end backend validation"
+}

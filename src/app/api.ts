@@ -8,7 +8,7 @@ import type { SettingsView } from './views/settings.ts'
 import type { SourceStatusView } from './views/sources.ts'
 import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } from './views/threads.ts'
 import type { TicketListView } from './views/tickets.ts'
-import type { Project as ProjectModel } from '../core/model.ts'
+import type { Assignment, PlanAuthorization, PlanExecutionTarget, Project as ProjectModel, Ticket } from '../core/model.ts'
 
 export type Project = ProjectModel
 export type ConversationRole = 'user' | 'assistant'
@@ -22,11 +22,24 @@ export interface ConversationMessage {
   status: ConversationMessageStatus
   error?: string
 }
+export interface ProjectTaskView extends Ticket {
+  planRevisions?: Ticket['planRevisions']
+  authorizations?: Ticket['authorizations']
+  executionTargets?: Ticket['executionTargets']
+  assignments: Assignment[]
+}
 export interface ProjectConversationView {
   project: Project
   messages: ConversationMessage[]
+  tasks?: ProjectTaskView[]
   coordinator?: { status: 'idle' | 'running' | 'error'; error?: string }
   draft?: { text: string }
+}
+export interface ProjectPlanConfirmationResponse {
+  authorization: PlanAuthorization
+  target: PlanExecutionTarget
+  assignment: Assignment
+  ticket: Ticket
 }
 
 export const TICKET_FILTERS = ['open', 'person', 'working', 'idle', 'ended'] as const
@@ -63,7 +76,9 @@ export interface Api {
   'GET projects': { response: { projects: Project[] } }
   'POST projects': { body: { name: string; goal: string }; response: { project: Project } }
   'GET projects/:id/conversation': { response: ProjectConversationView }
-  'POST projects/:id/messages': { body: { requestId: string; text: string }; response: { message: ConversationMessage } }
+  'POST projects/:id/messages': { body: { requestId: string; text: string; ticketId?: string; planRevision?: number }; response: { message: ConversationMessage; clarification?: string; authorization?: PlanAuthorization; target?: PlanExecutionTarget; assignment?: Assignment; ticket?: Ticket } }
+  'POST projects/:id/plan-confirmation': { body: { ticketId: string; planRevision: number; operationId: string; intent?: 'execute' | 'rerun' }; response: ProjectPlanConfirmationResponse }
+  'POST projects/:id/plan-revocation': { body: { ticketId: string; authorizationId: string; operationId: string }; response: PlanAuthorization }
   'POST projects/:id/retry': { response: { retried: true } }
   'GET prompts': { query?: { revision?: number; offset?: number }; response: PromptsView }
   'PUT prompts': { body: { config: PromptConfig; baseRevision: number }; response: { revision: number; context_delivery: Delivery } }

@@ -11,6 +11,7 @@ import { AgentDelivery } from './delivery.ts'
 import { initializeRoleModel } from './role-models.ts'
 import type { Store } from './store.ts'
 import { ConversationStore } from './conversation-store.ts'
+import { projectTools, type ProjectToolsHost } from './tools/main.ts'
 
 export const PROJECT_PRESET = 'dsh-superagent-project'
 export interface ProjectSessionMapping { sessionId: string; workspaceId: string; cwd: string; generation: number }
@@ -83,6 +84,13 @@ export class ProjectSessions {
         } }))
     }
     return agent
+  }
+  /** Install project model tools for exactly one fenced turn. */
+  installProjectTools(agent: Agent, host: ProjectToolsHost): () => void {
+    const disposers = projectTools(host).map(item => agent.ctx.tools.register({ name: item.name, description: item.description,
+      parameters: z.toJSONSchema(item.schema), output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+      execute: async args => item.execute(item.schema.parse(args), this.signal) }))
+    return () => disposers.forEach(dispose => dispose())
   }
   /** Apply the durable input's prompt snapshot only at an idle, pre-turn checkpoint. */
   checkpoint(agent: Agent, text: string): void {
