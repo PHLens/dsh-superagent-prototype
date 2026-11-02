@@ -1,4 +1,6 @@
 /** Type-only management API contract between the web panel and host routes, imported by the panel without bundling host code. */
+import type { ArtifactStore } from './artifact-store.ts'
+import type { AcceptedReport, GateDecision } from './report-acceptance.ts'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { PromptConfig, Prompts } from './prompts.ts'
 import type { PromptsView, StateView, TicketPageView } from './http.ts'
@@ -31,6 +33,9 @@ export interface ProjectTaskView extends Ticket {
 export interface ProjectConversationView {
   project: Project
   messages: ConversationMessage[]
+  artifacts?: ReturnType<ArtifactStore['view']>
+  reports?: AcceptedReport[]
+  decisions?: GateDecision[]
   tasks?: ProjectTaskView[]
   coordinator?: { status: 'idle' | 'running' | 'error'; error?: string }
   draft?: { text: string }
@@ -79,6 +84,8 @@ export interface Api {
   'POST projects/:id/messages': { body: { requestId: string; text: string; ticketId?: string; planRevision?: number }; response: { message: ConversationMessage; clarification?: string; authorization?: PlanAuthorization; target?: PlanExecutionTarget; assignment?: Assignment; ticket?: Ticket } }
   'POST projects/:id/plan-confirmation': { body: { ticketId: string; planRevision: number; operationId: string; intent?: 'execute' | 'rerun' }; response: ProjectPlanConfirmationResponse }
   'POST projects/:id/plan-revocation': { body: { ticketId: string; authorizationId: string; operationId: string }; response: PlanAuthorization }
+  'GET projects/:id/artifacts/:artifactId/:version': { response: { id: string; name: string; contentVersion: string; content: string } }
+  'POST projects/:id/acceptance': { body: { ticketId: string; operationId: string; reportId: string; conclusion: GateDecision['conclusion']; evidence: string }; response: GateDecision }
   'POST projects/:id/retry': { response: { retried: true } }
   'GET prompts': { query?: { revision?: number; offset?: number }; response: PromptsView }
   'PUT prompts': { body: { config: PromptConfig; baseRevision: number }; response: { revision: number; context_delivery: Delivery } }

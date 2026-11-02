@@ -4,7 +4,12 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { MessageId } from '@deepseek-ai/dsh-llm'
 import { scopeParentOf } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import { dirname } from 'node:path'
+import { realpathSync } from 'node:fs'
+import { isDeepStrictEqual } from 'node:util'
+import { ExecutionAttempts } from './execution-attempts.ts'
+import { PROJECT_WORKER_RULES } from './prompts.ts'
 import { z } from 'zod'
 import { key, liveTicket, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
@@ -30,6 +35,7 @@ export interface SessionsHost {
   /** The `models` health entry, which reports managed sessions waiting on a model-budget retry. */
   readonly health: HealthEntry
   readonly masterId: string
+  readonly attempts?: ExecutionAttempts
   readonly lifetime: AbortSignal
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
@@ -52,6 +58,9 @@ declare module '@deepseek-ai/cordis' {
     'agent-preset/selected'(sessionId: string, agentPreset: string): void
   }
 }
+/** Increment when the managed file-tool contract changes incompatibly; absent versions are the original T4 v1. */
+const PROJECT_WORKER_TOOL_VERSION = 1
+const PROJECT_WORKER_TOOLS = ['project_worker_context', 'project_read_input', 'project_write_artifact', 'project_worker_report']
 /**
  * The DSH tools an Executor Session works with: files, search, the shell and its jobs, the web, skills, its todo list and
  * subagents. It gets no other tool the profile has, whenever it was registered: none that asks or shows a person something,
@@ -123,7 +132,7 @@ export class Sessions {
     // its first turn DSH refuses any selection, which leaves it as it is.
     ctx.inject(['agentPresets'], child => {
       child.on('agent-preset/selected', (sessionId, preset) => {
-        const ticketId = ticketOfSession(sessionId), agent = ctx.agents.get(sessionId as SessionId)
+        const ticketId = this.host.attempts?.bySession(sessionId)?.ticketId ?? ticketOfSession(sessionId), agent = ctx.agents.get(sessionId as SessionId)
         const ours = sessionId === this.host.masterId ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET : undefined
         if (!ours || preset === ours || !agent) return
         const presets = child.get('agentPresets') as { select(agent: Agent, preset: string): Promise<string> }
@@ -140,6 +149,8 @@ export class Sessions {
     let result = await ctx.sessionController.resolveAgent(id as SessionId)
     if ('error' in result && result.error.code === 'session/not-found') {
       const workspace = await ctx.workspaceRegistry.create(cwd)
+      const attempt = this.host.attempts?.bySession(id)
+      if (attempt) { this.host.attempts!.resolve(id); attempt.workspaceId = workspace.id; this.host.attempts!.save(attempt) }
       // A Session keeps the preset it was created with, one of the bundle's own (cordis.patch.yml).
       await ctx.sessionController.create({ sessionId: id as SessionId, workspaceId: workspace.id,
         agentPreset: role === 'worker' ? WORKER_PRESET : ROUTER_PRESET })
@@ -149,7 +160,12 @@ export class Sessions {
     const settings = this.host.store.settings()
     await initializeRoleModel(ctx, result.agent, role === 'orchestrator' ? settings.eval.model : settings.executor.model)
     await this.decorate(result.agent)
-    ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
+    const managed = this.host.attempts?.bySession(id)
+    if (managed) {
+      this.host.attempts!.resolve(id)
+      const workspace = managed.workspaceId ? ctx.workspaceRegistry.get(WorkspaceId(managed.workspaceId)) : undefined
+      if (result.agent.id !== id || !result.agent.session.header.cwd || realpathSync(result.agent.session.header.cwd) !== cwd || !workspace || workspace.path !== cwd || !workspace.sessionIds.includes(result.agent.id)) throw new Error('Worker Session/workspace/cwd mismatch')
+    } else ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
     return result.agent
   }
@@ -226,7 +242,7 @@ export class Sessions {
       : { state: 'ready', detail: 'No managed Session is waiting on a model budget retry' })
   }
   private ticketOf(agent: Agent): Ticket | undefined {
-    const ticketId = ticketOfSession(agent.id)
+    const ticketId = this.host.attempts?.bySession(agent.id)?.ticketId ?? ticketOfSession(agent.id)
     return ticketId === undefined ? undefined : this.host.store.tickets.get(ticketId)
   }
   private async decorate(agent: Agent): Promise<void> {
@@ -237,6 +253,54 @@ export class Sessions {
     if (!master && !ticket) { this.limitSubagent(agent); return }
     const binding: SessionBinding = { disposers: [] }
     this.bindings.set(agent, binding)
+    const managed = this.host.attempts?.bySession(agent.id)
+    if (managed) {
+      const inherited = ['web_search', 'web_fetch'].filter(name => agent.ctx.tools.get(name, scopeParentOf(agent)))
+      const tools = host.tools(agent, ticket).filter(item => PROJECT_WORKER_TOOLS.includes(item.name))
+      const assignment = ticket!.assignments.find(item => item.id === managed.assignmentId)!
+      const reconcile = (reason: string): never => {
+        const error = `Worker context reconciliation required: ${reason}`
+        managed.status = 'reconcile'; managed.error = error; host.attempts!.save(managed)
+        assignment.waitingReason = 'preparation-reconciliation'; host.store.tickets.save(ticket!)
+        binding.disposers.push(agent.ctx.tools.restrict({ allow: [] }), agent.ctx.tools.guard(() => error))
+        throw new Error(error)
+      }
+      if (!managed.context) {
+        if (managed.status !== 'prepared' || agent.session.requestHeader()) reconcile('execution snapshot missing for an existing execution')
+        managed.context = { toolContractVersion: PROJECT_WORKER_TOOL_VERSION, promptRevision: host.prompts.current().revision,
+          roleRules: PROJECT_WORKER_RULES, projectConventions: 'No additional project conventions registered',
+          model: agent.session.requestHeader()?.config ?? host.store.settings().executor.model ?? 'Inherited native default; effective request config pending',
+          tools: [...inherited, ...PROJECT_WORKER_TOOLS], resources: [...assignment.contract!.plan.resources], skills: [] }
+        host.attempts!.save(managed)
+      }
+      const pinned = managed.context
+      if ((pinned.toolContractVersion ?? 1) !== PROJECT_WORKER_TOOL_VERSION) reconcile(`unsupported tool contract version ${pinned.toolContractVersion}`)
+      if (!Number.isInteger(pinned.promptRevision) || pinned.promptRevision < 0 || typeof pinned.roleRules !== 'string' || !pinned.roleRules.trim() || typeof pinned.projectConventions !== 'string') reconcile('instruction snapshot is incomplete')
+      if (!Array.isArray(pinned.tools) || !pinned.tools.every(name => typeof name === 'string') || !Array.isArray(pinned.skills)
+        || !pinned.skills.every(item => item && typeof item.name === 'string' && typeof item.version === 'string') || !Array.isArray(pinned.resources)) reconcile('capability snapshot is incomplete')
+      const unavailable = pinned.tools.filter(name => !inherited.includes(name) && !tools.some(item => item.name === name))
+      if (unavailable.length) reconcile(`pinned tools unavailable: ${unavailable.join(', ')}`)
+      if (pinned.skills.length) reconcile(`pinned skills unavailable: ${pinned.skills.map(item => `${item.name}@${item.version}`).join(', ')}`)
+      if (!isDeepStrictEqual(pinned.resources, assignment.contract!.plan.resources)) reconcile('resource range differs from the Assignment contract')
+      binding.disposers.push(agent.ctx.tools.restrict({ allow: inherited.filter(name => pinned.tools.includes(name)) }), agent.ctx.tools.guard(execution => {
+        // Receipt-capable services distinguish exact historical replay from strictly authorized new writes.
+        try { this.host.attempts!.resolve(agent.id, execution.name === 'project_worker_report' || execution.name === 'project_write_artifact') } catch (error) { return String(error) }
+        if (!pinned.tools.includes(execution.name)) return 'Tool has no registered project worker contract'
+        return undefined
+      }), agent.ctx.systemPrompt.section({ name: 'project-worker', order: 9999, interpolate: false, complete: true,
+        text: `[dsh-superagent prompt revision ${pinned.promptRevision}]\n${pinned.roleRules}\n\nProject conventions:\n${pinned.projectConventions}\n\nRegistered resources:\n${JSON.stringify(pinned.resources)}` }))
+      const register = this.registerTool(agent, binding)
+      for (const name of pinned.tools) {
+        const item = tools.find(item => item.name === name)
+        if (item) register(item.name, item.description, item.schema, item.execute)
+      }
+      binding.disposers.push(this.ctx.on('session/event', (session, event) => {
+        if (session !== agent.session || event.type !== 'request/header') return
+        const current = this.host.attempts!.bySession(agent.id)
+        if (current?.context) { current.context.model = event.data.header.config; this.host.attempts!.save(current) }
+      }))
+      return
+    }
     this.retryHealth.restore(agent.id, agent.session.snapshotEvents())
     if (agent.status === 'idle') this.retryHealth.clear(agent.id)
     this.updateModelHealth()

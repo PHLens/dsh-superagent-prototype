@@ -4,8 +4,68 @@ import { expect, it, vi } from 'vitest'
 import { en, zh } from '../src/client/locales.ts'
 import { usePanel, mount, remount, settle, click, field, text, type, all, at } from './fixtures/panel.tsx'
 import { server } from './fixtures/panel-server.ts'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { workerFixture } from './fixtures/project-worker.ts'
 
 usePanel()
+it('opens a registered immutable file version and submits independent semantic evidence for its exact report', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'project-panel-worker-')), f = workerFixture(directory)
+  try {
+    f.prepare()
+    const artifact = f.write()
+    const report = f.reports.submit(f.attempt.sessionId, f.report([{ id: artifact.id, contentVersion: artifact.contentVersion }]))
+    server.projects = [f.project]
+    server.conversations[f.project.id] = { project: f.project, messages: [], tasks: [f.store.tickets.get(f.plan.ticketId)!], artifacts: f.artifacts.view(f.project.id), reports: [report], decisions: [] }
+    at({ page: 'projects', id: f.project.id }); await mount(en)
+    expect(text()).toContain(en.humanReview)
+    expect(text()).toContain('note.md')
+    await click(en.artifactRead)
+    expect(server.requests.some(item => item.path === `projects/${f.project.id}/artifacts/${artifact.id}/${artifact.contentVersion}`)).toBe(true)
+    expect(text()).toContain('Fixture artifact content')
+    expect(all('button').find(item => item.textContent === en.acceptancePass)?.hasAttribute('disabled')).toBe(true)
+    await type(field<HTMLTextAreaElement>(en.acceptanceEvidence), 'Checked sources and scope against the original request')
+    await click(en.acceptancePass)
+    expect(server.requests.find(item => item.path === `projects/${f.project.id}/acceptance`)?.body).toMatchObject({ ticketId: f.plan.ticketId, reportId: report.id, conclusion: 'passed', evidence: 'Checked sources and scope against the original request' })
+    expect(text()).toContain('Fixture gate requires a registered report')
+    expect(server.conversations[f.project.id]?.tasks?.[0]?.ended).toBeUndefined()
+  } finally { f.store.close(); rmSync(directory, { recursive: true, force: true }) }
+})
+it.each([zh, en])('shows localized blockers alongside the independent gate and reviews only the current report (%#)', async dictionary => {
+  const directory = mkdtempSync(join(tmpdir(), 'project-panel-blockers-')), f = workerFixture(directory, { version: 2, mode: 'human-review' })
+  try {
+    f.prepare()
+    const artifact = f.write(), report = f.reports.submit(f.attempt.sessionId, f.report([{ id: artifact.id, contentVersion: artifact.contentVersion }], { unresolved: ['尚缺原始文献的发布日期', 'The cited table has not been checked'] }))
+    const update = () => {
+      server.projects = [f.project]
+      server.conversations[f.project.id] = { project: f.project, messages: [], tasks: [f.store.tickets.get(f.plan.ticketId)!], artifacts: f.artifacts.view(f.project.id), reports: f.reports.reports(f.plan.ticketId), decisions: f.reports.decisions(f.plan.ticketId) }
+    }
+    update(); at({ page: 'projects', id: f.project.id }); await mount(dictionary)
+    expect(text()).toContain(dictionary.executionUnresolved)
+    expect(text()).toContain(dictionary.reportUnresolved)
+    expect(text()).toContain('尚缺原始文献的发布日期'); expect(text()).toContain('The cited table has not been checked')
+    expect(text()).not.toContain('unresolved-items')
+    expect(text()).toContain(dictionary.acceptanceBlockersRemain)
+    await type(field<HTMLTextAreaElement>(dictionary.acceptanceEvidence), 'Reviewed available note; remaining source work is still required')
+    expect(all('button').find(item => item.textContent === dictionary.acceptancePass)?.hasAttribute('disabled')).toBe(false)
+    f.reports.decide('owner', f.project.id, { ticketId: f.plan.ticketId, reportId: report.id, operationId: 'blocked-pass', conclusion: 'passed', evidence: 'Reviewed this version' })
+    expect(f.store.tickets.get(f.plan.ticketId)?.ended).toBeUndefined()
+    const revised = f.write('# Note\nSources and dates checked.', 'revised-file')
+    const next = f.reports.submit(f.attempt.sessionId, f.report([{ id: revised.id, contentVersion: revised.contentVersion }], { operationId: 'revised-report' }))
+    update(); await remount(dictionary)
+    expect(text()).toContain(dictionary.executionSemanticReview)
+    expect(text()).not.toContain('semantic-review')
+    expect(text()).not.toContain('尚缺原始文献的发布日期')
+    expect(text()).not.toContain('The cited table has not been checked')
+    expect(text()).toContain(dictionary.acceptancePass)
+    f.reports.decide('owner', f.project.id, { ticketId: f.plan.ticketId, reportId: next.id, operationId: 'current-pass', conclusion: 'passed', evidence: 'Reviewed revised content' })
+    update(); await remount(dictionary)
+    expect(text()).toContain(dictionary.executionDone)
+    expect(all('button').some(item => item.textContent === dictionary.acceptancePass)).toBe(false)
+  } finally { f.store.close(); rmSync(directory, { recursive: true, force: true }) }
+})
+
 it('opens the project home, creates a project from name and goal, and isolates its conversation', async () => {
   at({ page: 'projects' })
   await mount()

@@ -164,7 +164,7 @@ function routes(runtime: HttpHost): Routes {
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   const projectHost = (actorId: string | undefined) => {
     if (!actorId) throw new ProjectAuthError(401, 'DSH login required')
-    if (!runtime.projectCoordinator || !runtime.configured()) throw new ProjectAuthError(503, 'Project discussion is unavailable until instance setup completes')
+    if (!runtime.projectCoordinator) throw new ProjectAuthError(503, 'Project discussion is unavailable')
     return { coordinator: runtime.projectCoordinator, actorId }
   }
   return {
@@ -175,6 +175,12 @@ function routes(runtime: HttpHost): Routes {
       return { project: host.coordinator.create(host.actorId, input) }
     },
     'GET projects/:id/conversation': ({ actorId, params }) => { const host = projectHost(actorId); return host.coordinator.view(host.actorId, params.id) },
+    'GET projects/:id/artifacts/:artifactId/:version': ({ actorId, params }) => { const host = projectHost(actorId); return host.coordinator.artifact(host.actorId, params.id, params.artifactId, params.version) },
+    'POST projects/:id/acceptance': async ({ actorId, params, body }) => {
+      const host = projectHost(actorId)
+      const input = z.object({ ticketId: z.string().min(1), operationId: z.string().min(1).max(200), reportId: z.string().min(1), conclusion: z.enum(['passed', 'changes_required', 'needs_judgment']), evidence: z.string().trim().min(1).max(16000) }).strict().parse(await body())
+      return host.coordinator.decide(host.actorId, params.id, input)
+    },
     'POST projects/:id/messages': async ({ actorId, params, body }) => {
       const host = projectHost(actorId)
       const input = z.object({ requestId: z.string().min(1).max(200), text: z.string().trim().min(1).max(16000), ticketId: z.string().min(1).optional(), planRevision: z.number().int().positive().optional() }).strict().parse(await body())

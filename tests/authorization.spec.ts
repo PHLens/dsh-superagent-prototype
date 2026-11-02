@@ -190,7 +190,7 @@ describe('Plan Assignment registration', () => {
     for (const ref of invalid) {
       const forged = structuredClone(base)
       forged.assignments.push({ ...next, contract: { ...next.contract, inputs: [ref as PlanAssignmentInput] } })
-      expect(() => repo.tickets.save(forged)).toThrow(/same ticket|artifacts require T4/i)
+      expect(() => repo.tickets.save(forged)).toThrow(/same ticket|registered project content version/i)
     }
     const valid = structuredClone(base)
     valid.assignments.push({ ...next, contract: { ...next.contract, inputs: [{ kind: 'dependency', ticketId: scope.ticketId, assignmentId: first.id }] } })

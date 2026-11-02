@@ -36,6 +36,7 @@ export class ProjectPlans {
     this.owner(actorId, projectId)
     return new Plans({
       repo: this.store,
+      validateArtifact: (projectId, id, version) => this.store.registeredArtifact(projectId, id, version),
       resolveConfirmation: request => {
         if (request.projectId !== projectId) return undefined
         const evidence = this.confirmation(actorId, projectId, request)

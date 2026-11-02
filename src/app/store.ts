@@ -12,6 +12,7 @@ import { Versions } from './versions.ts'
 import { storeReads } from './store-read.ts'
 import { projectRepository } from './project-store.ts'
 import { CONVERSATION_SCHEMA_SQL } from './conversation-store.ts'
+import { EXECUTION_SCHEMA_SQL } from './execution-attempts.ts'
 
 /** A Trigger's position on its thread timeline, ordered by timestamp and then `id` as tie-breaker. */
 export interface TimelinePlace { at: string; id: string }
@@ -101,6 +102,7 @@ export class Store implements Repositories {
             CREATE INDEX IF NOT EXISTS effect_due ON effect(kind, due, seq);
           `)
           this.db.exec(CONVERSATION_SCHEMA_SQL)
+          this.db.exec(EXECUTION_SCHEMA_SQL)
           this.addColumns()
           if (version === 10) migrateTo11(this)
           if (version !== SCHEMA_VERSION) this.set(KV.store.schema, SCHEMA_VERSION)
@@ -249,12 +251,18 @@ export class Store implements Repositories {
       if (JSON.stringify(meta) !== JSON.stringify(thread.meta)) this.threads.save({ ...thread, meta })
     }),
   }
+  registeredArtifact(projectId: string, id: string, version: string): boolean {
+    const row = this.db.prepare('SELECT value FROM worker_artifact WHERE id=?').get(id)
+    if (!row) return false
+    const item = JSON.parse(String(row.value)) as { projectId: string; contentVersion: string; status: string }
+    return item.projectId === projectId && item.contentVersion === version && item.status === 'registered'
+  }
   readonly tickets = {
     get: (id: string): Ticket | undefined => { const row = this.db.prepare('SELECT value FROM ticket WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as Ticket : undefined },
     save: (ticket: Ticket): void => {
       const previous = this.tickets.get(ticket.id)
       const introduced = ticket.assignments.some(item => !previous?.assignments.some(old => old.id === item.id))
-      validateTicketOwnership(ticket, previous, id => this.projects.get(id), introduced ? this.tickets.list() : undefined)
+      validateTicketOwnership(ticket, previous, id => this.projects.get(id), introduced ? this.tickets.list() : undefined, (projectId, id, version) => this.registeredArtifact(projectId, id, version))
       this.db.prepare('INSERT INTO ticket VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(ticket.id, JSON.stringify(ticket))
     },
     /** Newest first. */

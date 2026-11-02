@@ -1,5 +1,8 @@
 /** Executor Session tools for reading ticket context, acknowledging requests, managing threads, handing back out-of-scope triggers, and reporting status. */
 import { z } from 'zod'
+import type { ExecutionAttempts } from '../execution-attempts.ts'
+import type { ArtifactStore } from '../artifact-store.ts'
+import type { ReportAcceptance } from '../report-acceptance.ts'
 import { liveTicket, type EngineForExecutor, type Ticket } from '../../core/index.ts'
 import { IM_WORDS } from '../../infra/text.ts'
 import { claimPull, readPull } from '../../sources/github-pull.ts'
@@ -18,6 +21,53 @@ export interface ExecutorToolsHost {
   /** GitHub Source context whose pull-request rules govern claiming a reported PR. */
   readonly github: SourceContext
   sendReplies(): Promise<void>
+}
+
+export function projectWorkerTools(attempts: ExecutionAttempts, artifacts: ArtifactStore, reports: ReportAcceptance, sessionId: string): Tool[] {
+  return [
+    tool({ name: 'project_worker_context', description: 'Read the immutable authorized plan, saved originalMessage for the original request language, pinned inputs and registered artifacts. Identity and originalMessage come only from this native Session Assignment authorization, never conversation history.', schema: z.object({}).strict(), execute: async () => {
+      const { attempt, assignment, ticket } = attempts.resolve(sessionId)
+      const authorization = ticket.authorizations?.find(item => item.id === assignment.contract!.authorizationId)
+      return { plan: assignment.contract!.plan, originalMessage: authorization?.originalMessage, inputs: assignment.contract!.inputs, outputs: artifacts.view(attempt.projectId).filter(item => item.ticketId === attempt.ticketId), context: attempt.context }
+    } }),
+    tool({ name: 'project_read_input', description: 'Read only an exact artifact content version pinned in this Assignment input contract.', schema: z.object({ id: z.string(), contentVersion: z.string() }).strict(), execute: async args => {
+      const { attempt, assignment } = attempts.resolve(sessionId)
+      if (!assignment.contract!.inputs.some(item => item.kind === 'artifact' && item.artifactId === args.id && item.contentVersion === args.contentVersion)) throw new Error('Artifact input is not pinned in this contract')
+      const item = artifacts.read(attempt.projectId, args.id, args.contentVersion)
+      return { id: item.id, contentVersion: item.contentVersion, name: item.name, content: item.content }
+    } }),
+    tool({ name: 'project_write_artifact', description: 'Write and register an immutable nonempty UTF-8 file for an exact named plan output. Reuse operation_id only with the same content.', schema: z.object({ operation_id: z.string().min(1), output: z.string().min(1), name: z.string().min(1), content: z.string().min(1).max(2_000_000) }).strict(), execute: async args => {
+      const item = artifacts.write(sessionId, { operationId: args.operation_id, output: args.output, name: args.name, content: args.content })
+      return { id: item.id, contentVersion: item.contentVersion, output: item.output, name: item.name, bytes: item.bytes, status: item.status }
+    } }),
+    tool({ name: 'project_worker_report', description: 'Submit completed work, evidence, exact artifact versions and actual unfinished work/content blockers. Registered independent acceptance is application-managed, not an unresolved item. Receipt is not completion: follow currentStatus and nextStep. GitHub PR URL is optional.', schema: z.object({
+      operation_id: z.string().min(1),
+      state: z.enum(['progress', 'ready', 'blocked', 'failed']).describe('Use ready after submitting all outputs; when no actual work/content blockers remain, use unresolved=[]. Registered independent or human acceptance is managed separately by the application.'),
+      completed: z.string().min(1), evidence: z.array(z.string().min(1)).min(1), artifacts: z.array(z.object({ id: z.string(), contentVersion: z.string() }).strict()),
+      unresolved: z.array(z.string()).describe('Only actual unfinished work or content blockers. Do not list waiting for registered independent acceptance or human review. Preserve real blockers; never clear them merely to finish.'),
+      pr_url: z.string().url().optional(),
+    }).strict(), execute: async args => {
+      const report = reports.submit(sessionId, { operationId: args.operation_id, state: args.state, completed: args.completed, evidence: args.evidence, artifacts: args.artifacts, unresolved: args.unresolved, ...(args.pr_url ? { prUrl: args.pr_url } : {}) })
+      const { ticket, assignment } = attempts.resolve(sessionId, true)
+      const current = reports.reports(ticket.id).findLast(item => item.assignmentId === assignment.id)!
+      const completed = assignment.state === 'ended' && assignment.endedReason === 'accepted'
+      const steps: Record<string, string> = {
+        'missing-artifacts': 'Write and register every required output, then submit a new report with exact artifact versions. Preserve any real unresolved work/content blockers.',
+        'unresolved-items': 'Resolve the actual work/content blockers and submit an updated report with a new operation_id. Keep every remaining blocker in unresolved; never clear it merely to finish. Independent acceptance is managed separately by the application.',
+        'semantic-review': 'Await the application independent authenticated review of the current report and exact artifact/conditions versions. This review is not an unresolved work item; receipt alone does not complete the task.',
+        changes_required: 'Address the independent review feedback, register revised artifacts and submit a new ready report. The new report requires a new independent review. Preserve real blockers.',
+        needs_judgment: 'Await further independent judgment of the current version. Preserve real work/content blockers and do not claim completion.',
+        blocked: 'Address the reported work/content blockers and submit an updated report. Preserve every remaining real blocker.',
+        failed: 'The current execution reported failure. Report the actual failure and remaining work; follow the authorized recovery instructions.',
+      }
+      const nextStep = completed ? 'The current report satisfies all registered completion conditions. No further worker report is needed.'
+        : steps[assignment.waitingReason ?? ''] ?? 'Continue the authorized work; submit ready once all outputs are registered, preserving actual work/content blockers in unresolved.'
+      const isCurrentReport = report.id === current.id
+      return { received: true, reportId: report.id, currentReportId: current.id, isCurrentReport,
+        currentStatus: { completed, waitingReason: assignment.waitingReason ?? null, unresolved: current.unresolved },
+        nextStep: isCurrentReport ? nextStep : `This is a historical receipt only; it did not reaggregate or complete work. Follow currentReportId and currentStatus. ${nextStep}` }
+    } }),
+  ]
 }
 
 export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
