@@ -1,5 +1,5 @@
 /** Ports the core depends on. Sources, policies, assessors, executors, and channels are project-specific. */
-import type { Assignment, ChannelRef, Decision, DecisionKind, Mandate, MandateBasis, Strength, Thread, Ticket, TicketEndBy, TicketOutcome, Trigger }
+import type { Assignment, ChannelRef, Decision, DecisionKind, Mandate, MandateBasis, Project, Strength, Thread, Ticket, TicketEndBy, TicketOutcome, Trigger }
   from './model.ts'
 import type { Reason } from './reasons.ts'
 
@@ -103,6 +103,19 @@ export interface DomainEvents {
 export type DomainEvent = { [K in keyof DomainEvents]: { type: K; at: string; data: DomainEvents[K] } }[keyof DomainEvents]
 
 /** Durable state. Every method is synchronous so `atomic` can wrap a unit of work. */
+export interface ProjectRepository {
+  get(id: string): Project | undefined
+  save(project: Project): void
+  list(): Project[]
+}
+
+/** Optional project persistence kept separate so legacy repositories remain source-compatible. */
+export interface ProjectRepositories {
+  atomic<T>(work: () => T): T
+  projects: ProjectRepository
+  tickets: Repositories['tickets']
+}
+
 export interface Repositories {
   atomic<T>(work: () => T): T
   triggers: {

@@ -1,7 +1,7 @@
 /** What the Executor and its workers report about the Assignments that run tickets. */
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
-import { latestAssignment, liveTicket, runningAssignment } from './model.ts'
+import { executableTicket, latestAssignment, liveTicket, runningAssignment } from './model.ts'
 import type { ReportState, Ticket } from './model.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Replies } from './replies.ts'
@@ -33,6 +33,7 @@ export class Assignments extends EnginePart {
   /** Marks a non-ended assignment running, queues delivery of waiting undelivered inputs on an open ticket, and emits `assignment.started`. */
   started(ticketId: string, assignmentId: string): void {
     const ticket = this.require(ticketId)
+    if (!executableTicket(ticket)) return
     const assignment = ticket.assignments.find(item => item.id === assignmentId)
     if (!assignment || assignment.state === 'ended') return
     assignment.state = 'running'; assignment.startedAt ??= this.now()
@@ -59,7 +60,7 @@ export class Assignments extends EnginePart {
   /** Records when the worker's Session of an open ticket took `inputIds` into a step, from which its model reads them. */
   read(ticketId: string, inputIds: string[]): void {
     const ticket = this.require(ticketId)
-    if (!liveTicket(ticket)) return
+    if (!liveTicket(ticket) || !executableTicket(ticket)) return
     for (const input of ticket.inputs) if (input.kind === 'trigger' && inputIds.includes(input.id)) input.readAt ||= this.now()
     this.repo.tickets.save(ticket)
   }
@@ -98,6 +99,7 @@ export class Assignments extends EnginePart {
    */
   report(ticketId: string, report: WorkerReport): Ticket {
     const ticket = this.require(ticketId)
+    if (!executableTicket(ticket)) throw new UserError('projectNotRunnable')
     if (!liveTicket(ticket)) throw new UserError('ticketEnded')
     if (report.question && (report.state === 'ready' || report.answers)) throw new UserError('questionWithResult')
     if (report.askedBy && !report.question) throw new UserError('askerWithoutQuestion')
@@ -135,6 +137,6 @@ export class Assignments extends EnginePart {
   /** The ticket, while it is open and `assignmentId` runs it. */
   private running(ticketId: string, assignmentId: string): Ticket | undefined {
     const ticket = this.require(ticketId)
-    return liveTicket(ticket) && runningAssignment(ticket)?.id === assignmentId ? ticket : undefined
+    return executableTicket(ticket) && liveTicket(ticket) && runningAssignment(ticket)?.id === assignmentId ? ticket : undefined
   }
 }

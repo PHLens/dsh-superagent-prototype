@@ -6,5 +6,6 @@ export { Engine, type EngineForExecutor, type EngineForMainSession, type EngineF
 export { UserError, USER_ERRORS, type UserErrorCode } from './errors.ts'
 export { REASONS, reasonText, said, type Reason, type ReasonCode } from './reasons.ts'
 export { MemoryRepositories } from './memory.ts'
+export { Projects, type ProjectServiceOptions, type CreateProject, type UpdateProject } from './projects.ts'
 export { canRetry, ticketStage, type TicketStage } from './stage.ts'
 export { key } from './ids.ts'

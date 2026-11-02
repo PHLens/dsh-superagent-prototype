@@ -13,7 +13,7 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
-import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { Engine, Projects, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
@@ -57,6 +57,7 @@ const now = (): string => new Date().toISOString()
  * Locks the state directory before opening SQLite so concurrent processes cannot corrupt or double-migrate state.
  */
 export class Runtime extends Service implements SourceHost {
+  readonly projects: Projects
   readonly store: Store
   readonly setup: Setup
   readonly prompts: Prompts
@@ -96,6 +97,7 @@ export class Runtime extends Service implements SourceHost {
     try {
       const report = (error: unknown) => { ctx.logger.warn('dsh-superagent: %s', String(error)) }
       const store = opened = this.store = new Store(join(machine.stateDir, 'orchestrator.sqlite'), report)
+      this.projects = new Projects({ repo: store })
       const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, restart })
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
@@ -158,7 +160,7 @@ export class Runtime extends Service implements SourceHost {
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
-        get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
+        get githubProblem() { return setup.githubProblem }, get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
@@ -177,7 +179,7 @@ export class Runtime extends Service implements SourceHost {
   /** Resolved deployment; throws while waiting for setup (`!configured()`). */
   get deployment(): Deployment { return this.setup.deployment }
   configured(): boolean { return this.setup.configured() }
-  get setupProblem(): SetupProblem | undefined { return this.setup.problem }
+  get setupProblem(): SetupProblem | undefined { return this.setup.problem ?? this.setup.githubProblem }
   /** Why the Feishu bot is unavailable even though the Feishu Source configures a CLI. */
   get feishuProblem(): SetupProblem | undefined { return this.setup.feishuProblem }
   links(): LinkTarget {
@@ -201,27 +203,36 @@ export class Runtime extends Service implements SourceHost {
   private async initialize(): Promise<void> {
     // Register management HTTP routes before setup completes so operators can fix setup problems in the UI.
     this.disposers.push(registerHttp(this.ctx, this.httpHost()))
-    if (!await this.setup.run(this.store.settings())) {
-      this.runtimeHealth.set({ ...health('paused', 'setupPending'), at: now() })
-      return
+    try {
+      const configured = await this.setup.run(this.store.settings())
+      if (this.closing()) return
+      if (!configured) {
+        this.runtimeHealth.set({ ...health('paused', 'setupPending'), at: now() })
+        return
+      }
+      this.sessions.install()
+      this.executor.install()
+      await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
+      if (this.closing()) return
+      for (const id of this.settings.syncable()) {
+        await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
+        if (this.closing()) return
+      }
+      this.executor.resume()
+      this.passes.start()
+      this.effects.start()
+      this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
+    } catch (error) {
+      // Stopping cancels setup rather than turning it into a resource failure or an unhandled ready rejection.
+      if (!this.lifetime.aborted) throw error
     }
-    this.sessions.install()
-    this.executor.install()
-    await this.sessions.ensure(this.masterId, this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
-    for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
-    // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
-    if (this.closing()) return
-    this.executor.resume()
-    this.passes.start()
-    this.effects.start()
-    this.runtimeHealth.set({ state: 'ready', detail: 'Orchestrator is ready', at: now() })
   }
   private httpHost(): HttpHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
     return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
       get deployment() { return setup.deployment },
-      get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
+      get setupProblem() { return setup.problem ?? setup.githubProblem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
       checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog() }
   }
@@ -234,7 +245,8 @@ export class Runtime extends Service implements SourceHost {
       const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
       for (const agent of agents) agent.cancel({ kind: 'user' }, { keepInbox: true })
-      await Promise.allSettled([passes, this.effects.drain(), ...agents.map(agent => agent.whenIdle())])
+      // Startup may still be unwinding a cancelled probe or write; it must finish before environment restoration and DB/lock release.
+      await Promise.allSettled([this.ready, passes, this.effects.drain(), ...agents.map(agent => agent.whenIdle())])
       // The workers' jobs and subagents stop too: their ends would start worker turns without the tool limits released below.
       await this.executor.shutdown()
       this.executor.dispose()

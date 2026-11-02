@@ -30,13 +30,15 @@ flowchart TB
 
 `Runtime` is the composition root; it contains no domain rules. Its constructor locks the state directory, opens the Store and builds each component. If construction fails, it closes the Store and releases the lock.
 
-Startup registers management routes and runs Setup. After setup resolves, it installs Session and Executor hooks, ensures the main Session exists, starts Policy syncs, resumes interrupted Assignments, and starts passes and effects. `ready` marks completion of startup.
+Startup registers management routes and runs Setup. Setup establishes base instance readiness independently from resource readiness: absent or disabled Sources do not resolve their CLI, PATH, account or environment requirements, while an enabled resource failure is retained as that Source's problem without preventing the application from starting. After base setup resolves, Runtime installs Session and Executor hooks, ensures the main Session exists, starts Policy syncs, resumes interrupted Assignments, and starts passes and effects. `ready` marks completion of startup; each Source context separately reports whether its resource is configured before polling or sending.
 
-Shutdown cancels turns, waits for passes, effects and agents, restores the process environment, closes the Store and releases the lock. Source plugins inject Runtime as the `orchestrator` service through the narrow `SourceHost` interface.
+A failed GitHub credential-helper check removes GitHub capability and rewrites its deny shim while retaining the specific resource problem. Failures to establish the base environment, including unwritable paths and foreign files, still block startup. Cancellation propagates out of resource probes; setup checks it after asynchronous writes and before applying the environment, and Runtime checks closing before installing hooks or continuing startup.
+
+Shutdown cancels turns and startup probes, waits for startup, passes, effects and agents, restores the process environment, closes the Store and releases the lock. Source plugins inject Runtime as the `orchestrator` service through the narrow `SourceHost` interface.
 
 | Part | Module | Does |
 | --- | --- | --- |
-| Setup | `src/app/setup.ts` | Resolves the repository and the accounts by probing their CLIs the way worker shells run them, writes and applies the workers' environment and command shims, and keeps the setup problems; Settings checks a changed account through it, and restarts through it, which runs setup again |
+| Setup | `src/app/setup.ts` | Establishes base instance readiness, resolves enabled resource accounts by probing their CLIs the way worker shells run them, writes and applies worker environment and deny shims, and retains resource problems; absent or disabled resources remain unresolved and are not probed, while Settings restarts through it when setup fields change |
 | Passes | `src/app/passes.ts` | One pass at a time, every two seconds and whenever a command asks: the due effects, then `Engine.evaluateDue`; a Source's Trigger reaches the Engine through it |
 | Outbox | `src/app/outbox.ts` | The Engine's `Outbox` port, and the only writer of the receipts: `send` keeps a message's receipt and queues its `reply` effect in one transaction, and the effect's handler sends it through `SourceRegistry.send`; a message waits while its Source is off, and is dropped when the conversation is gone or not listened to |
 | Notices | `src/app/notices.ts` | Converts domain events and worker activity into main-Session messages. `eventNotice` handles domain notices; `reportRelay` forwards questions immediately, keeps ordinary progress on its Ticket, and relays other reports; `followupRelay` names the Tickets that own a human follow-up. Relays arriving during a turn are delivered together at its next step through the DeepSeek Harness inbox |
@@ -159,7 +161,15 @@ Its interfaces are grouped by purpose:
 - **Outbox receipts:** `replyStatus` and `receipts`, written only by Outbox. Receipt operations are `get`, `waiting`, `behind`, `add`, `settle` and `withdraw`. `behind` checks whether an earlier message for the same Ticket and conversation is waiting with fewer than three failures. A withdrawn message settles with `channelGone` or `channelIgnored`. Read queries expose failed and dropped replies through `failingReplies`, `droppedReplies` and `droppedSince`.
 - **Typed key-value records:** `get`, `set`, `delete` and `keys`, using entries from `KV`.
 
-`afterCommit` runs an action only after the transaction commits, never after rollback. Runtime reads records in their stored shape; the schema 11 migration converts older supported records at startup.
+`afterCommit` runs an action only after the transaction commits, never after rollback. Runtime reads records in their stored shape; schema 10 records are converted once before the schema 12 transaction commits.
+
+### Projects (T1)
+
+`Runtime.projects` exposes the internal `Projects` service: `create`, `get`, `list`, `update`, project-scoped `ticket`, `createDraft` and `awaitConfirmation`. Project IDs are server-generated and independent of names or directories. SQLite and memory adapters share the same ownership validation; the project port is separate from legacy `Repositories` so existing core callers remain compatible.
+
+Project tasks are existing Tickets with `projectId` and `projectStage` (`draft` or `awaiting-confirmation`), never another task aggregate. A draft uses an explicitly inert `mandate.projectDraft` marker, has no Assignment and creates no execution Effects. Ownership is immutable, Assignment IDs cannot be reused by another Ticket, and project Assignment history cannot be removed to bypass that check. Legacy records remain unowned and cannot be rebound to a project.
+
+Every T1 project Ticket remains non-executable, even if it contains a legacy Mandate, stale launch/delivery Effects or a running Assignment. Core lifecycle callbacks and Executor launch, delivery and restart paths reject or ignore it. `awaitConfirmation` changes only draft metadata; human confirmation and dispatch belong to T3. T1 adds no HTTP/UI workflow, project filesystem provisioning or external resource binding.
 
 ### Effects
 
@@ -298,6 +308,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/limits.ts` | The limits of the values a person sets, which the settings schemas check and the panel's fields offer |
 | `src/kv.ts` | `KV`: every family of `kv` records with its key, its value's type and its owner, and the `Key` and `Family` types the Store and `SourceContext.state` take |
 | `src/navigation.ts` | Opens a DeepSeek Harness Session from the panel once the host's catalog lists it |
+| `src/core/projects.ts` | Project create/read/update service, stable identity and Ticket/Assignment ownership checks; all T1 project Tickets remain inert |
 | `src/core/model.ts` | The domain types, among them the typed Ticket and `MandateBasis`, with `threadKey`, `ticketOutcome`, `reached`, `followupOwners`, `settled`, `waitsForPerson`, `liveTicket`, `runningAssignment`, `latestAssignment` and `latestReport` |
 | `src/core/ports.ts` | The ports: `Repositories`, `Policy`, `SourceScope`, `Assessor`, `Executor`, `Outbox`, and the domain events |
 | `src/core/engine.ts` | The Engine, the core's entry point, and the role interfaces `EngineForSources`, `EngineForMainSession`, `EngineForPeople`, `EngineForSettings` and `EngineForExecutor` |
@@ -319,8 +330,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/outbox.ts` | The Outbox: the Engine's `Outbox` port, the receipts and the `reply` effects that send them |
 | `src/app/notices.ts` | The main Session's notices and relays: `eventNotice`, `reportRelay`, `resultRelay` and `followupRelay` |
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
+| `src/app/project-store.ts` | SQLite project repository with stable ids; project lifecycle stays in the core service |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
-| `src/app/migration.ts` | The schema 11 migration: one step from schema 10 that writes every stored record in its current shape |
+| `src/app/migration.ts` | Schema 12 boundary: converts schema 10 records to their current legacy shape; adds no inferred project or authorization to legacy history |
 | `src/app/effects.ts` | Effects |
 | `src/app/versions.ts` | `Versions`: a record kept as numbered snapshots with a pointer to the current one, for the settings and the prompts |
 | `src/app/cache.ts` | `TextCache`: texts kept in memory within a size, the least recently used dropped first |
@@ -430,7 +442,10 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |
-| `tests/migration.spec.ts` | The schema 11 migration: every stored record in its current shape, and the refusal of older schemas |
+| `tests/migration.spec.ts` | Legacy migrations and schema 12: consistent WAL recovery snapshots, rollback, refusal of unsupported schemas and snapshot failures |
+| `tests/project-store.spec.ts` | Project persistence, restart, rename/directory identity, isolation and transactional rollback |
+| `tests/projects.spec.ts` | Project identity and Ticket/Assignment ownership; unauthorized drafts never execute |
+| `tests/no-github-startup.spec.ts` | Startup and application project APIs without external accounts; resource-specific readiness and safe environment |
 | `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |
 | `tests/prompts.spec.ts` | Prompt validation, assembly and versions |
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
@@ -458,6 +473,7 @@ One SQLite file, `<stateDir>/orchestrator.sqlite`, which only the Store opens.
 | `trigger_thread` | Which Threads each Trigger is on, with its time and whether a person wrote it, so a Thread's Triggers are read without scanning every Trigger, in order of time and then id: a page of a Thread's timeline continues from a `<at>|<id>` cursor, and Triggers that share a time are not skipped | Store, with each Trigger |
 | `thread` | Threads: Subscriptions, the Tickets that follow it for context, queued Triggers, the Eval in progress, the count of its expiries and `meta`; the generated columns `active`, set while Triggers are queued or an Eval runs, and `subscribed`, its Source while a Ticket subscribes to it | Engine; Sources write `meta` |
 | `ticket` | Tickets with their Mandate, origin, execution, Assignments, Channels, Inputs and the Threads they follow; the generated columns `open`, set while it has not ended, and `active`, set while Inputs are undelivered or the latest Assignment is pending or running | Engine |
+| `project` | Stable id, name, goal and optional directory; names and paths do not define identity | Projects via project repository |
 | `decision` | Decisions, by Thread | Engine |
 | `effect` | The effect queue: per kind and key, the payload, its order, failed attempts with the last error, and when it is due | Effects; the schema 11 migration queues what earlier versions kept for the main Session |
 | `outbox` | The receipt of each message for a Channel, by id, with the Ticket it is for and its `status`, `pending`, `sent` or `dropped`, kept so an id is never queued twice; for a dropped message, when and why, as the generated column `dropped`, its time, and a reason code. A message that waits has a `reply` effect, which holds its attempts | The Outbox |
@@ -483,7 +499,7 @@ Read caches use bounded in-memory `TextCache` instances and are lost on restart.
 
 Nothing deletes old records yet, so these grow without bound: the `trigger`, `disposition` and `decision` rows; ended Tickets and their Threads; the outbox's receipts; and in `kv`, every saved settings revision and prompt version, the prompt revisions each Session worked under, and the Sources' records per Thread and per Issue or pull request.
 
-`SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of the pre-release schema 10 once, at start, and refuses an older one.
+`SCHEMA_VERSION` only increases (currently 12). A newer database refuses to start; schema 10 remains the oldest supported migration boundary. Before upgrading an existing database, Store creates a consistent SQLite snapshot, including committed WAL pages, under `<database>.snapshots/`. A failed snapshot prevents migration; a failed migration rolls back its DDL and records. Schema 10 records receive their legacy shape conversion once; schema 11 records retain their shape. Schema 12 adds project storage without assigning legacy Tickets, Mandates or Effects to projects. Recovery snapshots are retained for manual recovery; T1 does not implement scheduled backup or automatic restore.
 
 ## Model-facing interfaces
 

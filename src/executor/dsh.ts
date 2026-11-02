@@ -4,7 +4,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { mkdir, rmdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
+import { executableTicket, key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
   from '../core/index.ts'
 import type { Machine } from '../deployment.ts'
@@ -262,15 +262,18 @@ export class DshExecutor implements Executor {
   }
   /** Enqueues a `launch` effect for an accepted or resumed assignment; launches start in queue order as worker slots free up. */
   start(ticket: Ticket, assignment: Assignment): void {
+    if (!executableTicket(ticket)) return
     this.host.effects.enqueue('launch', assignment.id, { ticketId: ticket.id, assignmentId: assignment.id })
   }
   /** Enqueues a `delivery` effect to steer pending inputs into `ticket`'s running worker session. */
-  deliver(ticket: Ticket, _assignment: Assignment): void { this.host.effects.enqueue('delivery', ticket.id, { ticketId: ticket.id }) }
+  deliver(ticket: Ticket, _assignment: Assignment): void {
+    if (executableTicket(ticket)) this.host.effects.enqueue('delivery', ticket.id, { ticketId: ticket.id })
+  }
   /** Launches a queued assignment unless its ticket ended or a newer assignment replaced it meanwhile. */
   private async launchQueued({ ticketId, assignmentId }: { ticketId: string; assignmentId: string }): Promise<void> {
     const ticket = this.host.store.tickets.get(ticketId)
     const assignment = ticket && latestAssignment(ticket)
-    if (!ticket || !liveTicket(ticket) || assignment?.id !== assignmentId || assignment.state !== 'pending') return
+    if (!ticket || !executableTicket(ticket) || !liveTicket(ticket) || assignment?.id !== assignmentId || assignment.state !== 'pending') return
     this.slots.reserve(ticketId, 'launch')
     try { await this.launch(ticket, assignment); this.transient.delete(`launch:${assignmentId}`) }
     catch (error) {
@@ -291,13 +294,13 @@ export class DshExecutor implements Executor {
     // A stop of the worker's background work ends with a cancel, which would drop what is delivered meanwhile.
     await this.stopped(ticketId)
     const first = this.host.store.tickets.get(ticketId)
-    const target = first && liveTicket(first) ? runningAssignment(first) : undefined
+    const target = first && executableTicket(first) && liveTicket(first) ? runningAssignment(first) : undefined
     if (!first || !target || !first.undelivered.length) return
     let woken = false
     try {
       for (;;) {
         const ticket = this.host.store.tickets.get(ticketId)
-        const assignment = ticket && liveTicket(ticket) ? runningAssignment(ticket) : undefined
+        const assignment = ticket && executableTicket(ticket) && liveTicket(ticket) ? runningAssignment(ticket) : undefined
         const inputId = ticket?.undelivered[0]
         if (!ticket || !assignment || inputId === undefined) return
         // Waking an idle worker reserves a slot (including the extra slot reserved for human follow-ups).
@@ -330,7 +333,7 @@ export class DshExecutor implements Executor {
     // Re-check right before session delivery because the ticket may have ended while awaiting `sourceLink`.
     const live = () => {
       const current = this.host.store.tickets.get(ticket.id)
-      if (!current || !liveTicket(current) || runningAssignment(current)?.id !== assignment.id) throw new Error('The ticket ended or another Assignment took it over')
+      if (!current || !executableTicket(current) || !liveTicket(current) || runningAssignment(current)?.id !== assignment.id) throw new Error('The ticket ended, lacks execution authorization or another Assignment took it over')
       // A stop of the worker's background work that started meanwhile ends with a cancel, which would drop the Input.
       if (this.stopping.has(ticket.id)) throw new Later('The worker\'s background work is stopping')
     }
@@ -426,7 +429,7 @@ export class DshExecutor implements Executor {
       if (this.host.closing()) throw new Error('dsh-superagent is stopping')
       if (this.host.paused()) throw new Later('Processing is paused')
       const stored = this.host.store.tickets.get(ticket.id)
-      return !!stored && liveTicket(stored) && latestAssignment(stored)?.id === assignment.id
+      return !!stored && executableTicket(stored) && liveTicket(stored) && latestAssignment(stored)?.id === assignment.id
     }
     const source = sourceTrigger(this.host, ticket)
     const workspace = ticket.execution?.directory ?? ''
@@ -524,6 +527,8 @@ export class DshExecutor implements Executor {
   resume(): void {
     // Launch pending tickets oldest first (in acceptance order).
     for (const ticket of this.host.store.tickets.open().sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+      // T1 persists project drafts, but only T3 can introduce project execution authorization.
+      if (!executableTicket(ticket)) continue
       const running = runningAssignment(ticket), latest = latestAssignment(ticket)
       if (running) {
         // A restart within this process left DSH's Sessions, jobs and subagents running: they stop first. The inbox keeps an
@@ -559,7 +564,7 @@ export class DshExecutor implements Executor {
     const go = () => {
       if (this.host.closing()) return
       const ticket = this.host.store.tickets.get(ticketId)
-      if (!ticket || !liveTicket(ticket) || runningAssignment(ticket)?.id !== assignmentId) { this.resuming.delete(assignmentId); return }
+      if (!ticket || !executableTicket(ticket) || !liveTicket(ticket) || runningAssignment(ticket)?.id !== assignmentId) { this.resuming.delete(assignmentId); return }
       // Wait while processing is paused or no wake slot is free.
       if (this.host.paused()) { this.after(SLOT_WAIT_MS, go); return }
       const sessionId = workerSessionId(ticketId)

@@ -1,7 +1,7 @@
 /** Tickets: their lifecycle from an accept to their end, their Subscriptions and their Inputs. */
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
-import { latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, threadKey, waitsForPerson } from './model.ts'
+import { executableTicket, latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, threadKey, waitsForPerson } from './model.ts'
 import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome,
   Trigger, TriggerDisposition } from './model.ts'
 import type { AssessmentOutcome } from './ports.ts'
@@ -47,6 +47,7 @@ export class Tickets extends EnginePart {
       if (channel && !ticket.channels.some(item => sameChannel(item, channel))) ticket.channels.push(channel)
     }
     ticket = this.options.prepareTicket?.(ticket, outcome) ?? ticket
+    if (!executableTicket(ticket)) throw new UserError('projectNotRunnable')
     const assignment = this.newAssignment(ticket)
     this.repo.tickets.save(ticket)
     for (const triggerId of triggerIds) for (const ref of this.repo.triggers.get(triggerId)?.threads ?? []) this.subscribe(id, ref)
@@ -167,6 +168,7 @@ export class Tickets extends EnginePart {
    */
   retry(ticketId: string): Ticket {
     const ticket = this.require(ticketId)
+    if (!executableTicket(ticket)) throw new UserError('projectNotRunnable')
     const latest = latestAssignment(ticket)
     if (!canRetry(ticket) || !latest) throw new UserError('notRetryable')
     this.endAssignment(ticket, latest, 'retried')
@@ -233,6 +235,7 @@ export class Tickets extends EnginePart {
    */
   addInput(ticket: Ticket, input: TicketInput): void {
     if (ticket.inputs.some(existing => existing.id === input.id)) return
+    if (!executableTicket(ticket)) { ticket.inputs.push(input); ticket.updatedAt = this.now(); this.repo.tickets.save(ticket); return }
     ticket.inputs.push(input); ticket.updatedAt = this.now()
     // Hold back automated inputs while the worker is waiting on a person.
     const held = liveTicket(ticket) && automatic(input) && waitsForPerson(ticket)
@@ -252,6 +255,7 @@ export class Tickets extends EnginePart {
   wake(ticketId: string): void {
     const ticket = this.repo.tickets.get(ticketId)
     if (!ticket || liveTicket(ticket) || ticket.ended?.by === 'human' || !ticket.undelivered.length) return
+    if (!executableTicket(ticket)) return
     const policy = this.policy()
     if (policy.paused) return
     if (!policy.revalidate(ticket.mandate)) { this.refuse(ticket); return }
@@ -316,6 +320,7 @@ export class Tickets extends EnginePart {
   }
   /** Replace a ticket's running Assignment with a new one that receives `note` first, and queue it for launch. */
   restart(ticket: Ticket, running: Assignment, reason: string, note: string): void {
+    if (!executableTicket(ticket)) return
     this.endAssignment(ticket, running, reason)
     this.requeueUntaken(ticket, running)
     const assignment = this.newAssignment(ticket)
@@ -379,7 +384,8 @@ export class Tickets extends EnginePart {
   }
   /** Add a pending Assignment; a failed delivery to the one before it no longer concerns the ticket. */
   private newAssignment(ticket: Ticket): Assignment {
-    const assignment: Assignment = { id: key('assignment', ticket.id, String(ticket.assignments.length)), state: 'pending', createdAt: this.now() }
+    if (!executableTicket(ticket)) throw new UserError('projectNotRunnable')
+    const assignment: Assignment = { id: key('assignment', ticket.id, String(ticket.assignments.length)), ticketId: ticket.id, state: 'pending', createdAt: this.now() }
     ticket.assignments.push(assignment)
     delete ticket.delivery
     return assignment
@@ -394,6 +400,7 @@ export class Tickets extends EnginePart {
    */
   note(ticketId: string, text: string): Ticket {
     const ticket = this.require(ticketId)
+    if (!executableTicket(ticket)) throw new UserError('projectNotRunnable')
     if (!liveTicket(ticket)) throw new UserError('ticketEnded')
     const at = this.now()
     this.addInput(ticket, { id: key('input', ticketId, 'note', at, text), kind: 'note', text, at })

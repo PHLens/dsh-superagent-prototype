@@ -20,6 +20,8 @@ export interface SourceContextDeps {
   configured(): boolean
   /** Setup problem whose `place` matches the Source kind receives it on `context.problem`. */
   readonly setupProblem?: SetupProblem | undefined
+  /** Why setup could not resolve the GitHub resource; base instance readiness may still succeed. */
+  readonly githubProblem?: SetupProblem | undefined
   /** Why setup found no Feishu bot even though the Feishu Source names a CLI. */
   readonly feishuProblem?: SetupProblem | undefined
   /** Hands a Trigger to the Engine and schedules the pass that assesses it. */
@@ -37,8 +39,9 @@ export function sourceContextOf(deps: SourceContextDeps, kind: { kind: string; h
     get deployment() { return deps.deployment },
     commands: deps.commands,
     ready: deps.ready,
-    configured: () => deps.configured(),
-    get problem() { return [deps.feishuProblem, deps.setupProblem].find(problem => problem?.place === kind.kind) },
+    configured: () => deps.configured() && (kind.kind === 'github' ? !!deps.deployment.github : kind.kind === 'feishu' ? !!deps.deployment.feishu : true),
+    baseConfigured: deps.configured,
+    get problem() { return [deps.githubProblem, deps.feishuProblem, deps.setupProblem].find(problem => problem?.place === kind.kind) },
     config: <C extends Record<string, unknown>>(id: string) => {
       const instance = deps.sources.instance<C>(id)
       return instance?.enabled ? instance.config : undefined

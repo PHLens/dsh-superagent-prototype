@@ -680,6 +680,10 @@ const TEXT = {
   'term.environment': ['执行环境', 'Execution environment'],
   'meaning.environment': ['每个工单的执行器 Session 和准备命令运行的环境：执行器和各来源登记的变量，每个有键、值和说明', 'Where a Ticket\'s Executor Session and prepare command run: the variables the Executor and the Sources register, each with a key, a value and a description'],
   // User and agent error codes; English reuses the host's own text read by agents
+  'userError.unknownProject': ['找不到这个项目。', USER_ERRORS.unknownProject[1]],
+  'userError.projectOwnership': ['项目归属不匹配。', USER_ERRORS.projectOwnership[1]],
+  'userError.invalidProject': ['项目内容无效。', USER_ERRORS.invalidProject[1]],
+  'userError.projectNotRunnable': ['项目方案尚未确认，暂不能执行。', USER_ERRORS.projectNotRunnable[1]],
   'userError.unknownTicket': ['找不到这个工单。', USER_ERRORS.unknownTicket[1]],
   'userError.unknownProblem': ['找不到这个未完成的评估。', USER_ERRORS.unknownProblem[1]],
   'userError.unknownTrigger': ['找不到这个触发。', USER_ERRORS.unknownTrigger[1]],
