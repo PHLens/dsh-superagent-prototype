@@ -73,6 +73,18 @@ it('conflicts when a confirmation request reuses its id with a changed anchor', 
   expect(manager.view('alice', project.id).tasks[0]?.authorizations ?? []).toHaveLength(0)
 })
 
+it('pages older project tasks through bounded summaries', () => {
+  const project = manager.create('alice', { name: 'A', goal: 'research' })
+  for (let index = 0; index < 32; index++) manager.plans.save('alice', project.id, { plan: { ...plan, goal: `task-${index}`, completion: 'x'.repeat(4000) }, expectedRevision: 0 })
+  const first = manager.plans.list('alice', project.id, { limit: 8 })
+  const later = manager.plans.list('alice', project.id, { offset: 24, limit: 8 })
+  expect(first.items).toHaveLength(8)
+  expect(first.hasMore).toBe(true)
+  expect(later.items).toHaveLength(8)
+  expect(later.items[0]?.ticketId).not.toBe(first.items[0]?.ticketId)
+  expect(JSON.stringify(first).length).toBeLessThan(20000)
+})
+
 it('rejects wrong actor and stale plan generation before authorization', () => {
   const project = manager.create('alice', { name: 'A', goal: 'ship' })
   manager.send('alice', project.id, { requestId: 'request-1', text: '请制定方案' })

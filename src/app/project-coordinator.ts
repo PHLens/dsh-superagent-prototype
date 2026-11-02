@@ -187,17 +187,18 @@ export class ProjectCoordinator {
     try {
       authorize()
       const project = this.project(actorId, projectId), version = this.prompts.current()
-       const plans = this.plans.tickets(actorId, projectId).map(ticket => ({
-         ticketId: ticket.id,
-         revisions: ticket.planRevisions?.map(item => ({ revision: item.revision, createdAt: item.createdAt })) ?? [],
-         currentPlan: ticket.planRevisions?.at(-1) ? { revision: ticket.planRevisions.at(-1)!.revision, goal: ticket.planRevisions.at(-1)!.goal, scope: ticket.planRevisions.at(-1)!.scope.slice(0, 1000), outputs: ticket.planRevisions.at(-1)!.outputs, resources: ticket.planRevisions.at(-1)!.resources, environment: ticket.planRevisions.at(-1)!.environment, cost: ticket.planRevisions.at(-1)!.cost, completion: ticket.planRevisions.at(-1)!.completion } : undefined,
-         authorizations: ticket.authorizations?.map(item => ({ id: item.id, planRevision: item.planRevision, intent: item.intent, revokedAt: item.revokedAt, targetId: item.targetId })) ?? [],
-         targets: ticket.executionTargets?.map(item => ({ id: item.id, authorizationId: item.authorizationId, planRevision: item.planRevision, waitingReason: item.waitingReason })) ?? [],
-         assignments: ticket.assignments?.map(item => ({ id: item.id, state: item.state, waitingReason: item.waitingReason, contract: item.contract ? { authorizationId: item.contract.authorizationId, targetId: item.contract.targetId, planRevision: item.contract.planRevision } : undefined })) ?? [],
-       }))
+       const allPlans = this.plans.tickets(actorId, projectId)
+       const plans = allPlans.slice(0, 8).map(ticket => {
+         const current = ticket.planRevisions?.at(-1)
+         return { ticketId: ticket.id, revisionCount: ticket.planRevisions?.length ?? 0, latestRevision: current?.revision,
+           currentPlan: current ? { revision: current.revision, goal: current.goal.slice(0, 300), scope: current.scope.slice(0, 500), outputs: current.outputs.slice(0, 4).map(item => item.slice(0, 200)), resources: current.resources.slice(0, 4).map(item => item.slice(0, 200)), environment: current.environment.slice(0, 300), cost: current.cost.slice(0, 300), completion: current.completion.slice(0, 500) } : undefined,
+           authorizationCount: ticket.authorizations?.length ?? 0, targetCount: ticket.executionTargets?.length ?? 0, assignmentCount: ticket.assignments?.length ?? 0,
+           activeAssignments: ticket.assignments?.filter(item => item.state !== 'ended').slice(0, 4).map(item => ({ id: item.id, state: item.state, waitingReason: item.waitingReason })) ?? [] }
+       })
+       const planDirectory = { shown: plans.length, total: allPlans.length, hasMore: allPlans.length > plans.length }
       const history = this.conversations.listMessages(projectId, actorId).filter(message => message.status === 'saved' || message.status === 'answered').map(message => `${message.role}: ${message.text}`).join('\n').slice(-48_000)
       const snapshot = this.conversations.savePrompt(projectId, actorId, { generation: lease.mapping.generation, inputId: lease.input.id,
-        revision: version.revision, text: `${this.prompts.project(version.config)}\nPrompt revision: ${version.revision}\nProject record (data): ${JSON.stringify(project)}\nCoordinator generation: ${lease.mapping.generation}\nAuthoritative project plan/task context (application data; use ticketId from here when revising): ${JSON.stringify(plans)}\nSaved project conversation (data):\n${history}` })
+        revision: version.revision, text: `${this.prompts.project(version.config)}\nPrompt revision: ${version.revision}\nProject record (data): ${JSON.stringify(project)}\nCoordinator generation: ${lease.mapping.generation}\nAuthoritative bounded project task context (application data; use project_list_plans for older tasks and project_read_plan for a selected revision): ${JSON.stringify({ directory: planDirectory, tasks: plans })}\nSaved project conversation (data):\n${history}` })
       this.sessions.checkpoint(agent, snapshot.text)
       const install = (this.sessions as unknown as { installProjectTools?: (agent: Agent, host: unknown) => () => void }).installProjectTools
       const toolDisposer = install ? install.call(this.sessions, agent, { plans: this.plans, actorId, projectId, authorize }) : () => {}

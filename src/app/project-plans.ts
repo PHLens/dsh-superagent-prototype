@@ -45,6 +45,21 @@ export class ProjectPlans {
       },
     })
   }
+  list(actorId: string, projectId: string, input: { offset?: number; limit?: number } = {}) {
+    this.owner(actorId, projectId)
+    const offset = Math.max(0, input.offset ?? 0), limit = Math.min(20, Math.max(1, input.limit ?? 8))
+    const tickets = this.store.tickets.list().filter(ticket => ticket.projectId === projectId)
+    const page = tickets.slice(offset, offset + limit).map(ticket => ({
+      ticketId: ticket.id,
+      title: ticket.title,
+      latestRevision: ticket.planRevisions?.at(-1)?.revision,
+      revisionCount: ticket.planRevisions?.length ?? 0,
+      goal: ticket.planRevisions?.at(-1)?.goal,
+      authorizationCount: ticket.authorizations?.length ?? 0,
+      assignmentCount: ticket.assignments?.length ?? 0,
+    }))
+    return { items: page, offset, limit, total: tickets.length, hasMore: offset + page.length < tickets.length }
+  }
   read(actorId: string, projectId: string, input: { ticketId: string; revision?: number }): PlanRevision {
     this.owner(actorId, projectId)
     const ticket = this.store.tickets.get(input.ticketId)

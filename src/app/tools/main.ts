@@ -155,7 +155,7 @@ function routeTool(host: MainToolsHost): Tool {
 }
 /** Builds the main Session's tools; `agent` scopes prompt preview resources to that Session. */
 export interface ProjectToolsHost {
-  readonly plans: Pick<ProjectPlans, 'save' | 'registerAssignment' | 'read'>
+  readonly plans: Pick<ProjectPlans, 'save' | 'registerAssignment' | 'read' | 'list'>
   readonly actorId: string
   readonly projectId: string
   readonly authorize: () => void
@@ -167,7 +167,9 @@ export function projectTools(host: ProjectToolsHost): Tool[] {
     z.object({ kind: z.literal('dependency'), ticketId: z.string().min(1), assignmentId: z.string().min(1) }).strict(),
     z.object({ kind: z.literal('artifact'), artifactId: z.string().min(1), contentVersion: z.string().min(1) }).strict(),
   ])
-  return [tool({ name: 'project_read_plan', description: 'Read one authoritative saved plan revision for this project. Use the ticket IDs and revision numbers from the coordinator context; this is read-only.', schema: z.object({ ticket_id: z.string().min(1), revision: z.number().int().positive().optional() }).strict(),
+  return [tool({ name: 'project_list_plans', description: 'List a bounded page of authoritative project task summaries. Use offset to discover older tickets, then project_read_plan for a complete selected revision.', schema: z.object({ offset: z.number().int().nonnegative().default(0), limit: z.number().int().positive().max(20).default(8) }).strict(),
+    execute: async args => { host.authorize(); return host.plans.list(host.actorId, host.projectId, args) } }),
+    tool({ name: 'project_read_plan', description: 'Read one authoritative saved plan revision for this project. Use the ticket IDs and revision numbers from the coordinator context; this is read-only.', schema: z.object({ ticket_id: z.string().min(1), revision: z.number().int().positive().optional() }).strict(),
     execute: async args => { host.authorize(); return host.plans.read(host.actorId, host.projectId, { ticketId: args.ticket_id, revision: args.revision }) } }),
     tool({ name: 'project_save_plan', description: 'Save a reviewed project plan revision. This records a draft for later human confirmation; it cannot execute work.', schema: plan,
     execute: async args => { host.authorize(); const { ticket_id, expected_revision, operation_id, ...content } = args; return host.plans.save(host.actorId, host.projectId, { ticketId: ticket_id, expectedRevision: expected_revision, operationId: operation_id, plan: content }) } }),
