@@ -254,8 +254,12 @@ export class DshExecutor implements Executor {
         `Execute exactly the confirmed plan returned by project_worker_context. Create its named file outputs and submit a versioned report.`, 'queue', () => { attempts.resolve(agent.id) })
       this.projectObserved.add(attempt.id)
     } catch (error) {
-      if (attempt) { attempt = attempts.bySession(attempt.sessionId) ?? attempt; attempt.status = 'reconcile'; attempt.error = String(error); attempts.save(attempt) }
       const ticket = this.host.store.tickets.get(ticketId), assignment = ticket?.assignments.find(item => item.id === assignmentId)
+      if (ticket?.ended || assignment?.state === 'ended') {
+        this.host.store.afterCommit(() => this.stopProject(ticketId, assignmentId))
+        return
+      }
+      if (attempt) { attempt = attempts.bySession(attempt.sessionId) ?? attempt; attempt.status = 'reconcile'; attempt.error = String(error); attempts.save(attempt) }
       if (ticket && assignment) { assignment.waitingReason = 'preparation-reconciliation'; assignment.report = { state: 'failed', summary: String(error), at: now() }; this.host.store.tickets.save(ticket) }
     }
   }
@@ -412,6 +416,10 @@ export class DshExecutor implements Executor {
    */
   stop(ticket: Ticket, assignment: Assignment, reason: string): void {
     this.transient.delete(assignment.id); this.transient.delete(`launch:${assignment.id}`)
+    if (assignment.contract) {
+      this.host.store.afterCommit(() => this.stopProject(ticket.id, assignment.id))
+      return
+    }
     const report = assignment.report
     const busy = !!assignment.deliveredAt && !!report && assignment.deliveredAt >= report.at
     const ownTurn = (report?.state === 'ready' || report?.state === 'dropped') && !busy
@@ -424,9 +432,31 @@ export class DshExecutor implements Executor {
       this.left.get(ticket.id)?.collect.abort(); this.left.delete(ticket.id); this.personal.delete(ticket.id)
     })
   }
+  /** Follow only the server-owned Assignment mapping; cancellation is not proof the native turn has drained. */
+  private stopProject(ticketId: string, assignmentId: string): void {
+    const attempts = this.host.attempts, ticket = this.host.store.tickets.get(ticketId)
+    const assignment = ticket?.assignments.find(item => item.id === assignmentId)
+    const attempt = attempts?.all().findLast(item => item.assignmentId === assignmentId)
+    if (!attempts || !ticket?.projectId || !assignment?.contract || assignment.ticketId !== ticket.id || assignment.projectId !== ticket.projectId
+      || !attempt || attempt.ticketId !== ticket.id || attempt.projectId !== ticket.projectId) return
+    const agent = this.host.context.agents.get(attempt.sessionId as SessionId)
+    if (!agent) return // A concurrent ensure is fenced by resolve and stopped in launchProject's catch.
+    if (agent.id !== attempt.sessionId || agent.session.header.cwd !== attempt.cwd) {
+      attempt.status = 'reconcile'; attempt.error = 'Stop requires reconciliation: Worker Session/cwd mapping mismatch'; attempts.save(attempt)
+      return
+    }
+    agent.cancel({ kind: 'user' }, { keepInbox: false })
+    this.stopWork(ticketId, 'stopped', false, attempt.sessionId)
+    this.left.get(ticketId)?.collect.abort(); this.left.delete(ticketId); this.personal.delete(ticketId)
+    this.track(ticketId, agent.whenIdle().then(() => {
+      const current = attempts.bySession(attempt.sessionId)
+      if (current?.id === attempt.id && current.lease === attempt.lease && current.ticketId === ticket.id && current.assignmentId === assignmentId
+        && ['preparing', 'prepared', 'running'].includes(current.status)) { current.status = 'ended'; attempts.save(current) }
+    }))
+  }
   /** Stop what a ticket's worker runs in the background (see `stopBackground`). */
-  private stopWork(ticketId: string, reason: string, keepInbox = false): void {
-    this.track(ticketId, stopBackground(this.host.context, workerSessionId(ticketId), reason, keepInbox))
+  private stopWork(ticketId: string, reason: string, keepInbox = false, sessionId?: string): void {
+    this.track(ticketId, stopBackground(this.host.context, sessionId ?? workerSessionId(ticketId), reason, keepInbox))
   }
   /** A stop of a ticket's background work, which a launch or a delivery of the ticket waits for while it runs. */
   private track(ticketId: string, stop: Promise<void>): void {

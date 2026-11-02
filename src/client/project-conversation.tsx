@@ -6,6 +6,13 @@ import { useAction, usePanel } from './provider.tsx'
 import { errorText } from './text.ts'
 import { Hint, LoadState } from './widgets.tsx'
 
+const executionReasons = {
+  'executor-unavailable': 'planWaitingExecutor', 'worker-slot': 'executionWorkerSlot', 'preparation-reconciliation': 'executionPreparation',
+  'worker-running': 'executionRunning', 'worker-idle': 'executionIdle', 'semantic-review': 'executionSemanticReview',
+  'missing-artifacts': 'executionMissingArtifacts', 'unresolved-items': 'executionUnresolved', changes_required: 'executionChangesRequired',
+  needs_judgment: 'executionNeedsJudgment', failed: 'executionFailed', blocked: 'executionBlocked', dependency: 'executionDependency', 'processing-paused': 'executionPaused',
+} as const
+
 export function ProjectConversation({ id }: { id: string }) {
   const { t, call, navigate } = usePanel()
   const { data, error, reload } = usePoll(() => call('GET projects/:id/conversation', { id }), [call, id], 1000)
@@ -97,6 +104,9 @@ export function ProjectConversation({ id }: { id: string }) {
         const plan = task.planRevisions?.at(-1)
         const authorization = task.authorizations?.findLast(item => item.planRevision === plan?.revision)
         const assignment = task.assignments.find(item => item.contract?.targetId === authorization?.targetId)
+        const report = assignment && data.reports?.findLast(item => item.assignmentId === assignment.id)
+        const canReview = authorization && !authorization.revokedAt && !task.ended && assignment?.state !== 'ended'
+          && assignment?.contract && assignment.contract.plan.acceptance?.mode !== 'registered-files' && report?.state === 'ready'
         return <article key={task.id} className="dt-conversation-plan">
           {plan ? <>
             <strong>{t('planRevision', { revision: plan.revision })}</strong>
@@ -116,16 +126,15 @@ export function ProjectConversation({ id }: { id: string }) {
               onClick={() => { void confirm(task.id, plan.revision, 'rerun') }}>{t('planRerun')}</Button>}
             {authorization && !authorization.revokedAt && <Button size="sm" disabled={!!confirming}
               onClick={() => { void revoke(task.id, authorization.id) }}>{t('planRevoke')}</Button>}
-            {assignment?.waitingReason && !authorization?.revokedAt && <p className="dt-hint">{assignment.waitingReason === 'executor-unavailable' ? t('planWaitingExecutor') : t('executionWait', { reason: assignment.waitingReason })}</p>}
+            {assignment?.waitingReason && !authorization?.revokedAt && <p className="dt-hint">{t('executionWait', { reason: t(executionReasons[assignment.waitingReason]) })}</p>}
             {assignment?.state === 'ended' && assignment.report?.state === 'ready' && <p>{t('executionDone')}</p>}
-            {assignment?.waitingReason && ['semantic-review', 'changes_required', 'needs_judgment'].includes(assignment.waitingReason) && (() => {
-              const report = data.reports?.findLast(item => item.assignmentId === assignment.id)
-              return report?.state === 'ready' && <div>
+            {!!report?.unresolved.length && <div><strong>{t('reportUnresolved')}</strong><ul>{report.unresolved.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}
+            {canReview && report && <div>
                 <p>{report.completed}</p><p>{report.evidence.join('\n')}</p>
+                {!!report.unresolved.length && <p className="dt-hint">{t('acceptanceBlockersRemain')}</p>}
                 <label>{t('acceptanceEvidence')}<textarea className="dt-input" aria-label={t('acceptanceEvidence')} value={reviewEvidence[report.id] ?? ''} onChange={event => setReviewEvidence(previous => ({ ...previous, [report.id]: event.target.value }))} /></label>
                 {(['passed', 'changes_required', 'needs_judgment'] as const).map(conclusion => <Button key={conclusion} size="sm" disabled={!!confirming || !reviewEvidence[report.id]?.trim()} onClick={() => { void decide(task.id, report.id, conclusion) }}>{t(conclusion === 'passed' ? 'acceptancePass' : conclusion === 'changes_required' ? 'acceptanceChanges' : 'acceptanceJudgment')}</Button>)}
-              </div>
-            })()}
+              </div>}
           </> : <p className="dt-hint">{t('planNoRevision')}</p>}
         </article>
       })}

@@ -91,7 +91,13 @@ export class ReportAcceptance {
     const owner = new ConversationStore(this.store).getOwner(attempt.projectId)
     if (owner && report.state !== 'progress') {
       const id = `worker-result:${report.id}:${reason ?? 'accepted'}`
-      const text = `${ticket.title}: ${report.completed}\n${reason ? `等待：${reason}` : '已按登记条件完成。'}\n成果：${report.artifacts.length} 个文件，可在成果区查看。`
+      const reasons: Record<string, string> = {
+        'missing-artifacts': '必要文件尚未全部提交', 'unresolved-items': '仍有未解决的工作事项',
+        'semantic-review': '等待独立语义复核', changes_required: '独立复核要求修改', needs_judgment: '等待进一步独立判断',
+        blocked: '执行遇到阻碍', failed: '执行失败，等待处理',
+      }
+      const unresolved = report.unresolved.length ? `\n未决事项：\n${report.unresolved.map(item => `- ${item}`).join('\n')}` : ''
+      const text = `${ticket.title}: ${report.completed}\n${reason ? `等待：${reasons[reason] ?? '等待执行条件满足'}` : '已按登记条件完成。'}${unresolved}\n成果：${report.artifacts.length} 个文件，可在成果区查看。`
       this.store.db.prepare(`INSERT OR IGNORE INTO conversation_message (id,project_id,client_request_key,role,actor_id,text,created_at,status,request_ticket_id) VALUES (?,?,?,'assistant',?,?,?,'saved',?)`)
         .run(id, attempt.projectId, id, owner.actorId, text, ticket.updatedAt, ticket.id)
     }

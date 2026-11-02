@@ -4,10 +4,90 @@ import { tmpdir } from 'node:os'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import { workerFixture } from './fixtures/project-worker.ts'
 import { projectWorkerTools } from '../src/app/tools/executor.ts'
+import { PROJECT_WORKER_RULES } from '../src/app/prompts.ts'
+import { z } from 'zod'
+import type { FileReport } from '../src/app/report-acceptance.ts'
 
 let directory: string, f: ReturnType<typeof workerFixture> | undefined
 beforeEach(() => { directory = mkdtempSync(join(tmpdir(), 'project-execution-')) })
 afterEach(() => { f?.store.close(); f = undefined; rmSync(directory, { recursive: true, force: true }) })
+
+async function reportThroughTool(input: FileReport) {
+  const { operationId, prUrl, ...payload } = input
+  const tool = projectWorkerTools(f!.attempts, f!.artifacts, f!.reports, f!.attempt.sessionId).find(item => item.name === 'project_worker_report')!
+  return tool.execute(tool.schema.parse({ ...payload, operation_id: operationId, ...(prUrl ? { pr_url: prUrl } : {}) }), new AbortController().signal)
+}
+
+it('explains ready/unresolved semantics and distinguishes report receipt from independent human acceptance', async () => {
+  f = workerFixture(directory, { version: 3, mode: 'human-review' }); f.prepare()
+  const artifact = f.write(), input = f.report([{ id: artifact.id, contentVersion: artifact.contentVersion }])
+  const tool = projectWorkerTools(f.attempts, f.artifacts, f.reports, f.attempt.sessionId).find(item => item.name === 'project_worker_report')!
+  expect(PROJECT_WORKER_RULES).toContain('unresolved=[]')
+  expect(z.toJSONSchema(tool.schema)).toMatchObject({ properties: {
+    state: { description: expect.stringContaining('ready') }, unresolved: { description: expect.stringContaining('independent acceptance') },
+  } })
+  const receipt = await reportThroughTool(input), report = f.reports.reports(f.plan.ticketId)[0]!
+  expect(receipt).toMatchObject({ received: true, reportId: report.id, currentReportId: report.id, isCurrentReport: true,
+    currentStatus: { completed: false, waitingReason: 'semantic-review', unresolved: [] }, nextStep: expect.stringContaining('independent') })
+  expect(f.store.tickets.get(f.plan.ticketId)?.ended).toBeUndefined()
+  f.reports.decide('owner', f.project.id, { ticketId: f.plan.ticketId, operationId: 'accept', reportId: report.id, conclusion: 'passed', evidence: 'Read this exact note and checked the original request' })
+  expect(await reportThroughTool(input)).toMatchObject({ reportId: report.id, isCurrentReport: true, currentStatus: { completed: true, waitingReason: null } })
+  expect(f.reports.reports(f.plan.ticketId)).toEqual([report])
+})
+
+it('preserves real blockers despite a pass and separates historical receipts from current report completion', async () => {
+  f = workerFixture(directory, { version: 2, mode: 'human-review' }); f.prepare()
+  const artifact = f.write(), input = f.report([{ id: artifact.id, contentVersion: artifact.contentVersion }], { unresolved: ['缺少第二个来源的原文'] })
+  expect(await reportThroughTool(input)).toMatchObject({ currentStatus: { completed: false, waitingReason: 'unresolved-items', unresolved: input.unresolved }, nextStep: expect.stringContaining('Keep every remaining blocker') })
+  const original = f.reports.reports(f.plan.ticketId)[0]!
+  const pass = { ticketId: f.plan.ticketId, operationId: 'old-pass', reportId: original.id, conclusion: 'passed' as const, evidence: 'Reviewed the available artifact' }
+  f.reports.decide('owner', f.project.id, pass)
+  expect(f.store.tickets.get(f.plan.ticketId)?.assignments[0]?.waitingReason).toBe('unresolved-items')
+  expect(f.store.tickets.get(f.plan.ticketId)?.ended).toBeUndefined()
+  const message = f.conversations.listMessages(f.project.id, 'owner').find(item => item.id.startsWith(`worker-result:${original.id}:`))!.text
+  expect(message).toContain('缺少第二个来源的原文'); expect(message).toContain('仍有未解决的工作事项'); expect(message).not.toContain('unresolved-items')
+  const revised = f.write('# Note\nBoth sources verified.', 'revised-file')
+  const nextInput = f.report([{ id: revised.id, contentVersion: revised.contentVersion }], { operationId: 'revised-report' })
+  await reportThroughTool(nextInput)
+  const current = f.reports.reports(f.plan.ticketId).at(-1)!
+  expect(f.store.tickets.get(f.plan.ticketId)?.assignments[0]?.waitingReason).toBe('semantic-review')
+  expect(() => f!.reports.decide('owner', f!.project.id, { ...pass, operationId: 'stale-pass' })).toThrow(/Stale/)
+  const before = f.store.tickets.get(f.plan.ticketId), messages = f.conversations.listMessages(f.project.id, 'owner')
+  expect(await reportThroughTool(input)).toMatchObject({ reportId: original.id, currentReportId: current.id, isCurrentReport: false,
+    currentStatus: { completed: false, waitingReason: 'semantic-review', unresolved: [] }, nextStep: expect.stringContaining('historical receipt') })
+  expect(f.store.tickets.get(f.plan.ticketId)).toEqual(before)
+  expect(f.conversations.listMessages(f.project.id, 'owner')).toEqual(messages)
+  f.reports.decide('owner', f.project.id, { ...pass, operationId: 'current-pass', reportId: current.id })
+  expect(await reportThroughTool(input)).toMatchObject({ reportId: original.id, currentReportId: current.id, isCurrentReport: false,
+    currentStatus: { completed: true, waitingReason: null }, nextStep: expect.stringContaining('historical receipt') })
+  expect(f.reports.reports(f.plan.ticketId)).toEqual([original, current])
+})
+
+it.each(['missing-artifacts', 'progress', 'blocked', 'failed'] as const)('returns the actual %s status without claiming receipt completes work', async state => {
+  f = workerFixture(directory); f.prepare()
+  const artifact = f.write(), input = f.report(state === 'missing-artifacts' ? [] : [{ id: artifact.id, contentVersion: artifact.contentVersion }], { state: state === 'missing-artifacts' ? 'ready' : state })
+  expect(await reportThroughTool(input)).toMatchObject({ received: true, isCurrentReport: true, currentStatus: { completed: false, waitingReason: state === 'progress' ? null : state }, nextStep: expect.any(String) })
+  expect(f.store.tickets.get(f.plan.ticketId)?.ended).toBeUndefined()
+})
+
+it('returns only the effective Assignment authorization original request, even with English plans and other task messages', async () => {
+  f = workerFixture(directory); f.prepare()
+  const original = f.conversations.appendUser(f.project.id, 'owner', { clientRequestKey: 'chinese-original', text: '请用中文写一份有来源的说明。' })
+  const plan = f.plans.save('owner', f.project.id, { expectedRevision: 0, operationId: 'second-plan', plan: { goal: 'English plan for a Chinese request', scope: 'One note', outputs: ['note'], resources: [], environment: 'Managed worker', cost: 'One worker', completion: 'A sourced note' } })
+  f.conversations.appendUser(f.project.id, 'owner', { clientRequestKey: 'second-confirm', text: '按这个方案做' })
+  const confirmed = f.plans.confirm('owner', f.project.id, { projectId: f.project.id, ticketId: plan.ticketId, planRevision: 1, operationId: 'second-confirm', intent: 'execute' })
+  const attempt = f.attempts.prepare(f.attempts.allocate(confirmed.ticket, confirmed.assignment))
+  f.conversations.appendUser(f.project.id, 'owner', { clientRequestKey: 'unrelated', text: 'PRIVATE unrelated discussion after both confirmations' })
+  const context = (sessionId: string) => projectWorkerTools(f!.attempts, f!.artifacts, f!.reports, sessionId).find(item => item.name === 'project_worker_context')!
+  const first = await context(f.attempt.sessionId).execute({}, new AbortController().signal)
+  const second = await context(attempt.sessionId).execute({}, new AbortController().signal)
+  expect(first).toMatchObject({ originalMessage: f.confirmed.authorization.originalMessage })
+  expect(second).toMatchObject({ originalMessage: { id: original.id, text: original.text }, plan: { goal: plan.goal } })
+  expect(JSON.stringify(first)).not.toContain(original.text)
+  expect(JSON.stringify(second)).not.toContain(f.confirmed.authorization.originalMessage!.text)
+  expect(JSON.stringify([first, second])).not.toContain('PRIVATE unrelated discussion')
+  expect(context(attempt.sessionId).schema.safeParse({ ticketId: f.plan.ticketId }).success).toBe(false)
+})
 
 it('binds authorized Assignment to a server-owned attempt, lease, real cwd and preparation evidence', () => {
   f = workerFixture(directory)

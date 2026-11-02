@@ -133,6 +133,50 @@ it.each(['tool', 'inherited', 'skill', 'version', 'resources', 'rules', 'missing
   } finally { sessions.dispose(); f.store.close() }
 })
 
+it('stops the actual project Session through POST while retaining its slot until the Agent becomes idle', async () => {
+  const { plan } = confirmTask('stop-actual')
+  h.runtime.executor.dispatchProjects(); await waitUntil(() => running().length === 1)
+  const attempt = running()[0]!, agent = h.agents.get(attempt.sessionId)!
+  agent.cancel.mockImplementation(() => {}) // Cancellation requested; the native turn has not drained yet.
+  expect(await h.api('POST', `tickets/${plan.ticketId}/stop`)).toMatchObject({ status: 200, body: { stopped: true } })
+  expect(agent.cancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: false })
+  expect(h.runtime.projectCoordinator.attempts.bySession(attempt.sessionId)?.status).toBe('running')
+  expect(h.runtime.executor.activeCount()).toBe(1)
+  h.runtime.executor.dispatchProjects()
+  await expect(h.runGuardedTool(attempt.sessionId, 'project_worker_context', {})).rejects.toThrow(/unauthorized/)
+  await expect(h.runGuardedTool(attempt.sessionId, 'project_write_artifact', { operation_id: 'late', output: 'note', name: 'late.md', content: 'late' })).rejects.toThrow(/unauthorized/)
+  await expect(h.runGuardedTool(attempt.sessionId, 'project_worker_report', { operation_id: 'late', state: 'ready', completed: 'late', evidence: ['late'], artifacts: [], unresolved: [] })).rejects.toThrow(/unauthorized/)
+  agent.status = 'idle'
+  await waitUntil(() => h.runtime.projectCoordinator.attempts.bySession(attempt.sessionId)?.status === 'ended')
+})
+
+it('never cancels on stop rollback or follows a managed mapping belonging to another Ticket', async () => {
+  const { plan } = confirmTask('stop-rollback')
+  h.runtime.executor.dispatchProjects(); await waitUntil(() => running().length === 1)
+  const attempt = running()[0]!, agent = h.agents.get(attempt.sessionId)!, attempts = h.runtime.projectCoordinator.attempts
+  expect(() => h.runtime.store.atomic(() => { h.runtime.engine.stopTicket(plan.ticketId); throw new Error('rollback stop') })).toThrow('rollback stop')
+  expect(agent.cancel).not.toHaveBeenCalled()
+  expect(h.runtime.store.tickets.get(plan.ticketId)?.ended).toBeUndefined()
+  attempts.save({ ...attempt, ticketId: 'another-ticket' })
+  expect(await h.api('POST', `tickets/${plan.ticketId}/stop`)).toMatchObject({ status: 200 })
+  expect(agent.cancel).not.toHaveBeenCalled()
+  attempts.save(attempt)
+})
+
+it('cancels each matching unended Assignment Session when a project Ticket has more than one', async () => {
+  const { plan, project } = confirmTask('stop-multiple'), c = h.runtime.projectCoordinator
+  h.runtime.executor.dispatchProjects(); await waitUntil(() => running().length === 1)
+  const first = running()[0]!
+  c.conversations.appendUser(project.id, 'owner', { clientRequestKey: 'stop-rerun', text: '再运行一次' })
+  const confirmed = c.confirm('owner', project.id, { ticketId: plan.ticketId, planRevision: 1, operationId: 'stop-rerun', intent: 'rerun' })
+  const second = c.attempts.prepare(c.attempts.allocate(confirmed.ticket, confirmed.assignment))
+  await nativeWorker(second, c.attempts)
+  h.agents.get(second.sessionId)!.status = 'running'; second.status = 'running'; c.attempts.save({ ...c.attempts.bySession(second.sessionId)!, status: 'running' })
+  expect(await h.api('POST', `tickets/${plan.ticketId}/stop`)).toMatchObject({ status: 200 })
+  for (const attempt of [first, second]) expect(h.agents.get(attempt.sessionId)!.cancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: false })
+  await waitUntil(() => [first, second].every(item => c.attempts.bySession(item.sessionId)?.status === 'ended'))
+})
+
 it('accepts exact report and artifact receipts through the registered tool guard after completion but rejects new writes', async () => {
   const { plan } = confirmTask('receipt')
   h.runtime.executor.dispatchProjects()
