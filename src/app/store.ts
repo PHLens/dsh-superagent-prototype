@@ -133,6 +133,9 @@ export class Store implements Repositories {
       }
     }
     if (!columns('effect').has('generation')) this.db.exec('ALTER TABLE effect ADD COLUMN generation INTEGER NOT NULL DEFAULT 0')
+    const messageColumns = columns('conversation_message')
+    if (!messageColumns.has('request_ticket_id')) this.db.exec('ALTER TABLE conversation_message ADD COLUMN request_ticket_id TEXT')
+    if (!messageColumns.has('request_plan_revision')) this.db.exec('ALTER TABLE conversation_message ADD COLUMN request_plan_revision INTEGER')
   }
   /** Closes the underlying SQLite database connection. */
   close(): void { this.db.close() }

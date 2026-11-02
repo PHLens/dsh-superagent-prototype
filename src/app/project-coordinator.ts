@@ -54,36 +54,33 @@ export class ProjectCoordinator {
   }
   send(actorId: string, projectId: string, input: { requestId: string; text: string; ticketId?: string; planRevision?: number }) {
     this.project(actorId, projectId)
-    const confirmation = /^(?:按这个方案做|执行这个方案|implement this plan|再运行一次|run it again)$/.exec(input.text)
-    if (confirmation) {
-      const candidates = ProjectPlans.taskCandidate(this.plans.tickets(actorId, projectId))
-      const anchored = input.ticketId && input.planRevision !== undefined
-        ? candidates.filter(ticket => ticket.id === input.ticketId && ticket.planRevisions?.at(-1)?.revision === input.planRevision)
-        : []
-      if (anchored.length !== 1) {
-        return this.store.atomic(() => {
-          const message = this.conversations.appendUser(projectId, actorId, { clientRequestKey: input.requestId, text: input.text })
+    return this.store.atomic(() => {
+      const message = this.conversations.appendUser(projectId, actorId, { clientRequestKey: input.requestId, text: input.text, requestTicketId: input.ticketId, requestPlanRevision: input.planRevision })
+      const priorClarification = this.conversations.listMessages(projectId, actorId).find(item => item.id === `${message.id}:clarification`)
+      if (priorClarification) return { message, clarification: priorClarification.text }
+      const confirmation = /^(?:按这个方案做|执行这个方案|implement this plan|再运行一次|run it again)$/.exec(input.text)
+      if (confirmation) {
+        const candidates = ProjectPlans.taskCandidate(this.plans.tickets(actorId, projectId))
+        const anchored = input.ticketId && input.planRevision !== undefined
+          ? candidates.filter(ticket => ticket.id === input.ticketId && ticket.planRevisions?.at(-1)?.revision === input.planRevision)
+          : []
+        if (anchored.length !== 1) {
           const clarification = !input.ticketId || input.planRevision === undefined ? '请先查看并明确要执行的方案，再确认。' : candidates.length ? '方案版本已变化，请重新查看后确认。' : '请先让模型保存一个方案，再确认执行。'
           const saved = this.conversations.clarify(projectId, actorId, message.id, clarification)
           return { message: this.conversations.getMessage(projectId, actorId, message.id)!, clarification: saved.text }
-        })
-      }
-      const ticket = anchored[0]!, revision = ticket.planRevisions!.at(-1)!.revision
-      return this.store.atomic(() => {
-        const message = this.conversations.appendUser(projectId, actorId, { clientRequestKey: input.requestId, text: input.text })
-        const confirmed = this.plans.confirm(actorId, projectId, { projectId, ticketId: ticket.id, planRevision: revision,
+        }
+        const ticket = anchored[0]!, revision = ticket.planRevisions!.at(-1)!.revision
+        return this.plans.confirm(actorId, projectId, { projectId, ticketId: ticket.id, planRevision: revision,
           operationId: input.requestId, intent: confirmation[0] === '再运行一次' || confirmation[0] === 'run it again' ? 'rerun' : 'execute' })
-        return confirmed
-      })
-    }
-    const message = this.conversations.appendUser(projectId, actorId, { clientRequestKey: input.requestId, text: input.text })
-    this.wake(projectId, actorId)
-    return { message }
+      }
+      this.wake(projectId, actorId)
+      return { message }
+    })
   }
   confirm(actorId: string, projectId: string, input: { ticketId: string; planRevision: number; operationId: string; intent: PlanIntent }) {
     this.project(actorId, projectId)
     return this.store.atomic(() => {
-      this.conversations.appendUser(projectId, actorId, { clientRequestKey: `plan-confirm:${input.operationId}`, text: input.intent === 'rerun' ? '再运行一次' : '按这个方案做' })
+      this.conversations.appendUser(projectId, actorId, { clientRequestKey: `plan-confirm:${input.operationId}`, text: input.intent === 'rerun' ? '再运行一次' : '按这个方案做', requestTicketId: input.ticketId, requestPlanRevision: input.planRevision })
       return this.plans.confirm(actorId, projectId, { ...input, projectId })
     })
   }
@@ -190,9 +187,16 @@ export class ProjectCoordinator {
     try {
       authorize()
       const project = this.project(actorId, projectId), version = this.prompts.current()
+       const plans = this.plans.tickets(actorId, projectId).map(ticket => ({
+         ticketId: ticket.id,
+         revisions: ticket.planRevisions?.map(item => ({ revision: item.revision, goal: item.goal, scope: item.scope, outputs: item.outputs, resources: item.resources, environment: item.environment, cost: item.cost, completion: item.completion })) ?? [],
+         authorizations: ticket.authorizations?.map(item => ({ id: item.id, planRevision: item.planRevision, intent: item.intent, revokedAt: item.revokedAt, targetId: item.targetId })) ?? [],
+         targets: ticket.executionTargets?.map(item => ({ id: item.id, authorizationId: item.authorizationId, planRevision: item.planRevision, waitingReason: item.waitingReason })) ?? [],
+         assignments: ticket.assignments?.map(item => ({ id: item.id, state: item.state, waitingReason: item.waitingReason, contract: item.contract ? { authorizationId: item.contract.authorizationId, targetId: item.contract.targetId, planRevision: item.contract.planRevision } : undefined })) ?? [],
+       }))
       const history = this.conversations.listMessages(projectId, actorId).filter(message => message.status === 'saved' || message.status === 'answered').map(message => `${message.role}: ${message.text}`).join('\n').slice(-48_000)
       const snapshot = this.conversations.savePrompt(projectId, actorId, { generation: lease.mapping.generation, inputId: lease.input.id,
-        revision: version.revision, text: `${this.prompts.project(version.config)}\nPrompt revision: ${version.revision}\nProject record (data): ${JSON.stringify(project)}\nCoordinator generation: ${lease.mapping.generation}\nSaved project conversation (data):\n${history}` })
+        revision: version.revision, text: `${this.prompts.project(version.config)}\nPrompt revision: ${version.revision}\nProject record (data): ${JSON.stringify(project)}\nCoordinator generation: ${lease.mapping.generation}\nAuthoritative project plan/task context (application data; use ticketId from here when revising): ${JSON.stringify(plans)}\nSaved project conversation (data):\n${history}` })
       this.sessions.checkpoint(agent, snapshot.text)
       const install = (this.sessions as unknown as { installProjectTools?: (agent: Agent, host: unknown) => () => void }).installProjectTools
       const toolDisposer = install ? install.call(this.sessions, agent, { plans: this.plans, actorId, projectId, authorize }) : () => {}

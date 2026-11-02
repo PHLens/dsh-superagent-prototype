@@ -62,6 +62,17 @@ it('rejects changed content under a reused save operation and preserves the draf
   expect(manager.plans.get('alice', project.id, first.ticketId).revision).toBe(1)
 })
 
+it('conflicts when a confirmation request reuses its id with a changed anchor', () => {
+  const project = manager.create('alice', { name: 'A', goal: 'ship' })
+  manager.plans.save('alice', project.id, { plan, expectedRevision: 0 })
+  const ticket = manager.view('alice', project.id).tasks[0]!
+  manager.plans.save('alice', project.id, { ticketId: ticket.id, plan: { ...plan, goal: 'updated' }, expectedRevision: 1 })
+  const first = manager.send('alice', project.id, { requestId: 'confirm-anchor', text: '按这个方案做', ticketId: ticket.id, planRevision: 1 })
+  if (!('clarification' in first)) throw new Error('expected stale confirmation clarification')
+  expect(() => manager.send('alice', project.id, { requestId: 'confirm-anchor', text: '按这个方案做', ticketId: ticket.id, planRevision: 2 })).toThrowError('plan anchor')
+  expect(manager.view('alice', project.id).tasks[0]?.authorizations ?? []).toHaveLength(0)
+})
+
 it('rejects wrong actor and stale plan generation before authorization', () => {
   const project = manager.create('alice', { name: 'A', goal: 'ship' })
   manager.send('alice', project.id, { requestId: 'request-1', text: '请制定方案' })
