@@ -375,6 +375,9 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     server.tickets.open = []; server.person = server.person.filter(ticket => ticket.id !== params.id)
     return { stopped: true }
   } },
+  'POST tickets/:id/pause': { answer: ({ params }) => ticketOf(params.id) ? { paused: true } : refuse(404, 'Ticket not found') },
+  'POST tickets/:id/resume': { answer: ({ params }) => ticketOf(params.id) ? { resumed: true } : refuse(404, 'Ticket not found') },
+  'POST tickets/:id/attention': { body: true, answer: ({ params, body }) => ticketOf(params.id) ? { resolved: true, version: body.version } : refuse(404, 'Ticket not found') },
   'POST executor/pause': { body: true, answer: ({ body }) => {
     server.settings = { ...server.settings, paused: body.paused }
     server.revisions.pause = (server.revisions.pause ?? 0) + 1

@@ -44,6 +44,7 @@ export interface HttpHost {
   readonly health: Record<string, Health>
   readonly machine: Machine
   readonly masterId: string
+  readonly safeRestore?: boolean
   /** Resolves once startup finishes or setup determines what is still missing. */
   readonly ready: Promise<void>
   /** Resolved deployment; throws if read while waiting for setup (`!configured()`). */
@@ -161,6 +162,7 @@ const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().no
 function routes(runtime: HttpHost): Routes {
   const { store } = runtime
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
+  const writable = () => { if (runtime.safeRestore) throw new RouteError(400, 'Recovery profile is offline read-only') }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   const projectHost = (actorId: string | undefined) => {
     if (!actorId) throw new ProjectAuthError(401, 'DSH login required')
@@ -234,8 +236,16 @@ function routes(runtime: HttpHost): Routes {
       return ticketList(views(runtime), state, offset, limit)
     },
     'GET tickets/:id': ({ params }) => ticketPage(runtime, params.id),
-    'POST tickets/:id/retry': ({ params }) => { const id = ticket(params.id); runtime.engine.retryTicket(id); return { retried: true } },
-    'POST tickets/:id/stop': ({ params }) => { const id = ticket(params.id); runtime.engine.stopTicket(id); return { stopped: true } },
+    'POST tickets/:id/retry': ({ params }) => { writable(); const id = ticket(params.id); runtime.engine.retryTicket(id); return { retried: true } },
+    'POST tickets/:id/stop': ({ params }) => { writable(); const id = ticket(params.id); runtime.engine.stopTicket(id); return { stopped: true, stopping: true } },
+    'POST tickets/:id/pause': ({ params }) => { writable(); const id = ticket(params.id); runtime.engine.pauseTicket(id); return { paused: true } },
+    'POST tickets/:id/resume': ({ params }) => { writable(); const id = ticket(params.id); runtime.engine.resumeTicket(id); return { resumed: true } },
+    'POST tickets/:id/attention': async ({ params, actorId, body }) => {
+      writable(); const id = ticket(params.id), input = z.object({ version: z.number().int().positive(), questionId: z.string().min(1).optional(), text: z.string().min(1) }).strict().parse(await body())
+      const source = 'web', actor = { source, id: actorId ?? 'panel' }
+      const result = runtime.engine.answerAttention(id, input.version, actor, source, input.text, input.questionId)
+      return { resolved: result.resolved, version: input.version }
+    },
     'POST executor/pause': async ({ body }) => runtime.settings.pause(z.object({ paused: z.boolean() }).parse(await body()).paused, 'panel'),
     'PUT settings/:block': async ({ params, body }) => {
       const block = SettingsBlockSchema.parse(params.block)
@@ -296,6 +306,7 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
         await runtime.ready
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))
         if (!route) throw new RouteError(404, 'Unknown operation')
+        if (runtime.safeRestore && req.method !== 'GET') throw new RouteError(400, 'Recovery profile is offline read-only')
         const query = Object.fromEntries(url.searchParams)
         json(res, 200, await route.run({ params: route.params as never, query, actorId, body: maxBytes => readBody(req, maxBytes) }))
       } catch (error) { json(res, ...failure(error)) }

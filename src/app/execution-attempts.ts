@@ -58,11 +58,11 @@ export class ExecutionAttempts {
     if (!attempt.prepare || realpathSync(attempt.cwd) !== attempt.prepare.realpath || realpathSync(attempt.root) !== attempt.root
       || !contained(attempt.root, attempt.prepare.realpath) || !statSync(attempt.cwd).isDirectory()) throw new Error('Execution preparation evidence or realpath does not match')
   }
-  allocate(ticket: Ticket, assignment: Assignment): Attempt {
+  allocate(ticket: Ticket, assignment: Assignment, options: { fresh?: boolean } = {}): Attempt {
     const auth = ticket.authorizations?.find(item => item.id === assignment.contract?.authorizationId)
     if (!ticket.projectId || !assignment.contract || !auth || auth.revokedAt || ticket.ended || assignment.state === 'ended') throw new Error('Assignment is not authorized')
     const previous = this.all().findLast(item => item.assignmentId === assignment.id)
-    if (previous) return previous
+    if (previous && !options.fresh) return previous
     const projectRoot = join(this.stateDir, 'projects', ticket.projectId)
     managedDirectory(this.stateDir, projectRoot)
     const root = realpathSync(projectRoot)

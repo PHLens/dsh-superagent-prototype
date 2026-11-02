@@ -39,14 +39,19 @@ export class Outbox implements OutboxPort {
   private async deliver(id: string): Promise<void> {
     const { store, sources, commands } = this.host
     const receipt = store.receipts.get(id)
-    if (receipt?.status !== 'pending') return
+    if (receipt?.status !== 'pending' || receipt.reconciliation) return
     if (!sources.instance(receipt.channel.source)?.enabled) throw new Later('The Source is off or not installed')
     // Hold later messages for the same ticket and conversation behind an earlier pending message until it exceeds the failure threshold.
     if (store.receipts.behind(id, FAILURES_BEFORE_ERROR)) throw new Later('An earlier message of this ticket to this conversation waits')
     if (!sources.channelAllowed(receipt.channel)) { store.receipts.settle(receipt, 'channelIgnored'); return }
+    store.receipts.beginUnknown(receipt)
     // A permanently unreachable target (such as a recalled message or deleted Issue) settles as `channelGone` so its receipt prevents retries.
     const result = await sources.send(receipt, commands)
     if (result === 'waiting') throw new Later('The Source is not installed')
-    store.receipts.settle(receipt, result === 'gone' ? 'channelGone' : 'sent')
+    try { store.receipts.settle(receipt, result === 'gone' ? 'channelGone' : 'sent') }
+    catch (error) {
+      // The provider already returned success, but the local receipt boundary is unknown. Never resend automatically.
+      store.receipts.unknown(receipt, error); return
+    }
   }
 }

@@ -71,7 +71,10 @@ export interface Api {
   'GET tickets': { query?: Paged & { state?: TicketFilter }; response: TicketListView }
   'GET tickets/:id': { response: TicketPageView }
   'POST tickets/:id/retry': { response: { retried: true } }
-  'POST tickets/:id/stop': { response: { stopped: true } }
+  'POST tickets/:id/stop': { response: { stopped: boolean; stopping?: boolean } }
+  'POST tickets/:id/pause': { response: { paused: true } }
+  'POST tickets/:id/resume': { response: { resumed: true } }
+  'POST tickets/:id/attention': { body: { version: number; questionId?: string; text: string }; response: { resolved: boolean; version: number } }
   'POST executor/pause': { body: { paused: boolean }; response: { paused: boolean } }
   'PUT settings/:block': { body: { value: unknown; revision: number }; response: { revision: number; restarting: boolean } }
   'GET policy/history': { response: HistoryView }
