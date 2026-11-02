@@ -190,8 +190,12 @@ export class ProjectCoordinator {
        const allPlans = this.plans.tickets(actorId, projectId)
        const plans = allPlans.slice(0, 8).map(ticket => {
          const current = ticket.planRevisions?.at(-1)
-         return { ticketId: ticket.id, revisionCount: ticket.planRevisions?.length ?? 0, latestRevision: current?.revision,
+         const authorization = ticket.authorizations?.findLast(item => item.planRevision === current?.revision)
+         const target = ticket.executionTargets?.find(item => item.id === authorization?.targetId)
+         return { ticketId: ticket.id, stage: ticket.projectStage, revisionCount: ticket.planRevisions?.length ?? 0, latestRevision: current?.revision,
            currentPlan: current ? { revision: current.revision, goal: current.goal.slice(0, 300), scope: current.scope.slice(0, 500), outputs: current.outputs.slice(0, 4).map(item => item.slice(0, 200)), resources: current.resources.slice(0, 4).map(item => item.slice(0, 200)), environment: current.environment.slice(0, 300), cost: current.cost.slice(0, 300), completion: current.completion.slice(0, 500) } : undefined,
+           currentAuthorization: authorization ? { id: authorization.id, planRevision: authorization.planRevision, intent: authorization.intent, targetId: authorization.targetId, status: authorization.revokedAt ? 'revoked' : 'active', revokedAt: authorization.revokedAt } : { status: 'none' },
+           currentTarget: target ? { id: target.id, authorizationId: target.authorizationId, planRevision: target.planRevision, waitingReason: target.waitingReason } : undefined,
            authorizationCount: ticket.authorizations?.length ?? 0, targetCount: ticket.executionTargets?.length ?? 0, assignmentCount: ticket.assignments?.length ?? 0,
            activeAssignments: ticket.assignments?.filter(item => item.state !== 'ended').slice(0, 4).map(item => ({ id: item.id, state: item.state, waitingReason: item.waitingReason })) ?? [] }
        })

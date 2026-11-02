@@ -51,10 +51,10 @@ export class ProjectPlans {
     const tickets = this.store.tickets.list().filter(ticket => ticket.projectId === projectId)
     const page = tickets.slice(offset, offset + limit).map(ticket => ({
       ticketId: ticket.id,
-      title: ticket.title,
+      title: ticket.title.slice(0, 200),
       latestRevision: ticket.planRevisions?.at(-1)?.revision,
       revisionCount: ticket.planRevisions?.length ?? 0,
-      goal: ticket.planRevisions?.at(-1)?.goal,
+      goal: ticket.planRevisions?.at(-1)?.goal.slice(0, 300),
       authorizationCount: ticket.authorizations?.length ?? 0,
       assignmentCount: ticket.assignments?.length ?? 0,
     }))
