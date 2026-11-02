@@ -171,9 +171,70 @@ it('does not let a delayed answer receipt dismiss the next question or reuse its
   }
 })
 
+it('retries reconciliation with one operation id and uses refreshed facts before allowing a separate resume', async () => {
+  const f = fixture(), actual = globalThis.fetch, requests: { operationId: string }[] = [], paths: string[] = []
+  f.task.lifecycle!.pause = { intent: 'pause', state: 'paused', at: atTime }
+  f.task.lifecycle!.observed = { state: 'idle', at: atTime }
+  f.task.lifecycle!.reconciliation = { state: 'unknown', operationId: 'previous-check', startedAt: atTime }
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input)
+    if (init?.method === 'POST' && url.includes('/tickets/' + f.task.id + '/')) {
+      paths.push(url)
+      if (url.endsWith('/reconcile')) {
+        const body = JSON.parse(String(init.body)) as { operationId: string }
+        requests.push(body)
+        if (requests.length === 1) throw new TypeError('Reconciliation response was lost')
+        if (requests.length === 3) f.task.lifecycle!.reconciliation = { state: 'clear', operationId: body.operationId, startedAt: atTime, observedAt: atTime }
+        return reply({ state: 'clear', operationId: body.operationId })
+      }
+    }
+    return actual(input, init)
+  })
+  try {
+    await mount(en)
+    await click(en.taskReconcile)
+    expect(text()).toContain(en.taskActionFailed)
+    await click(en.taskReconcile)
+    expect(requests[0]).toEqual(requests[1])
+    expect(Object.keys(requests[0]!)).toEqual(['operationId'])
+    expect(requests[0]!.operationId).not.toBe('previous-check')
+    // The receipt alone cannot clear a newer or still-unknown snapshot.
+    expect(text()).toContain(en.taskNeedsCheck)
+    expect(all('button').find(item => item.textContent === en.taskResume)?.hasAttribute('disabled')).toBe(true)
+    await click(en.taskReconcile)
+    expect(requests[2]!.operationId).not.toBe(requests[0]!.operationId)
+    expect(text()).toContain(en.taskPaused)
+    expect(all('button').find(item => item.textContent === en.taskResume)?.hasAttribute('disabled')).toBe(false)
+    expect(paths.every(path => path.endsWith('/reconcile'))).toBe(true)
+  } finally { f.dispose() }
+})
+
+it('joins an existing checking operation without treating it as an exit confirmation', async () => {
+  const f = fixture(), actual = globalThis.fetch, requests: unknown[] = []
+  f.task.lifecycle!.stop = { intent: 'stop', state: 'stopping', at: atTime }
+  f.task.lifecycle!.reconciliation = { state: 'checking', operationId: 'existing-check', startedAt: atTime }
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === 'POST' && String(input).endsWith('/tickets/' + f.task.id + '/reconcile')) {
+      requests.push(JSON.parse(String(init.body)))
+      return reply({ state: 'checking', operationId: 'existing-check' })
+    }
+    return actual(input, init)
+  })
+  try {
+    await mount(zh)
+    expect(text()).toContain(zh.taskStopPreserved)
+    await click(zh.taskReconcile)
+    await click(zh.taskReconcile)
+    expect(requests).toEqual([{ operationId: 'existing-check' }, { operationId: 'existing-check' }])
+    expect(text()).toContain(zh.taskReconciling)
+    expect(text()).not.toContain(zh.taskStopped)
+  } finally { f.dispose() }
+})
+
 it('keeps recovered project history readable while disabling project mutation and question answers', async () => {
   const f = fixture(), actual = globalThis.fetch, posts: string[] = []
   f.task.attention = { id: 'recovery-question', version: 2, question: 'Saved before the recovery point' }
+  f.task.lifecycle!.reconciliation = { state: 'unknown', startedAt: atTime }
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
     if (init?.method === 'POST') { posts.push(url); return reply({}) }
@@ -188,7 +249,7 @@ it('keeps recovered project history readable while disabling project mutation an
     expect(text()).toContain(zh.recoveryReadOnly)
     expect(field<HTMLTextAreaElement>(zh.taskAnswer).disabled).toBe(true)
     expect(field<HTMLTextAreaElement>(zh.conversationLocalDraft).disabled).toBe(true)
-    for (const name of [zh.taskPause, zh.taskStop, zh.planRerun, zh.taskSubmitAnswer]) {
+    for (const name of [zh.taskPause, zh.taskStop, zh.planRerun, zh.taskSubmitAnswer, zh.taskReconcile]) {
       const button = all('button').find(item => item.textContent === name)!
       expect(button.hasAttribute('disabled')).toBe(true)
       await click(button)

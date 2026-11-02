@@ -52,6 +52,8 @@ const TEXT = {
   taskLastChecked: ['最后核对', 'Last checked'],
   taskLastKnown: ['最后记录', 'Last recorded'],
   taskPausePreserved: ['用户的暂停意图已保留。', 'Your pause request is preserved.'],
+  taskStopPreserved: ['停止请求已保留，执行退出仍在核对。', 'Your stop request is preserved. Execution exit is still being checked.'],
+  taskReconcile: ['重新核对现场', 'Check execution again'],
   taskPausedAnswerHint: ['回答会先保存；恢复任务需要单独操作。', 'Answers are saved first. Resuming the task requires a separate action.'],
   taskReconcileHint: ['核对完成前不会重新执行。', 'Execution will not restart before reconciliation is complete.'],
   taskQuestionVersion: ['待决问题 · 版本 {version}', 'Pending question · version {version}'],

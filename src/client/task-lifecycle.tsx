@@ -29,10 +29,15 @@ export function TaskLifecycle({ id, lifecycle, attention, ended, enabled = true,
   const currentQuestion = useRef(questionKey)
   currentQuestion.current = questionKey
   const pendingAnswer = useRef<{ key: string; body: { questionId: string; version: number; text: string } }>(undefined)
+  const pendingReconciliation = useRef<{ id: string; operationId: string }>(undefined)
   useEffect(() => {
     setAnswer(''); setFailure(undefined); pendingAnswer.current = undefined
     if (questionKey) setNotice(undefined)
   }, [id, questionKey])
+  useEffect(() => {
+    const result = lifecycle?.reconciliation, pending = pendingReconciliation.current
+    if (pending?.id === id && result?.operationId === pending.operationId && result.state !== 'checking') pendingReconciliation.current = undefined
+  }, [id, lifecycle?.reconciliation?.operationId, lifecycle?.reconciliation?.state])
 
   const stopping = lifecycle?.stop.intent === 'stop'
   const paused = lifecycle?.pause.intent === 'pause'
@@ -51,6 +56,20 @@ export function TaskLifecycle({ id, lifecycle, attention, ended, enabled = true,
       else if (kind === 'stop') await call('POST tickets/:id/stop', { id })
       else await call('POST tickets/:id/retry', { id })
       await reload()
+    } catch (error) { setFailure(errorText(error)) }
+    finally { submitting.current = false; setBusy(false) }
+  }
+  const reconcile = async () => {
+    if (submitting.current || readOnly) return
+    const operationId = pendingReconciliation.current?.id === id ? pendingReconciliation.current.operationId
+      : checking && lifecycle?.reconciliation?.operationId || crypto.randomUUID()
+    pendingReconciliation.current = { id, operationId }
+    submitting.current = true; setBusy(true); setFailure(undefined); setNotice(undefined)
+    try {
+      const receipt = await call('POST tickets/:id/reconcile', { id, body: { operationId } })
+      await reload()
+      // A receipt may describe an older execution. Current facts always come from the refreshed view.
+      if (receipt.state !== 'checking') pendingReconciliation.current = undefined
     } catch (error) { setFailure(errorText(error)) }
     finally { submitting.current = false; setBusy(false) }
   }
@@ -75,8 +94,9 @@ export function TaskLifecycle({ id, lifecycle, attention, ended, enabled = true,
     } finally { submitting.current = false; setBusy(false) }
   }
   if (!enabled && !lifecycle && !attention) return null
-  const state = stopping ? lifecycle?.stop.state === 'exited' ? 'taskStopped' : 'taskStopping'
-    : ended ? 'taskEnded' : checking ? 'taskReconciling' : unknown ? 'taskNeedsCheck'
+  const state = checking ? 'taskReconciling' : unknown ? 'taskNeedsCheck'
+    : stopping ? lifecycle?.stop.state === 'exited' ? 'taskStopped' : 'taskStopping'
+      : ended ? 'taskEnded'
       : paused ? lifecycle?.pause.state === 'paused' ? 'taskPaused' : 'taskPausing'
         : lifecycle?.observed.state === 'running' ? 'taskRunning'
           : lifecycle?.observed.state === 'idle' ? 'taskIdle'
@@ -88,9 +108,12 @@ export function TaskLifecycle({ id, lifecycle, attention, ended, enabled = true,
     {lifecycle && <div role="status">
       <p>{t(state)}</p>
       {paused && (checking || unknown) && <Hint>{t('taskPausePreserved')}</Hint>}
+      {stopping && (checking || unknown) && <Hint>{t('taskStopPreserved')}</Hint>}
       {recordedAt && <p className="dt-hint">{t(checkedAt ? 'taskLastChecked' : 'taskLastKnown')}{t('labelSeparator')}
         <time dateTime={recordedAt}>{when(recordedAt, t('lang'))}</time></p>}
     </div>}
+    {(checking || unknown) && <Button size="sm" disabled={readOnly || busy} icon={<Icon name="refresh" />}
+      onClick={() => { void reconcile() }}>{t('taskReconcile')}</Button>}
     {!ended && enabled && <div className="dt-banner-actions">
       {!stopping && !paused && <Button size="sm" disabled={!canAct} icon={<Icon name="pause" />}
         onClick={() => { void action('pause') }}>{t('taskPause')}</Button>}
