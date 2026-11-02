@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { BackupService } from '../src/app/backup-service.ts'
@@ -19,6 +19,16 @@ it('deduplicates manual and scheduled recovery point creation and applies retent
   expect(await service.run('schedule')).toBe(await first)
   expect((await first).database.walIncluded).toBe(true)
   service.stop()
+})
+
+it('uses the runtime backup root when settings leave the directory empty', async () => {
+  h = await startRuntime()
+  root = mkdtempSync(join(tmpdir(), 'dsh-backup-default-'))
+  const service = new BackupService({ store: h.runtime.store, databasePath: h.runtime.store.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file as string,
+    destinationRoot: root, recovery: {}, health: (h.runtime as any).board.claim('backup-test'), lifetime: h.runtime.lifetime })
+  service.start({ enabled: true, directory: '', intervalMinutes: 5, retention: 1 })
+  await service.run('manual')
+  expect(readdirSync(root)).toHaveLength(1)
 })
 
 it('replaces the scheduler and refuses work after stop', async () => {

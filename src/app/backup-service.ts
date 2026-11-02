@@ -42,8 +42,9 @@ export class BackupService {
     if (this.stopped || (reason === 'schedule' && !this.settings?.enabled)) return Promise.reject(new Error('Backup service is stopped or disabled'))
     if (this.active) return this.active
     const settings = this.settings
-    if (!settings?.directory) return Promise.reject(new Error('Backup directory is not configured'))
-    const root = settings.directory, destination = join(root, `${this.now().toISOString().replaceAll(':', '-')}-${reason}`)
+    if (!settings) return Promise.reject(new Error('Backup service is not configured'))
+    const root = settings.directory || this.options.destinationRoot
+    const destination = join(root, `${this.now().toISOString().replaceAll(':', '-')}-${reason}`)
     this.active = Promise.resolve().then(() => {
       const manifest = createRecoveryPoint(this.options.store, { ...this.options.recovery, databasePath: this.options.databasePath, destination })
       this.options.health.set({ state: 'ready', detail: `Recovery point created at ${destination}` })
