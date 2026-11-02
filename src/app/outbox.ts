@@ -44,10 +44,10 @@ export class Outbox implements OutboxPort {
     // Hold later messages for the same ticket and conversation behind an earlier pending message until it exceeds the failure threshold.
     if (store.receipts.behind(id, FAILURES_BEFORE_ERROR)) throw new Later('An earlier message of this ticket to this conversation waits')
     if (!sources.channelAllowed(receipt.channel)) { store.receipts.settle(receipt, 'channelIgnored'); return }
-    store.receipts.beginUnknown(receipt)
     // A permanently unreachable target (such as a recalled message or deleted Issue) settles as `channelGone` so its receipt prevents retries.
     const result = await sources.send(receipt, commands)
     if (result === 'waiting') throw new Later('The Source is not installed')
+    if (result === 'sent') store.receipts.beginUnknown(receipt)
     try { store.receipts.settle(receipt, result === 'gone' ? 'channelGone' : 'sent') }
     catch (error) {
       // The provider already returned success, but the local receipt boundary is unknown. Never resend automatically.

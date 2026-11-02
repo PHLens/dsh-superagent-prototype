@@ -2,9 +2,10 @@
 import { useRef, useState, type FormEvent } from 'react'
 import { usePoll } from './api.ts'
 import { Button, Icon } from './controls.tsx'
-import { useAction, usePanel } from './provider.tsx'
+import { useAction, usePanel, usePanelData } from './provider.tsx'
 import { errorText } from './text.ts'
 import { Hint, LoadState } from './widgets.tsx'
+import { TaskLifecycle } from './task-lifecycle.tsx'
 
 const executionReasons = {
   'executor-unavailable': 'planWaitingExecutor', 'worker-slot': 'executionWorkerSlot', 'preparation-reconciliation': 'executionPreparation',
@@ -15,6 +16,8 @@ const executionReasons = {
 
 export function ProjectConversation({ id }: { id: string }) {
   const { t, call, navigate } = usePanel()
+  const { state } = usePanelData()
+  const readOnly = !state || !!state.safeRestore
   const { data, error, reload } = usePoll(() => call('GET projects/:id/conversation', { id }), [call, id], 1000)
   const [text, setText] = useState(''), [busy, setBusy] = useState(false), [failure, setFailure] = useState<string>(), [confirming, setConfirming] = useState<string>()
   const [artifact, setArtifact] = useState<{ name: string; content: string; contentVersion: string }>()
@@ -22,7 +25,7 @@ export function ProjectConversation({ id }: { id: string }) {
   const decisionPending = useRef<{ key: string; operationId: string }>(undefined)
   const decide = async (ticketId: string, reportId: string, conclusion: 'passed' | 'changes_required' | 'needs_judgment') => {
     const evidence = reviewEvidence[reportId]?.trim()
-    if (!evidence || confirming) return
+    if (!evidence || confirming || readOnly) return
     const key = JSON.stringify([ticketId, reportId, conclusion, evidence])
     const operationId = decisionPending.current?.key === key ? decisionPending.current.operationId : crypto.randomUUID()
     decisionPending.current = { key, operationId }; setConfirming(ticketId); setFailure(undefined)
@@ -39,13 +42,14 @@ export function ProjectConversation({ id }: { id: string }) {
   const retry = useAction(() => call('POST projects/:id/retry', { id }), { reload })
   const planPending = useRef<{ key: string; operationId: string }>(undefined)
   const revoke = async (ticketId: string, authorizationId: string) => {
+    if (readOnly) return
     setConfirming(ticketId); setFailure(undefined)
     try { await call('POST projects/:id/plan-revocation', { id, body: { ticketId, authorizationId, operationId: crypto.randomUUID() } }); await reload() }
     catch (error) { setFailure(errorText(error)) }
     finally { setConfirming(undefined) }
   }
   const confirm = async (ticketId: string, planRevision: number, intent: 'execute' | 'rerun' = 'execute') => {
-    if (confirming) return
+    if (confirming || readOnly) return
     const key = `${ticketId}:${planRevision}:${intent}`
     const operationId = planPending.current?.key === key ? planPending.current.operationId : crypto.randomUUID()
     planPending.current = { key, operationId }
@@ -56,7 +60,7 @@ export function ProjectConversation({ id }: { id: string }) {
   }
   const submit = async (event: FormEvent) => {
     event.preventDefault()
-    if (submitting.current || !text.trim()) return
+    if (submitting.current || !text.trim() || readOnly) return
     submitting.current = true; setBusy(true); setFailure(undefined)
     // Keep the exact request after an ambiguous network failure. Editing starts a new user intent.
     const request = pending.current?.text === text.trim() ? pending.current : { requestId: crypto.randomUUID(), text: text.trim() }
@@ -77,10 +81,11 @@ export function ProjectConversation({ id }: { id: string }) {
   return <div className="dt-conversation">
     <div><Button size="sm" icon={<Icon name="chevron-left" />} onClick={() => navigate({ page: 'projects' })}>{t('tab.projects')}</Button></div>
     <header><h2>{data.project.name}</h2><p className="dt-hint">{t('projectGoalPrefix')}{data.project.goal}</p></header>
+    {state?.safeRestore && <Hint>{t('recoveryReadOnly')}</Hint>}
     {error && <LoadState error={error} loading={false} />}
     {data.coordinator?.status === 'error' && <div className="dt-banner dt-danger" role="alert">
       <p>{t('conversationCoordinatorError')}</p>{data.coordinator.error && <p>{data.coordinator.error}</p>}
-      <Button variant="outline" disabled={retry.busy} onClick={() => { void retry.run() }}>{t('conversationRetry')}</Button>
+      <Button variant="outline" disabled={retry.busy || readOnly} onClick={() => { void retry.run() }}>{t('conversationRetry')}</Button>
     </div>}
     <section aria-label={t('projectConversation')} className="dt-conversation-history">
       {!data.messages.length && <Hint>{t('conversationEmpty')}</Hint>}
@@ -105,6 +110,10 @@ export function ProjectConversation({ id }: { id: string }) {
         const authorization = task.authorizations?.findLast(item => item.planRevision === plan?.revision)
         const assignment = task.assignments.find(item => item.contract?.targetId === authorization?.targetId)
         const report = assignment && data.reports?.findLast(item => item.assignmentId === assignment.id)
+        const held = task.lifecycle?.pause.intent === 'pause' || task.lifecycle?.stop.intent === 'stop'
+          || task.lifecycle?.reconciliation?.state === 'checking' || task.lifecycle?.reconciliation?.state === 'unknown'
+        const controllable = task.assignments.some(item => item.state !== 'ended')
+          || task.lifecycle?.pause.intent === 'pause' || task.lifecycle?.stop.intent === 'stop'
         const canReview = authorization && !authorization.revokedAt && !task.ended && assignment?.state !== 'ended'
           && assignment?.contract && assignment.contract.plan.acceptance?.mode !== 'registered-files' && report?.state === 'ready'
         return <article key={task.id} className="dt-conversation-plan">
@@ -120,20 +129,25 @@ export function ProjectConversation({ id }: { id: string }) {
               <dt>{t('planCompletion')}</dt><dd>{plan.completion}</dd>
               <dt>{t('acceptanceMode')}</dt><dd>{t(plan.acceptance?.mode === 'registered-files' ? 'registeredFiles' : 'humanReview')}</dd>
             </dl>
-            {authorization ? <p className="dt-hint">{t(authorization.revokedAt ? 'planRevoked' : 'planConfirmed')}</p> : <Button variant="primary" size="sm" disabled={!!confirming}
+            {authorization ? <p className="dt-hint">{t(authorization.revokedAt ? 'planRevoked' : 'planConfirmed')}</p> : <Button variant="primary" size="sm" disabled={!!confirming || readOnly}
               onClick={() => { void confirm(task.id, plan.revision) }}>{t('planConfirm')}</Button>}
-            {authorization && !authorization.revokedAt && <Button size="sm" disabled={!!confirming}
+            {authorization && !authorization.revokedAt && <Button size="sm" disabled={!!confirming || readOnly || held || task.ended?.by === 'human'}
               onClick={() => { void confirm(task.id, plan.revision, 'rerun') }}>{t('planRerun')}</Button>}
-            {authorization && !authorization.revokedAt && <Button size="sm" disabled={!!confirming}
+            {authorization && !authorization.revokedAt && <Button size="sm" disabled={!!confirming || readOnly}
               onClick={() => { void revoke(task.id, authorization.id) }}>{t('planRevoke')}</Button>}
             {assignment?.waitingReason && !authorization?.revokedAt && <p className="dt-hint">{t('executionWait', { reason: t(executionReasons[assignment.waitingReason]) })}</p>}
             {assignment?.state === 'ended' && assignment.report?.state === 'ready' && <p>{t('executionDone')}</p>}
+            <TaskLifecycle key={task.id} id={task.id} lifecycle={controllable || task.ended ? task.lifecycle : undefined} attention={task.attention}
+              ended={!!task.ended} enabled={controllable}
+              retryable={task.assignments.some(item => item.state !== 'ended' && item.report?.state === 'failed')}
+              readOnly={readOnly} reload={reload} />
             {!!report?.unresolved.length && <div><strong>{t('reportUnresolved')}</strong><ul>{report.unresolved.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}
             {canReview && report && <div>
                 <p>{report.completed}</p><p>{report.evidence.join('\n')}</p>
                 {!!report.unresolved.length && <p className="dt-hint">{t('acceptanceBlockersRemain')}</p>}
-                <label>{t('acceptanceEvidence')}<textarea className="dt-input" aria-label={t('acceptanceEvidence')} value={reviewEvidence[report.id] ?? ''} onChange={event => setReviewEvidence(previous => ({ ...previous, [report.id]: event.target.value }))} /></label>
-                {(['passed', 'changes_required', 'needs_judgment'] as const).map(conclusion => <Button key={conclusion} size="sm" disabled={!!confirming || !reviewEvidence[report.id]?.trim()} onClick={() => { void decide(task.id, report.id, conclusion) }}>{t(conclusion === 'passed' ? 'acceptancePass' : conclusion === 'changes_required' ? 'acceptanceChanges' : 'acceptanceJudgment')}</Button>)}
+                {held && <Hint>{t('taskReviewHeld')}</Hint>}
+                <label>{t('acceptanceEvidence')}<textarea className="dt-input" disabled={readOnly || held} aria-label={t('acceptanceEvidence')} value={reviewEvidence[report.id] ?? ''} onChange={event => setReviewEvidence(previous => ({ ...previous, [report.id]: event.target.value }))} /></label>
+                {(['passed', 'changes_required', 'needs_judgment'] as const).map(conclusion => <Button key={conclusion} size="sm" disabled={!!confirming || readOnly || held || !reviewEvidence[report.id]?.trim()} onClick={() => { void decide(task.id, report.id, conclusion) }}>{t(conclusion === 'passed' ? 'acceptancePass' : conclusion === 'changes_required' ? 'acceptanceChanges' : 'acceptanceJudgment')}</Button>)}
               </div>}
           </> : <p className="dt-hint">{t('planNoRevision')}</p>}
         </article>
@@ -149,10 +163,10 @@ export function ProjectConversation({ id }: { id: string }) {
     </section>}
     <form className="dt-conversation-compose" onSubmit={event => { void submit(event) }}>
       <label htmlFor="dt-project-message" className="dt-hint">{t('conversationLocalDraft')}</label>
-      <textarea id="dt-project-message" className="dt-input" rows={4} required value={text} disabled={busy}
+      <textarea id="dt-project-message" className="dt-input" rows={4} required value={text} disabled={busy || readOnly}
         placeholder={t('conversationPlaceholder')} onChange={event => setText(event.target.value)} />
       {failure && <p className="dt-error" role="alert">{t('conversationSaveError')} {failure}</p>}
-      <div><Button variant="primary" type="submit" disabled={busy || !text.trim()}>{t(busy ? 'conversationSending' : failure ? 'conversationRetry' : 'conversationSend')}</Button></div>
+      <div><Button variant="primary" type="submit" disabled={busy || readOnly || !text.trim()}>{t(busy ? 'conversationSending' : failure ? 'conversationRetry' : 'conversationSend')}</Button></div>
     </form>
   </div>
 }
