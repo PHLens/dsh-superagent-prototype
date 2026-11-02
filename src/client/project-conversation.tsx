@@ -123,6 +123,7 @@ export function ProjectConversation({ id }: { id: string }) {
           : assignment?.waitingReason ? executionReasons[assignment.waitingReason] : undefined
         const held = task.lifecycle?.pause.intent === 'pause' || task.lifecycle?.stop.intent === 'stop'
           || task.lifecycle?.reconciliation?.state === 'checking' || task.lifecycle?.reconciliation?.state === 'unknown'
+          || task.progress?.reconciliation === 'checking' || task.progress?.reconciliation === 'unknown'
         const controllable = task.assignments.some(item => item.state !== 'ended')
           || task.lifecycle?.pause.intent === 'pause' || task.lifecycle?.stop.intent === 'stop'
         const canReview = authorization && !authorization.revokedAt && !task.ended && assignment?.state !== 'ended'
@@ -148,7 +149,8 @@ export function ProjectConversation({ id }: { id: string }) {
               onClick={() => { void revoke(task.id, authorization.id) }}>{t('planRevoke')}</Button>}
             {waitingLabel && !authorization?.revokedAt && <p className="dt-hint">{t('executionWait', { reason: t(waitingLabel) })}</p>}
             {assignment?.state === 'ended' && assignment.report?.state === 'ready' && <p>{t('executionDone')}</p>}
-            <TaskLifecycle key={task.id} id={task.id} lifecycle={controllable || task.ended ? task.lifecycle : undefined} attention={task.attention}
+            <TaskLifecycle key={task.id} id={task.id} lifecycle={controllable || task.ended ? task.lifecycle : undefined}
+              reconciliationState={task.progress?.reconciliation} attention={task.attention}
               ended={!!task.ended} enabled={controllable}
               retryable={task.assignments.some(item => item.state !== 'ended' && item.report?.state === 'failed')}
               readOnly={readOnly} reload={reload} />

@@ -10,6 +10,7 @@ type Lifecycle = Pick<LifecycleState, 'pause' | 'stop' | 'observed'> & Partial<P
 interface Props {
   id: string
   lifecycle?: Lifecycle
+  reconciliationState?: 'checking' | 'clear' | 'unknown'
   attention?: Pick<Attention, 'id' | 'question' | 'version'>
   questionActions?: ReactNode
   ended: boolean
@@ -20,7 +21,7 @@ interface Props {
   reload(): Promise<unknown>
 }
 
-export function TaskLifecycle({ id, lifecycle, attention, questionActions, ended, enabled = true, retryable = false, readOnly = false, showStop = true, reload }: Props) {
+export function TaskLifecycle({ id, lifecycle, reconciliationState, attention, questionActions, ended, enabled = true, retryable = false, readOnly = false, showStop = true, reload }: Props) {
   const { t, call } = usePanel()
   const [busy, setBusy] = useState(false), [failure, setFailure] = useState<string>(), [notice, setNotice] = useState<string>()
   const [answer, setAnswer] = useState('')
@@ -42,8 +43,8 @@ export function TaskLifecycle({ id, lifecycle, attention, questionActions, ended
 
   const stopping = lifecycle?.stop.intent === 'stop'
   const paused = lifecycle?.pause.intent === 'pause'
-  const checking = lifecycle?.reconciliation?.state === 'checking'
-  const unknown = lifecycle?.reconciliation?.state === 'unknown'
+  const checking = (reconciliationState ?? lifecycle?.reconciliation?.state) === 'checking'
+  const unknown = (reconciliationState ?? lifecycle?.reconciliation?.state) === 'unknown'
   const held = stopping || paused || checking || unknown
   const canAct = enabled && !ended && !readOnly && !busy
   const action = async (kind: 'pause' | 'resume' | 'stop' | 'retry') => {
@@ -94,7 +95,7 @@ export function TaskLifecycle({ id, lifecycle, attention, questionActions, ended
       if (currentQuestion.current === key) setFailure(errorText(error))
     } finally { submitting.current = false; setBusy(false) }
   }
-  if (!enabled && !lifecycle && !attention) return null
+  if (!enabled && !lifecycle && !attention && !checking && !unknown) return null
   const state = checking ? 'taskReconciling' : unknown ? 'taskNeedsCheck'
     : stopping ? lifecycle?.stop.state === 'exited' ? 'taskStopped' : 'taskStopping'
       : ended ? 'taskEnded'
@@ -106,7 +107,7 @@ export function TaskLifecycle({ id, lifecycle, attention, questionActions, ended
     ?? (lifecycle?.observed.state !== 'unknown' ? lifecycle?.observed.at : undefined)
   const recordedAt = checkedAt ?? lifecycle?.observed.at
   return <section className="dt-task-lifecycle" aria-label={t('taskControl')}>
-    {lifecycle && <div role="status">
+    {(lifecycle || checking || unknown) && <div role="status">
       <p>{t(state)}</p>
       {paused && (checking || unknown) && <Hint>{t('taskPausePreserved')}</Hint>}
       {stopping && (checking || unknown) && <Hint>{t('taskStopPreserved')}</Hint>}

@@ -13,6 +13,7 @@ export interface AssignmentProgress {
   planRevision: number
   authorizationId: string
   attemptId?: string
+  attemptState?: Attempt['status']
   phase: ProjectWorkPhase
   nativeState: 'running' | 'idle' | 'unknown'
   reportId?: string
@@ -45,7 +46,7 @@ function assignmentProgress(ticket: Ticket, assignment: Assignment, facts: Facts
     && item.assignmentId === assignment.id && item.attemptId === attempt.id && item.lease === attempt.lease)
   const result: AssignmentProgress = {
     assignmentId: assignment.id, authorizationId: contract.authorizationId, planRevision: contract.planRevision,
-    attemptId: attempt?.id, phase: 'queued', nativeState,
+    attemptId: attempt?.id, attemptState: attempt?.status, phase: 'queued', nativeState,
     conditionsVersion: contract.plan.acceptance?.version ?? contract.planRevision,
     ...(report ? { reportId: report.id, reportState: report.state, reportAt: report.at } : {}),
   }
@@ -92,7 +93,9 @@ export function projectProgress(ticket: Ticket, facts: Facts): ProjectProgress {
   const workPhase: ProjectWorkPhase = ticket.ended ? ticket.ended.outcome === 'completed' ? 'completed' : 'ended'
     : priority.find(phase => active.some(item => item.phase === phase)) ?? (assignments.length ? 'unknown' : 'awaiting-confirmation')
   const lifecycle = ticket.lifecycle
-  const reconciliation = lifecycle?.reconciliation?.state
+  const explicitReconciliation = lifecycle?.reconciliation?.state
+  const pendingExecutionCheck = assignments.some(item => item.attemptState === 'reconcile' && !['completed', 'ended'].includes(item.phase))
+  const reconciliation = explicitReconciliation === 'checking' ? 'checking' : pendingExecutionCheck ? 'unknown' : explicitReconciliation
   const phase: ProjectProgress['phase'] = reconciliation === 'checking' ? 'reconciling' : reconciliation === 'unknown' ? 'unknown'
     : lifecycle?.stop.intent === 'stop' ? lifecycle.stop.state === 'exited' ? 'stopped' : 'stopping'
       : ticket.ended ? workPhase

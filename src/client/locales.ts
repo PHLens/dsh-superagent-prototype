@@ -66,7 +66,7 @@ const TEXT = {
   taskAnswerSaved: ['回答已保存。', 'Answer saved.'],
   taskAnswerNeedsCheck: ['回答已保存，等待核对。', 'Answer saved for reconciliation.'],
   taskActionFailed: ['操作未能确认，请核对状态后重试。', 'The operation could not be confirmed. Check its state and retry.'],
-  taskReviewHeld: ['任务暂停或正在核对，恢复后可继续验收。', 'The task is paused or being reconciled. Resume it before continuing acceptance.'],
+  taskReviewHeld: ['请先恢复任务或完成现场核对，再继续验收。', 'Resume the task or finish reconciliation before continuing acceptance.'],
   recoveryReadOnly: ['恢复演练为只读状态；执行、模型调用和外发均已禁用。', 'This recovery preview is read-only. Execution, model calls and outbound delivery are disabled.'],
   planRevision: ['方案版本 {revision}', 'Plan revision {revision}'],
   planConfirm: ['确认执行', 'Confirm execution'],

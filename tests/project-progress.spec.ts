@@ -55,6 +55,20 @@ it('keeps a semantic gate as a work fact while pause and reconciliation remain s
   expect(current.lifecycle.pause.intent).toBe('pause')
 })
 
+it('projects an attempt awaiting reconciliation even when its valid ready gate remains unchanged', () => {
+  const report = ready()
+  const attempt = f.attempts.bySession(f.attempt.sessionId)!
+  attempt.status = 'reconcile'; f.attempts.save(attempt)
+  const current = ticket()
+  current.assignments[0]!.waitingReason = 'preparation-reconciliation'; f.store.tickets.save(current)
+  expect(current.lifecycle?.reconciliation).toBeUndefined()
+  const progress = projectProgress(current, facts())
+  expect(progress).toMatchObject({ phase: 'unknown', workPhase: 'semantic-review', reconciliation: 'unknown',
+    assignments: [{ reportId: report.id, reportState: 'ready', phase: 'semantic-review', attemptState: 'reconcile' }] })
+  expect(() => f.reports.decide('owner', f.project.id, { ticketId: f.plan.ticketId, operationId: 'not-yet-safe',
+    reportId: report.id, conclusion: 'passed', evidence: 'Cannot accept until execution is reconciled' })).toThrow(/unauthorized/)
+})
+
 it('requires the exact current report and condition version for a review conclusion', () => {
   const original = ready()
   f.reports.decide('owner', f.project.id, { ticketId: f.plan.ticketId, operationId: 'changes', reportId: original.id, conclusion: 'changes_required', evidence: 'A second source is required' })

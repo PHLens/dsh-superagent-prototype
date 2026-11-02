@@ -63,6 +63,32 @@ it('shows current execution progress and hides an old ready report after a fresh
   } finally { f.dispose() }
 })
 
+it('preserves the ready gate but holds acceptance until the current attempt is reconciled', async () => {
+  const f = fixture()
+  try {
+    f.prepare()
+    const artifact = f.write()
+    const report = f.reports.submit(f.attempt.sessionId, f.report([{ id: artifact.id, contentVersion: artifact.contentVersion }]))
+    Object.assign(f.task, f.store.tickets.get(f.plan.ticketId)!)
+    const attempt = f.attempts.bySession(f.attempt.sessionId)!
+    attempt.status = 'reconcile'; f.attempts.save(attempt)
+    const data = server.conversations[f.project.id]!
+    data.reports = [report]
+    data.tasks![0]!.progress = projectProgress(f.task, { attempts: f.attempts.all(), reports: [report], decisions: [],
+      artifacts: f.artifacts.list(f.project.id), nativeState: () => undefined })
+    await mount(en)
+    expect(text()).toContain(en.executionSemanticReview)
+    expect(text()).toContain(en.taskNeedsCheck)
+    expect(text()).toContain(en.taskReviewHeld)
+    expect(all('button').some(item => item.textContent === en.taskReconcile)).toBe(true)
+    expect(field<HTMLTextAreaElement>(en.acceptanceEvidence).disabled).toBe(true)
+    const accept = all('button').find(item => item.textContent === en.acceptancePass)!
+    expect(accept.hasAttribute('disabled')).toBe(true)
+    await click(accept)
+    expect(server.requests.some(item => item.path.endsWith('/acceptance'))).toBe(false)
+  } finally { f.dispose() }
+})
+
 it.each([zh, en])('uses server observations for pausing/paused/stopping/exited instead of optimistic receipts (%#)', async dictionary => {
   const f = fixture(), calls: string[] = [], actual = globalThis.fetch
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
