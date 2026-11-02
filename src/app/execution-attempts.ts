@@ -15,6 +15,7 @@ export interface Attempt {
   id: string; projectId: string; ticketId: string; assignmentId: string; lease: string; sessionId: string
   workspaceId?: string; cwd: string; root: string; status: 'preparing' | 'prepared' | 'running' | 'ended' | 'reconcile'
   prepare?: { realpath: string; at: string; method: 'managed-empty-directory-v1' }
+  fenced?: true
   context?: { toolContractVersion?: number; promptRevision: number; roleRules: string; projectConventions: string; model: unknown; tools: string[]; resources: readonly string[]; skills: { name: string; version: string }[] }
   createdAt: string; error?: string
 }
@@ -50,7 +51,7 @@ export class ExecutionAttempts {
     const newest = this.all().findLast(item => item.assignmentId === attempt?.assignmentId)
     const lifecycleBlocked = ticket?.lifecycle && (ticket.lifecycle.pause.intent === 'pause' || ticket.lifecycle.stop.intent === 'stop')
     if (!attempt || !ticket || !assignment?.contract || (!receipt && (ticket.ended || lifecycleBlocked)) || ticket.projectId !== attempt.projectId || assignment.projectId !== attempt.projectId
-      || assignment.ticketId !== ticket.id || (!receipt && assignment.state === 'ended') || !auth || auth.revokedAt || newest?.lease !== attempt.lease
+      || assignment.ticketId !== ticket.id || (!receipt && assignment.state === 'ended') || !auth || auth.revokedAt || attempt.fenced || newest?.lease !== attempt.lease
       || !(receipt ? ['prepared', 'running', 'ended'] : ['prepared', 'running']).includes(attempt.status)) throw new Error('Stale or unauthorized worker execution')
     this.validateDirectory(attempt)
     return { attempt, ticket, assignment }

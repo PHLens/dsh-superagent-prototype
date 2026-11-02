@@ -220,31 +220,42 @@ export class DshExecutor implements Executor {
   /** Deterministic server-owned recovery check; callers cannot submit an outcome. */
   async reconcileTicket(ticketId: string, operationId: string): Promise<{ state: 'checking' | 'clear' | 'unknown'; operationId: string }> {
     if (!operationId.trim()) throw new Error('Reconciliation operation id is required')
+    if (this.reconciling.has(ticketId)) return { state: this.host.store.tickets.get(ticketId)?.lifecycle?.reconciliation?.state ?? 'checking', operationId }
+    this.reconciling.add(ticketId)
     const initial = this.host.store.tickets.get(ticketId)
     if (!initial) throw new Error('Ticket not found')
     const lifecycle = initial.lifecycle
     const assignment = initial.assignments.filter(item => item.contract && item.state !== 'ended').at(-1)
     const attempt = assignment ? this.host.attempts?.all().findLast(item => item.assignmentId === assignment.id) : undefined
+    const intentAt = { pause: lifecycle?.pause.at, stop: lifecycle?.stop.at }
+    const ownerId = attempt?.sessionId ?? (!initial.projectId ? workerSessionId(ticketId) : undefined)
     const startedAt = now()
     const checking = { state: 'checking' as const, operationId, startedAt, ...(assignment ? { assignmentId: assignment.id } : {}), ...(attempt ? { attemptId: attempt.id, lease: attempt.lease, sessionId: attempt.sessionId } : {}) }
     initial.lifecycle = { ...(lifecycle ?? { pause: { intent: 'none', state: 'running', at: startedAt }, stop: { intent: 'none', state: 'running', at: startedAt }, observed: { state: 'unknown', at: startedAt } }), reconciliation: checking }
     this.host.store.tickets.save(initial)
     let state: 'clear' | 'unknown' = 'clear', reason: string | undefined
-    if (attempt) {
-      const jobs = runningJobs(this.host.context, attempt.sessionId)
-      const resolved = await this.host.context.sessionController.resolveAgent(attempt.sessionId as SessionId)
+    if (ownerId) {
+      const jobs = runningJobs(this.host.context, ownerId)
+      const resolved = await this.host.context.sessionController.resolveAgent(ownerId as SessionId)
       if (jobs.length) { state = 'unknown'; reason = 'owner-jobs-still-running' }
       else if ('error' in resolved && resolved.error.code !== 'session/not-found') { state = 'unknown'; reason = `session-error:${resolved.error.code}` }
-      else if ('agent' in resolved && (resolved.agent.id !== attempt.sessionId || resolved.agent.session.header.cwd !== attempt.cwd)) { state = 'unknown'; reason = 'session-cwd-mismatch' }
-      else { try { this.host.attempts?.validateDirectory(attempt) } catch { state = 'unknown'; reason = 'prepare-evidence-mismatch' } }
+      else if ('agent' in resolved) {
+        const agent = resolved.agent
+        const inbox = agent.inbox.nextTurn.length + agent.inbox.nextStep.length
+        if (agent.status !== 'idle') { state = 'unknown'; reason = `session-status:${agent.status}` }
+        else if (inbox) { state = 'unknown'; reason = 'session-inbox-pending' }
+        else if (attempt && (agent.id !== attempt.sessionId || agent.session.header.cwd !== attempt.cwd)) { state = 'unknown'; reason = 'session-cwd-mismatch' }
+      }
+      if (state === 'clear' && attempt) { try { this.host.attempts?.validateDirectory(attempt) } catch { state = 'unknown'; reason = 'prepare-evidence-mismatch' } }
     }
     const current = this.host.store.tickets.get(ticketId)
     const currentAttempt = assignment ? this.host.attempts?.all().findLast(item => item.assignmentId === assignment.id) : undefined
-    if (!current || current.lifecycle?.reconciliation?.operationId !== operationId || currentAttempt?.lease !== attempt?.lease || currentAttempt?.id !== attempt?.id) return { state: 'unknown', operationId }
+    if (!current || current.lifecycle?.reconciliation?.operationId !== operationId || (intentAt.pause !== undefined && current.lifecycle.pause.at !== intentAt.pause) || (intentAt.stop !== undefined && current.lifecycle.stop.at !== intentAt.stop) || currentAttempt?.lease !== attempt?.lease || currentAttempt?.id !== attempt?.id) { this.reconciling.delete(ticketId); return { state: 'unknown', operationId } }
     const observedAt = now()
     current.lifecycle!.reconciliation = { ...checking, state, observedAt, ...(reason ? { reason } : {}) }
     this.host.store.tickets.save(current)
     if (state === 'clear' && current.lifecycle) this.host.engine.observeTicket(ticketId, current.lifecycle.stop.intent === 'stop' ? 'exited' : 'idle', 'reconciled')
+    this.reconciling.delete(ticketId)
     return { state, operationId }
   }
   /** Cancellation requests become observations only after the actual native workers drain. */
@@ -253,6 +264,9 @@ export class DshExecutor implements Executor {
     if (!lifecycle || !this.held(ticket) || this.projectLaunching.has(ticket.id)) return
     const stopping = lifecycle.stop.intent === 'stop'
     if (stopping ? lifecycle.stop.state === 'exited' : lifecycle.pause.state === 'paused') return
+    const intentKey = `${stopping ? 'stop' : 'pause'}:${stopping ? lifecycle.stop.at : lifecycle.pause.at}`
+    if (this.lifecycleSettling.get(ticket.id) === intentKey) return
+    this.lifecycleSettling.set(ticket.id, intentKey)
     const attempts = this.host.attempts?.all().filter(item => item.ticketId === ticket.id) ?? []
     for (const attempt of attempts) this.projectObserved.delete(attempt.id)
     const ids = ticket.projectId ? attempts.map(item => item.sessionId) : [workerSessionId(ticket.id)]
@@ -269,15 +283,17 @@ export class DshExecutor implements Executor {
         if ('error' in resolved) {
           if (resolved.error.code !== 'session/not-found') throw resolved.error
           // A missing native Session does not prove that its owner jobs ended. Reconcile those jobs first.
-          if (!await stopBackground(this.host.context, id, stopping ? 'stopped' : 'paused', !stopping)) throw new Error('Lifecycle requires reconciliation: owner jobs are still running')
+          const hadJobs = runningJobs(this.host.context, id).length > 0
+           if (hadJobs && !await stopBackground(this.host.context, id, stopping ? 'stopped' : 'paused', !stopping)) throw new Error('Lifecycle requires reconciliation: owner jobs are still running')
           continue
         }
         const agent = resolved.agent
         if (agent.id !== id || (attempt && agent.session.header.cwd !== attempt.cwd)) throw new Error('Lifecycle requires reconciliation: Worker Session/cwd mapping mismatch')
         agent.cancel({ kind: 'user' }, { keepInbox: !stopping })
+        const hadJobs = runningJobs(this.host.context, id).length > 0
         const backgroundStopped = await stopBackground(this.host.context, id, stopping ? 'stopped' : 'paused', !stopping)
-        await agent.whenIdle()
-        if (!backgroundStopped || agent.status !== 'idle') throw new Error('Lifecycle requires reconciliation: native worker is still active')
+        if (agent.status !== 'idle') await agent.whenIdle()
+        if ((hadJobs && !backgroundStopped) || agent.status !== 'idle') throw new Error('Lifecycle requires reconciliation: native worker is still active')
       }
       const current = this.host.store.tickets.get(ticket.id)
       if (!current || current.lifecycle?.pause.at !== lifecycle.pause.at || current.lifecycle.stop.at !== lifecycle.stop.at) return
@@ -297,13 +313,12 @@ export class DshExecutor implements Executor {
     for (const ticket of this.host.store.tickets.list()) {
       if (ticket.ended) continue
       const recovery = ticket.lifecycle?.reconciliation
-      if (recovery && (recovery.state === 'unknown' || recovery.state === 'checking') && recovery.operationId && !this.reconciling.has(ticket.id)) {
-        this.reconciling.add(ticket.id)
-        void this.reconcileTicket(ticket.id, recovery.operationId).catch(() => {}).finally(() => { this.reconciling.delete(ticket.id) })
+      if (recovery && (recovery.state === 'unknown' || recovery.state === 'checking') && recovery.operationId) {
+        void this.reconcileTicket(ticket.id, recovery.operationId).catch(() => {})
       }
       this.reconcileLifecycle(ticket)
       if (!ticket.projectId && ticket.lifecycle?.pause.intent === 'resume' && ticket.lifecycle.observed.reason === 'resume-requested'
-        && runningAssignment(ticket) && !this.stopping.has(ticket.id) && !this.host.paused()) {
+        && runningAssignment(ticket) && !['failed', 'blocked'].includes(ticket.assignments.find(item => item.state !== 'ended')?.waitingReason ?? '') && !this.stopping.has(ticket.id) && !this.host.paused()) {
         try { this.slots.reserve(ticket.id, 'wake') } catch { continue }
         const work = this.host.sessions.prompt(workerSessionId(ticket.id), `lifecycle-resume:${ticket.id}:${ticket.lifecycle.pause.at}`,
           'A person resumed this ticket. Continue the assignment from the saved workspace and conversation.', 'queue', () => {
@@ -320,6 +335,16 @@ export class DshExecutor implements Executor {
       if (this.held(ticket) || this.stopping.has(ticket.id)) continue
       for (const assignment of ticket.assignments.filter(item => item.contract && item.state !== 'ended')) {
         const existing = attempts.all().findLast(item => item.assignmentId === assignment.id)
+        const resumeAgent = existing && ticket.lifecycle?.pause.intent === 'resume' ? this.host.context.agents.get(existing.sessionId as SessionId) : undefined
+        if (existing && resumeAgent?.status === 'idle' && ['worker-idle', 'worker-running'].includes(assignment.waitingReason ?? '') && !this.host.reportReady?.(ticket, assignment, existing)) {
+          try { this.slots.reserve(ticket.id, 'wake') } catch { continue }
+          const requestId = `project-execute:${existing.id}:${existing.lease}:resume:${ticket.lifecycle!.pause.at}`
+          const work = this.host.sessions.prompt(existing.sessionId, requestId, 'Continue the confirmed project execution from the saved workspace.', 'queue', () => { attempts.resolve(existing.sessionId) })
+            .then(() => { this.projectObserved.add(existing.id); this.host.engine.observeTicket(ticket.id, 'running', 'worker-resumed') })
+            .finally(() => { this.slots.free(ticket.id) })
+          this.track(ticket.id, work)
+          continue
+        }
         if (existing && this.projectObserved.has(existing.id)) {
           try { attempts.resolve(existing.sessionId) } catch { this.host.context.agents.get(existing.sessionId as SessionId)?.cancel({ kind: 'user' }, { keepInbox: false }); continue }
           if (existing.status === 'running' && this.host.context.agents.get(existing.sessionId as SessionId)?.status === 'idle' && assignment.waitingReason === 'worker-running') {
@@ -328,6 +353,7 @@ export class DshExecutor implements Executor {
           continue
         }
         if (existing?.status === 'reconcile' || this.projectLaunching.has(ticket.id)) continue
+         if (['failed', 'blocked'].includes(assignment.waitingReason ?? '')) continue
         // A ready report with an independent semantic gate is durable evidence. Resume may continue the judgment,
         // but must not re-submit the completed worker prompt or redo file actions.
         if (existing && this.host.reportReady?.(ticket, assignment, existing) && ['semantic-review', 'needs_judgment', 'unresolved-items', 'changes_required'].includes(assignment.waitingReason ?? '')) continue
@@ -351,7 +377,7 @@ export class DshExecutor implements Executor {
       await this.stopped(ticketId)
       ticket = this.host.store.tickets.get(ticketId)!; assignment = ticket.assignments.find(item => item.id === assignmentId)!
       if (this.held(ticket) || this.host.closing() || this.host.paused()) return
-      attempt = attempts.prepare(attempts.allocate(ticket, assignment, { fresh: attempts.all().findLast(item => item.assignmentId === assignment.id)?.status === 'ended' }))
+      attempt = attempts.prepare(attempts.allocate(ticket, assignment, { fresh: (attempts.all().findLast(item => item.assignmentId === assignment.id)?.status === 'ended' || !!attempts.all().findLast(item => item.assignmentId === assignment.id)?.fenced) }))
       const agent = await this.host.sessions.ensure(attempt.sessionId, attempt.cwd, `Project worker: ${ticket.title}`, 'worker')
       attempts.resolve(agent.id)
       if (this.host.closing() || this.host.paused() || this.held(this.host.store.tickets.get(ticketId)!)) return
@@ -387,6 +413,8 @@ export class DshExecutor implements Executor {
   private readonly settling = new Map<string, AbortController>()
   /** The stops of tickets' background work that run, by ticket, which a launch or a delivery of the ticket waits for. */
   private readonly stopping = new Map<string, Promise<void>>()
+  /** One native settle operation per ticket and current pause/stop intent. */
+  private readonly lifecycleSettling = new Map<string, string>()
   /** The jobs workers left to a person when they handed off, by ticket, and the collecting of their ends. */
   private readonly left = new Map<string, { jobs: Set<string>; collect: AbortController }>()
   /** When a person's message typed into a worker's Session last started a turn, by ticket. */
@@ -559,6 +587,7 @@ export class DshExecutor implements Executor {
       attempt.status = 'reconcile'; attempt.error = 'Stop requires reconciliation: Worker Session/cwd mapping mismatch'; attempts.save(attempt)
       return
     }
+    if (['preparing', 'prepared', 'running'].includes(attempt.status)) { attempt.fenced = true; attempts.save(attempt) }
     agent.cancel({ kind: 'user' }, { keepInbox: false })
     this.projectObserved.delete(attempt.id)
     this.stopWork(ticketId, 'stopped', false, attempt.sessionId)
@@ -566,7 +595,7 @@ export class DshExecutor implements Executor {
     this.track(ticketId, agent.whenIdle().then(() => {
       const current = attempts.bySession(attempt.sessionId)
       if (current?.id === attempt.id && current.lease === attempt.lease && current.ticketId === ticket.id && current.assignmentId === assignmentId
-        && ['preparing', 'prepared', 'running'].includes(current.status)) { current.status = 'ended'; attempts.save(current) }
+        && ['preparing', 'prepared', 'running'].includes(current.status)) { delete current.fenced; current.status = 'ended'; attempts.save(current) }
       queueMicrotask(() => this.reconcileLifecycle(this.host.store.tickets.get(ticket.id) ?? ticket))
     }))
   }
@@ -592,13 +621,14 @@ export class DshExecutor implements Executor {
    */
   async shutdown(): Promise<boolean> {
     await Promise.allSettled(this.projectLaunching.values())
-    const ids = [...(this.host.masterId ? [this.host.masterId] : []), ...this.host.store.tickets.list().filter(ticket => !ticket.projectId).map(ticket => workerSessionId(ticket.id)), ...this.host.attempts?.all().map(item => item.sessionId) ?? []]
+    const ids = [...new Set([...(this.host.masterId ? [this.host.masterId] : []), ...this.host.store.tickets.list().filter(ticket => !ticket.projectId).map(ticket => workerSessionId(ticket.id)), ...this.host.attempts?.all().map(item => item.sessionId) ?? []])]
     const agents = ids.map(id => this.host.context.agents.get(id as SessionId))
       .filter((agent): agent is Agent => agent !== undefined)
     const stop = async () => {
-      const drained = await Promise.all(agents.map(async agent => {
-        const hadJobs = runningJobs(this.host.context, agent.id).length > 0
-        const result = await stopBackground(this.host.context, agent.id, 'dsh-superagent stopped', true).catch(() => false)
+      // Jobs remain stoppable after their Session is unloaded; use the durable owner mapping, not loaded Agents only.
+      const drained = await Promise.all(ids.map(async id => {
+        const hadJobs = runningJobs(this.host.context, id).length > 0
+        const result = await stopBackground(this.host.context, id, 'dsh-superagent stopped', true).catch(() => false)
         return !hadJobs || result
       }))
       if (drained.some(value => !value)) return false

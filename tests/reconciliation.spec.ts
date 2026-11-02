@@ -9,9 +9,9 @@ it('exposes owner reconciliation with a server-owned outcome', async () => {
   const { ticket } = await h.acceptedTicket(feishu('reconcile-route', 'Check the running work.'))
   const response = await h.api('POST', `tickets/${ticket.id}/reconcile`, { operationId: 'reconcile-1' })
   expect(response.status).toBe(200)
-  expect(response.body).toEqual({ state: 'clear', operationId: 'reconcile-1' })
+  expect(response.body).toEqual({ state: 'unknown', operationId: 'reconcile-1' })
   expect(h.runtime.store.tickets.get(ticket.id)?.lifecycle?.reconciliation).toMatchObject({
-    state: 'clear', operationId: 'reconcile-1',
+    state: 'unknown', operationId: 'reconcile-1',
   })
 })
 
