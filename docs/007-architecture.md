@@ -159,7 +159,9 @@ Its interfaces are grouped by purpose:
 - **Outbox receipts:** `replyStatus` and `receipts`, written only by Outbox. Receipt operations are `get`, `waiting`, `behind`, `add`, `settle` and `withdraw`. `behind` checks whether an earlier message for the same Ticket and conversation is waiting with fewer than three failures. A withdrawn message settles with `channelGone` or `channelIgnored`. Read queries expose failed and dropped replies through `failingReplies`, `droppedReplies` and `droppedSince`.
 - **Typed key-value records:** `get`, `set`, `delete` and `keys`, using entries from `KV`.
 
-`afterCommit` runs an action only after the transaction commits, never after rollback. Runtime reads records in their stored shape; the schema 11 migration converts older supported records at startup.
+`afterCommit` runs an action only after the transaction commits, never after rollback, including when a released nested transaction's parent rolls back. Runtime reads records in their stored shape. Supported schema 10/11 databases get a private SQLite snapshot before any schema DDL; all schema changes and the schema 12 version write share one transaction. Legacy tables remain intact, without inferred project routing or authorization.
+
+`projects` persists projects, tasks and attempts; `channels` keeps native event identity `(source, accountId, nativeId)` separate from project routing and project-scoped client operations; `artifacts` checks task/project ownership. `restoreSnapshot` publishes a database only into a fresh directory, with sources disabled and processing paused. A durable recovery marker makes Runtime refuse startup before touching host Sessions or dispatching queued effects. Recovery copies remain available through Store for offline inspection; this does not back up workspaces, attachments or host Session state.
 
 ### Effects
 
@@ -322,7 +324,11 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/notices.ts` | The main Session's notices and relays: `eventNotice`, `reportRelay`, `resultRelay` and `followupRelay` |
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
-| `src/app/migration.ts` | The schema 11 migration: one step from schema 10 that writes every stored record in its current shape |
+| `src/app/migration.ts` | Transactional schema 10/11→12 migration, retaining legacy records and adding project execution tables |
+| `src/app/project-store.ts` | Project, task and attempt persistence with immutable ownership |
+| `src/app/channel-store.ts` | Channel messages, native event identity, project routing and scoped operation idempotency |
+| `src/app/artifact-store.ts` | Task-owned artifact persistence and project checks |
+| `src/app/backup.ts` | Private pre-migration SQLite snapshots, rollback results and offline-only recovery copies |
 | `src/app/effects.ts` | Effects |
 | `src/app/versions.ts` | `Versions`: a record kept as numbered snapshots with a pointer to the current one, for the settings and the prompts |
 | `src/app/cache.ts` | `TextCache`: texts kept in memory within a size, the least recently used dropped first |
@@ -435,7 +441,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |
-| `tests/migration.spec.ts` | The schema 11 migration: every stored record in its current shape, and the refusal of older schemas |
+| `tests/migration.spec.ts` | Schema 10/11→12 migration, legacy retention, pre-DDL snapshots, injected rollback and isolated recovery |
+| `tests/project-store.spec.ts` | Project/task/attempt/artifact ownership, channel identity and routing, idempotent operations and atomic rollback |
 | `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |
 | `tests/prompts.spec.ts` | Prompt validation, assembly and versions |
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
@@ -488,7 +495,7 @@ Read caches use bounded in-memory `TextCache` instances and are lost on restart.
 
 Nothing deletes old records yet, so these grow without bound: the `trigger`, `disposition` and `decision` rows; ended Tickets and their Threads; the outbox's receipts; and in `kv`, every saved settings revision and prompt version, the prompt revisions each Session worked under, and the Sources' records per Thread and per Issue or pull request.
 
-`SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of the pre-release schema 10 once, at start, and refuses an older one.
+`SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades schema 10 or 11 to schema 12 after a snapshot, and refuses older schemas. A failed migration leaves the previous schema and data unchanged and reports the retained snapshot and rollback result.
 
 ## Model-facing interfaces
 

@@ -1,14 +1,18 @@
 /** SQLite persistence for domain aggregates, key-value state, settings history, and the channel outbox. */
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import { chmodSync, mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { basename, dirname } from 'node:path'
+import { MigrationError, snapshotDatabase } from './backup.ts'
 import { key, threadKey, type ChannelRef, type Decision, type OutboundMessage, type ReplyStatus, type Repositories, type Thread, type ThreadFact,
   type ThreadFacts, type Ticket, type Trigger, type TriggerDisposition } from '../core/index.ts'
 import { KV, type Family, type Key } from '../kv.ts'
 import { SettingsSchema, type Settings, type SettingsOrigin, type SettingsSave } from '../policy.ts'
-import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, tooOld } from './migration.ts'
+import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, migrateTo12, tooOld } from './migration.ts'
 import { Versions } from './versions.ts'
 import { storeReads } from './store-read.ts'
+import { ProjectStore } from './project-store.ts'
+import { ChannelStore } from './channel-store.ts'
+import { ArtifactStore } from './artifact-store.ts'
 
 /** A Trigger's position on its thread timeline, ordered by timestamp and then `id` as tie-breaker. */
 export interface TimelinePlace { at: string; id: string }
@@ -50,10 +54,13 @@ export { SCHEMA_VERSION }
  */
 export class Store implements Repositories {
   readonly db: DatabaseSync
+  readonly projects = new ProjectStore(this)
+  readonly channels = new ChannelStore(this)
+  readonly artifacts = new ArtifactStore(this)
   /**
-   * Opens or creates the SQLite database at `path`, migrating schema 10 to schema 11 in a single transaction.
+   * Opens or creates the SQLite database at `path`, migrating supported schemas to schema 12 in a single transaction after a snapshot.
    * @param report - Receives errors thrown by `afterCommit` callbacks without failing the committed transaction.
-   * @throws When the database schema is older than `OLDEST_SCHEMA` (10), newer than `SCHEMA_VERSION` (11), or when migration fails; in every case the database file is left unchanged and the SQLite handle is closed so a later attempt in the same process can open it.
+   * @throws When the database schema is older than `OLDEST_SCHEMA` (10), newer than `SCHEMA_VERSION` (12), or when migration fails; in every case the database file is left unchanged and the SQLite handle is closed so a later attempt in the same process can open it.
    */
   constructor(path: string, private readonly report: (error: unknown) => void = () => {}) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
@@ -61,14 +68,18 @@ export class Store implements Repositories {
     this.read = storeReads(this.db)
     try {
       chmodSync(path, 0o600)
-      this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
-      const version = this.get(KV.store.schema)
+      this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL')
+      const hasKV = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kv'").get()
+      const version = hasKV ? this.get(KV.store.schema) : undefined
       if (version !== undefined && version > SCHEMA_VERSION) throw new Error(`Unsupported orchestrator database version ${version}`)
       if (version !== undefined && version < OLDEST_SCHEMA) throw new Error(tooOld(version))
       const migrating = version !== undefined && version < SCHEMA_VERSION
+      // Snapshot before any DDL, including generated columns, so recovery preserves the original schema.
+      const snapshot = migrating ? snapshotDatabase(this.db, path, version) : undefined
       try {
         this.atomic(() => {
           this.db.exec(`
+            CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS trigger (id TEXT PRIMARY KEY, value TEXT NOT NULL, at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS disposition (id TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS thread (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -86,13 +97,14 @@ export class Store implements Repositories {
             CREATE INDEX IF NOT EXISTS effect_due ON effect(kind, due, seq);
           `)
           this.addColumns()
-          if (migrating) migrateTo11(this)
+          if (version !== undefined && version < 11) migrateTo11(this)
+          migrateTo12(this)
+          if (snapshot) this.set(KV.store.migrationSnapshot, { ...snapshot, file: basename(snapshot.file) })
           if (version !== SCHEMA_VERSION) this.set(KV.store.schema, SCHEMA_VERSION)
         })
       } catch (error) {
-        if (!migrating) throw error
-        const reason = error instanceof Error ? error.message : String(error)
-        throw new Error(`The orchestrator database is unchanged at schema ${version}: its migration to schema ${SCHEMA_VERSION} failed: ${reason}`, { cause: error })
+        if (!snapshot) throw error
+        throw new MigrationError(version!, SCHEMA_VERSION, snapshot, error)
       }
     } catch (error) {
       this.db.close()
@@ -138,13 +150,18 @@ export class Store implements Repositories {
    * Post-commit callbacks run only after the outermost transaction commits, and callback errors are reported without failing the committed transaction.
    */
   atomic<T>(operation: () => T): T {
-    const level = this.depth++
+    const level = this.depth
     const name = `orchestrator_atomic_${level}`
-    this.committed[level] = []
     this.db.exec(`SAVEPOINT ${name}`)
+    this.depth++
+    this.committed[level] = []
     let value: T
     try { value = operation(); this.db.exec(`RELEASE ${name}`) }
-    catch (error) { this.db.exec(`ROLLBACK TO ${name}`); this.db.exec(`RELEASE ${name}`); throw error }
+    catch (error) {
+      this.committed.splice(level)
+      this.db.exec(`ROLLBACK TO ${name}`); this.db.exec(`RELEASE ${name}`)
+      throw error
+    }
     finally { this.depth-- }
     const actions = this.committed.splice(level)[0]!
     if (level) this.committed[level - 1]!.push(...actions)

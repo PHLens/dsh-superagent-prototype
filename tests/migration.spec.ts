@@ -1,17 +1,109 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { afterEach, beforeEach, expect, it } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { SCHEMA_VERSION, Store } from '../src/app/store.ts'
 import { KV } from '../src/kv.ts'
 import { basisOf, reasonsOf, withoutCopies } from '../src/app/migration.ts'
 import { Prompts, composePrompt, defaultPrompts } from '../src/app/prompts.ts'
 import { masterPrompt } from '../src/app/context.ts'
+import { MigrationError, restoreSnapshot, snapshotDatabase } from '../src/app/backup.ts'
 
 let directory: string
 beforeEach(() => { directory = mkdtempSync(join(tmpdir(), 'orchestrator-migration-')) })
 afterEach(() => { rmSync(directory, { recursive: true, force: true }) })
+
+it('snapshots schema 11 including WAL before adding schema 12 and preserves legacy data', () => {
+  const path = join(directory, 'db.sqlite')
+  const legacy = new DatabaseSync(path)
+  legacy.exec(`PRAGMA journal_mode=WAL; CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO kv VALUES ('schema', '11'); CREATE TABLE inbox (id TEXT PRIMARY KEY, value TEXT);
+    INSERT INTO inbox VALUES ('legacy', '{"untouched":true}')`)
+  const store = new Store(path)
+  expect(store.get(KV.store.schema)).toBe(12)
+  expect(store.projects.list()).toEqual([])
+  expect(store.db.prepare('SELECT value FROM inbox').get()?.value).toBe('{"untouched":true}')
+  const metadata = store.get(KV.store.migrationSnapshot)!
+  expect(metadata.schema).toBe(11)
+  const snapshot = new DatabaseSync(join(directory, metadata.file), { readOnly: true })
+  expect(snapshot.prepare("SELECT value FROM kv WHERE key='schema'").get()?.value).toBe('11')
+  expect(snapshot.prepare('SELECT value FROM inbox').get()?.value).toBe('{"untouched":true}')
+  expect(snapshot.prepare("SELECT name FROM sqlite_master WHERE name='project'").get()).toBeUndefined()
+  expect(statSync(join(directory, metadata.file)).mode & 0o777).toBe(0o600)
+  snapshot.close()
+  const recovery = restoreSnapshot({ ...metadata, file: join(directory, metadata.file) }, join(directory, 'schema11-recovery'))
+  const restored = new Store(recovery.database)
+  expect(restored.get(KV.store.schema)).toBe(12)
+  expect(restored.settings().paused).toBe(true)
+  expect(restored.db.prepare('SELECT value FROM inbox').get()?.value).toBe('{"untouched":true}')
+  restored.close(); store.close(); legacy.close()
+})
+
+it('does not start DDL when snapshot creation fails', () => {
+  const path = join(directory, 'db.sqlite')
+  const db = new DatabaseSync(path)
+  db.exec("CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO kv VALUES ('schema', '11')")
+  const before = db.prepare('SELECT name, sql FROM sqlite_master ORDER BY name').all()
+  const original = DatabaseSync.prototype.prepare
+  const prepare = vi.spyOn(DatabaseSync.prototype, 'prepare').mockImplementation(function (this: DatabaseSync, sql: string) {
+    if (sql === 'VACUUM INTO ?') throw new Error('snapshot write failed')
+    return original.call(this, sql)
+  })
+  try { expect(() => new Store(path)).toThrow('snapshot write failed') } finally { prepare.mockRestore() }
+  expect(db.prepare('SELECT name, sql FROM sqlite_master ORDER BY name').all()).toEqual(before)
+  expect(db.prepare("SELECT value FROM kv WHERE key='schema'").get()?.value).toBe('11')
+  expect(readdirSync(directory).filter(file => file.endsWith('.json'))).toEqual([])
+  db.close()
+})
+
+it('rolls all DDL back when the final schema write fails, retaining a usable snapshot and closed handle', () => {
+  const path = join(directory, 'db.sqlite')
+  const db = new DatabaseSync(path)
+  db.exec(`CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO kv VALUES ('schema', '11');
+    CREATE TABLE inbox (id TEXT PRIMARY KEY, value TEXT); INSERT INTO inbox VALUES ('old', 'preserved');
+    CREATE TRIGGER fail_version BEFORE UPDATE ON kv WHEN NEW.key='schema'
+      BEGIN SELECT RAISE(ABORT, 'injected migration failure'); END`)
+  const before = db.prepare('SELECT type, name, sql FROM sqlite_master ORDER BY name').all()
+  db.close()
+  let failure: MigrationError | undefined
+  try { new Store(path) } catch (error) { expect(error).toBeInstanceOf(MigrationError); failure = error as MigrationError }
+  expect(failure?.rollback).toBe('rolledBack')
+  const unchanged = new DatabaseSync(path)
+  expect(unchanged.prepare('SELECT type, name, sql FROM sqlite_master ORDER BY name').all()).toEqual(before)
+  expect(unchanged.prepare("SELECT value FROM kv WHERE key='schema'").get()?.value).toBe('11')
+  expect(unchanged.prepare('SELECT value FROM inbox').get()?.value).toBe('preserved')
+  expect(readdirSync(directory)).toContain(failure!.snapshot.file.split('/').at(-1))
+  const failedRecovery = join(directory, 'failed-recovery')
+  expect(() => restoreSnapshot(failure!.snapshot, failedRecovery)).toThrow('injected migration failure')
+  expect(readdirSync(failedRecovery)).not.toContain('orchestrator.sqlite')
+  const incomplete = new DatabaseSync(join(failedRecovery, '.recovery-incomplete.sqlite'), { readOnly: true })
+  expect(JSON.parse(String(incomplete.prepare('SELECT value FROM kv WHERE key = ?').get(KV.store.recovery)?.value)).outboundDisabled).toBe(true)
+  incomplete.close()
+  unchanged.exec('DROP TRIGGER fail_version'); unchanged.close()
+  const recovered = new Store(path)
+  expect(recovered.get(KV.store.schema)).toBe(12)
+  recovered.close()
+})
+
+it('restores into a new isolated directory with outbound work held and leaves the source unchanged', () => {
+  const path = join(directory, 'source.sqlite')
+  const store = new Store(path)
+  store.saveSettings({ paused: false, sources: { github: { enabled: true, config: {} } } })
+  store.db.exec("INSERT INTO effect (kind, key, value, seq, due, since) VALUES ('reply', 'pending', '{}', 1, 0, '')")
+  const snapshot = snapshotDatabase(store.db, path, 12)
+  const destination = join(directory, 'restored')
+  const result = restoreSnapshot(snapshot, destination)
+  const restored = new Store(result.database)
+  expect(restored.settings().paused).toBe(true)
+  expect(restored.settings().sources.github?.enabled).toBe(false)
+  expect(restored.get(KV.store.recovery)?.outboundDisabled).toBe(true)
+  expect(restored.db.prepare("SELECT key FROM effect WHERE kind='reply'").get()?.key).toBe('pending')
+  expect(store.settings().paused).toBe(false)
+  expect(store.settings().sources.github?.enabled).toBe(true)
+  expect(() => restoreSnapshot(snapshot, destination)).toThrow()
+  restored.close(); store.close()
+})
 
 /** Seed a SQLite database in the schema 10 layout (including the legacy `outbox.sent` column and `inbox` table). */
 function schema10(path: string, records: Record<string, unknown>, rows: { ticket?: object[]; decision?: object[]; thread?: object[]; trigger?: object[] } = {}): void {
@@ -202,7 +294,7 @@ it('changes nothing when one step fails: the database stays at schema 10 as it w
     updatedAt: '2', mandate: mandate({ via: 'listed' }), meta: { sourceTriggerId: 'trig-1', workspace: '/w/fix-1' } }
   // The current settings must validate; an invalid value aborts the migration transaction.
   schema10(path, { settings: { executor: { maxWorkers: 'many' } } }, { ticket: [ticket] })
-  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 11 failed: the settings: /)
+  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 12 failed: the settings: /)
   const db = new DatabaseSync(path)
   expect(db.prepare("SELECT value FROM kv WHERE key='schema'").get()).toEqual({ value: '10' })
   expect(JSON.parse(String(db.prepare("SELECT value FROM ticket WHERE id='t1'").get()!.value))).toMatchObject({ meta: { workspace: '/w/fix-1' } })
@@ -475,7 +567,7 @@ it('names the ticket it stopped at when a ticket does not read, and leaves the d
   const path = join(directory, 'db.sqlite')
   const { inputs: _inputs, ...broken } = ticket10('t9')
   schema10(path, {}, { ticket: [broken] })
-  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 11 failed: ticket t9: /)
+  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 12 failed: ticket t9: /)
   const db = new DatabaseSync(path)
   expect(db.prepare("SELECT value FROM kv WHERE key='schema'").get()).toEqual({ value: '10' })
   expect(JSON.parse(String(db.prepare("SELECT value FROM ticket WHERE id='t9'").get()!.value))).toEqual(broken)

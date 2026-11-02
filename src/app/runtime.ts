@@ -96,6 +96,9 @@ export class Runtime extends Service implements SourceHost {
     try {
       const report = (error: unknown) => { ctx.logger.warn('dsh-superagent: %s', String(error)) }
       const store = opened = this.store = new Store(join(machine.stateDir, 'orchestrator.sqlite'), report)
+      // Recovery copies retain historical session identities and pending effects for inspection only.
+      // Refuse service startup before connecting to any host Session, even if processing is paused.
+      if (store.get(KV.store.recovery)) throw new Error('An isolated recovery database is offline only; inspect it with Store instead of starting runtime services')
       const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, restart })
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined

@@ -161,6 +161,25 @@ it('runs what waits for a commit once the outermost transaction commits, and nev
   store.close()
 })
 
+it('discards callbacks from released inner transactions when their parent rolls back and remains reusable', () => {
+  const store = new Store(join(directory, 'db.sqlite'))
+  const ran: string[] = []
+  store.atomic(() => {
+    store.afterCommit(() => { ran.push('outer') })
+    expect(() => store.atomic(() => {
+      store.atomic(() => {
+        store.set('nested', true)
+        store.afterCommit(() => { ran.push('discarded') })
+      })
+      throw new Error('parent failed')
+    })).toThrow('parent failed')
+    store.atomic(() => { store.afterCommit(() => { ran.push('replacement') }) })
+  })
+  expect(store.get('nested')).toBeUndefined()
+  expect(ran).toEqual(['outer', 'replacement'])
+  store.close()
+})
+
 it('reports an action that fails after a commit, runs the others, and keeps what committed', () => {
   const reported: unknown[] = []
   const store = new Store(join(directory, 'orchestrator.sqlite'), error => { reported.push(error) })

@@ -20,7 +20,9 @@ export function family<V, A extends unknown[] = [string]>(prefix: string, format
 
 export const KV = {
   /** Store: current database schema version. */
-  store: { schema: record<number>('schema') },
+  store: { schema: record<number>('schema'),
+    migrationSnapshot: record<{ file: string; schema: number; createdAt: string }>('migration-snapshot'),
+    recovery: record<{ outboundDisabled: true; restoredAt: string; schema: number }>('recovery-state') },
   /** Settings: current revision, per-block revision, and saved settings snapshots (including the current one). */
   settings: { revision: record<number>('settings-revision'),
     block: family<number, [block: SettingsSave]>('settings-block-revision:'),

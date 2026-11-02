@@ -1401,6 +1401,27 @@ it('applies a changed prompt size limit to the next save and request without a r
   expect(restarts).not.toHaveBeenCalled()
 })
 
+it('refuses recovery databases before connecting to host Sessions and releases its startup lock', async () => {
+  await runtime.stop()
+  const database = join(directory, 'orchestrator.sqlite')
+  const recovered = new Store(database)
+  recovered.set(KV.store.recovery, { outboundDisabled: true, restoredAt: '2026-01-01T00:00:00Z', schema: SCHEMA_VERSION })
+  recovered.db.prepare("INSERT INTO effect (kind, key, value, seq, due, since) VALUES ('relay', 'replay', ?, 1, 0, '')")
+    .run(JSON.stringify({ text: 'must not replay' }))
+  recovered.close()
+  const context = () => { const ctx = new Context(); for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service); return ctx }
+  controller.create.mockClear(); controller.prompt.mockClear(); controller.resolveAgent.mockClear()
+  expect(() => new Runtime(context(), testMachine({ stateDir: directory }), vi.fn())).toThrow('isolated recovery database is offline only')
+  expect(controller.create).not.toHaveBeenCalled()
+  expect(controller.prompt).not.toHaveBeenCalled()
+  expect(controller.resolveAgent).not.toHaveBeenCalled()
+  // Repeated rejection proves both the database handle and state lock were released.
+  expect(() => new Runtime(context(), testMachine({ stateDir: directory }), vi.fn())).toThrow('isolated recovery database is offline only')
+  const inspected = new Store(database)
+  expect(inspected.db.prepare("SELECT key FROM effect WHERE key='replay'").get()?.key).toBe('replay')
+  inspected.close()
+})
+
 it('releases the database and the state directory lock when it fails to start, so it can start again in this process', async () => {
   await runtime.stop()
   const db = new DatabaseSync(join(directory, 'orchestrator.sqlite'))
