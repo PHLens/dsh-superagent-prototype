@@ -5,3 +5,6 @@ lib/
 coverage/
 # Local host evidence includes executable paths and command diagnostics.
 .superagent-host/
+# Local dispatch state and receipts; keep OAuth helper credentials outside this repository.
+.workbench-dispatch/
+.env.*
