@@ -356,7 +356,10 @@ export class Sessions {
     const allow = WORK_TOOLS.filter(name => agent.ctx.tools.get(name, parent))
     return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(() => {
       const current = store.tickets.get(ticketId)
-      return !current || !liveTicket(current) ? 'Ticket ended; new work needs a new authorized ticket' : undefined
+      if (!current || !liveTicket(current)) return 'Ticket ended; new work needs a new authorized ticket'
+       if (current.lifecycle?.stop.intent === 'stop') return 'Ticket ended; new work needs a new authorized ticket'
+       if (current.lifecycle?.pause.intent === 'pause') return 'Ticket is paused; new work is fenced until explicit resume'
+       return undefined
     })]
   }
   /**

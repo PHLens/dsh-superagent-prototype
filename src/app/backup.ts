@@ -35,7 +35,7 @@ const statSafe = (path: string) => { try { return lstatSync(path) } catch (error
 const managedName = (path: string) => `${createHash('sha256').update(resolve(path)).digest('hex').slice(0, 12)}-${basename(path)}`
 const within = (root: string, path: string) => path === root || path.startsWith(`${root}${sep}`)
 // Never export conventional account stores or environment secrets via broad workspace/native roots.
-const credentialName = (name: string) => /^(?:\.env(?:\..*)?|\.ssh|\.aws|\.azure|\.gnupg|\.netrc|\.npmrc|\.pypirc|\.git-credentials|credentials(?:\..*)?|secrets?(?:\..*)?|hosts\.yml|id_(?:rsa|ed25519)(?:\.pub)?|.*\.(?:pem|key))$/i.test(name)
+const credentialName = (name: string) => /^(?:\.env(?:\..*)?|\.ssh|\.aws|\.azure|\.gnupg|\.netrc|\.npmrc|\.pypirc|\.git-credentials|\.credentials(?:\..*)?|credentials(?:\..*)?|secrets?(?:\..*)?|hosts\.yml|id_(?:rsa|ed25519)(?:\.pub)?|.*\.(?:pem|key))$/i.test(name)
 function canonicalDestination(path: string): string {
   let ancestor = resolve(path)
   while (!existsSync(ancestor)) ancestor = dirname(ancestor)

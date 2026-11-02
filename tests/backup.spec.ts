@@ -37,9 +37,9 @@ it('restores committed WAL data under the runtime database name and maps individ
 it('excludes credential files and explicit credential directories without following symlinks', () => {
   const root = join(directory, 'workspace'), accounts = join(root, 'accounts')
   mkdirSync(accounts, { recursive: true }); writeFileSync(join(accounts, 'opaque.json'), 'secret')
-  writeFileSync(join(root, '.env'), 'TOKEN=secret'); writeFileSync(join(root, '.git-credentials'), 'secret'); writeFileSync(join(root, 'safe.txt'), 'safe')
+  writeFileSync(join(root, '.env'), 'TOKEN=secret'); writeFileSync(join(root, '.git-credentials'), 'secret'); writeFileSync(join(root, '.credentials.yaml'), 'native-secret-store'); writeFileSync(join(root, 'safe.txt'), 'safe')
   const manifest = createRecoveryPoint(store, { databasePath, destination: join(directory, 'backup'), roots: { workspaces: [root] }, credentialPaths: [accounts] })
-  expect(manifest.excluded).toHaveLength(3)
+  expect(manifest.excluded).toHaveLength(4)
   expect(manifest.files.map(file => file.path.split('/').pop())).toEqual([RECOVERY_DATABASE, 'safe.txt'])
   expect(existsSync(join(directory, 'backup', 'INCOMPLETE'))).toBe(false)
 })

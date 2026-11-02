@@ -79,7 +79,14 @@ export class Setup {
   async blockCommands(blocked: readonly string[]): Promise<void> {
     if (this.resolved) await writeEnvironment(this.resolved, blocked)
   }
-  restore(): void { this.restoreEnvironment?.(); this.restoreEnvironment = undefined }
+  restore(): void {
+    this.restoreEnvironment?.(); this.restoreEnvironment = undefined
+    // A previous interrupted setup may have left its own worker values in the process environment.
+    if (process.env.GIT_CONFIG_GLOBAL?.endsWith('/worker-gitconfig')) delete process.env.GIT_CONFIG_GLOBAL
+    if (process.env.GIT_CONFIG_NOSYSTEM === '1') delete process.env.GIT_CONFIG_NOSYSTEM
+    const bin = workerBin(this.host.machine.stateDir)
+    if (process.env.PATH) process.env.PATH = process.env.PATH.split(':').filter(item => item !== bin).join(':')
+  }
   /** Probes CLIs the way worker shells run them, using `stateDir` as `cwd` since it exists even before the repository clone is valid. */
   private probe() {
     const { context, machine, lifetime } = this.host
@@ -121,6 +128,7 @@ export class Setup {
       machineProblem(error)
     })
     throwIfAborted()
+    this.restore()
     this.restoreEnvironment = applyEnvironment(this.variables, machine.stateDir, this.path)
     try {
       await verifyEnvironment(resolved, context.subprocess, lifetime)

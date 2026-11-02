@@ -230,14 +230,19 @@ export class DshExecutor implements Executor {
       }
       for (const id of ids) {
         const resolved = await this.host.context.sessionController.resolveAgent(id as SessionId)
+        const attempt = attempts.find(item => item.sessionId === id)
         if ('error' in resolved) {
-          if (resolved.error.code === 'session/not-found') continue
-          throw resolved.error
+          if (resolved.error.code !== 'session/not-found') throw resolved.error
+          // A missing native Session does not prove that its owner jobs ended. Reconcile those jobs first.
+          if (!await stopBackground(this.host.context, id, stopping ? 'stopped' : 'paused', !stopping)) throw new Error('Lifecycle requires reconciliation: owner jobs are still running')
+          continue
         }
-        const agent = resolved.agent, attempt = attempts.find(item => item.sessionId === id)
+        const agent = resolved.agent
         if (agent.id !== id || (attempt && agent.session.header.cwd !== attempt.cwd)) throw new Error('Lifecycle requires reconciliation: Worker Session/cwd mapping mismatch')
         agent.cancel({ kind: 'user' }, { keepInbox: !stopping })
-        await Promise.all([stopBackground(this.host.context, id, stopping ? 'stopped' : 'paused', !stopping), agent.whenIdle()])
+        const backgroundStopped = await stopBackground(this.host.context, id, stopping ? 'stopped' : 'paused', !stopping)
+        await agent.whenIdle()
+        if (!backgroundStopped || agent.status !== 'idle') throw new Error('Lifecycle requires reconciliation: native worker is still active')
       }
       const current = this.host.store.tickets.get(ticket.id)
       if (!current || current.lifecycle?.pause.at !== lifecycle.pause.at || current.lifecycle.stop.at !== lifecycle.stop.at) return
@@ -283,6 +288,9 @@ export class DshExecutor implements Executor {
           continue
         }
         if (existing?.status === 'reconcile' || this.projectLaunching.has(ticket.id)) continue
+        // A ready report with an independent semantic gate is durable evidence. Resume may continue the judgment,
+        // but must not re-submit the completed worker prompt or redo file actions.
+        if (assignment.report?.state === 'ready' && ['semantic-review', 'needs_judgment', 'unresolved-items', 'changes_required'].includes(assignment.waitingReason ?? '')) continue
         if (attempts.all().some(item => item.ticketId === ticket.id && item.assignmentId !== assignment.id && item.status === 'running' && this.host.context.agents.get(item.sessionId as SessionId)?.status === 'running')) { assignment.waitingReason = 'worker-slot'; this.host.store.tickets.save(ticket); continue }
         if (this.host.paused()) { assignment.waitingReason = 'processing-paused'; this.host.store.tickets.save(ticket); continue }
         if (!assignment.contract!.inputs.every(input => input.kind !== 'dependency' || this.host.store.tickets.get(input.ticketId)?.assignments.some(item => item.id === input.assignmentId && item.state === 'ended' && item.report?.state === 'ready'))) {
@@ -521,7 +529,7 @@ export class DshExecutor implements Executor {
   }
   /** Stop what a ticket's worker runs in the background (see `stopBackground`). */
   private stopWork(ticketId: string, reason: string, keepInbox = false, sessionId?: string): void {
-    this.track(ticketId, stopBackground(this.host.context, sessionId ?? workerSessionId(ticketId), reason, keepInbox))
+    this.track(ticketId, stopBackground(this.host.context, sessionId ?? workerSessionId(ticketId), reason, keepInbox).then(() => {}))
   }
   /** A stop of a ticket's background work, which a launch or a delivery of the ticket waits for while it runs. */
   private track(ticketId: string, stop: Promise<void>): void {
@@ -539,7 +547,7 @@ export class DshExecutor implements Executor {
    * On a host stop, for a bounded time: stop each loaded worker's background work, keeping its inbox; then end the collecting
    * of the jobs left to a person, which were killed, and cancel a worker turn that started meanwhile, keeping its inbox.
    */
-  async shutdown(): Promise<void> {
+  async shutdown(): Promise<boolean> {
     await Promise.allSettled(this.projectLaunching.values())
     const ids = [...this.host.store.tickets.list().filter(ticket => !ticket.projectId).map(ticket => workerSessionId(ticket.id)), ...this.host.attempts?.all().map(item => item.sessionId) ?? []]
     const agents = ids.map(id => this.host.context.agents.get(id as SessionId))
@@ -551,7 +559,7 @@ export class DshExecutor implements Executor {
       for (const agent of running) agent.cancel({ kind: 'user' }, { keepInbox: true })
       await Promise.allSettled(running.map(agent => agent.whenIdle()))
     }
-    await until(stop(), undefined, SHUTDOWN_STOP_MS)
+    return await until(stop(), undefined, SHUTDOWN_STOP_MS) !== false
   }
   /** Number of open tickets whose worker holds a worker slot: its turn runs, or its shell jobs or subagents still run after its turn ended. */
   activeCount(): number { return this.host.store.tickets.open().filter(ticket => this.running(ticket)).length + (this.host.attempts?.all().filter(item => item.status === 'running' && this.host.context.agents.get(item.sessionId as SessionId)?.status === 'running').length ?? 0) }
@@ -707,7 +715,7 @@ export class DshExecutor implements Executor {
     }
   }
   /** Runs background worker event handling and updates the `worker` health entry on failure or recovery. */
-  private background(work: Promise<void>): Promise<void> {
+  private background(work: Promise<unknown>): Promise<void> {
     const { health } = this.host
     return work.then(() => { if (health.get()?.state === 'error') health.set({ state: 'ready', detail: 'Worker events are handled', at: now() }) },
       (error: unknown) => { health.set({ state: 'error', detail: String(error), at: now() }) })

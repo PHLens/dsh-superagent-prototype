@@ -10,7 +10,7 @@ export function threadList(host: ViewHost, filter: ThreadFilter, offset: number,
   const { store } = host
   const view = snapshot(host)
   const since = dayAgo()
-  const open = new Set(store.tickets.open().map(ticket => ticket.id))
+  const open = new Set(store.tickets.open().filter(ticket => ticket.lifecycle?.stop.intent !== 'stop').map(ticket => ticket.id))
   const live = (thread: Thread) => thread.subscriptions.some(id => open.has(id))
   const lastAt = (thread: Thread) => thread.lastAt ?? thread.createdAt
   const kept = (thread: Thread) => filter === 'recent' ? lastAt(thread) >= since

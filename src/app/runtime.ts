@@ -253,6 +253,7 @@ export class Runtime extends Service implements SourceHost {
   stop(): Promise<void> { return this.stopping ??= this.shutdown() }
   private async shutdown(): Promise<void> {
     this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
+    let canRelease = false
     try {
       this.assessor.stop()
       const ids = [this.masterId, ...this.store.tickets.list().filter(ticket => !ticket.projectId).map(ticket => workerSessionId(ticket.id)),
@@ -262,14 +263,18 @@ export class Runtime extends Service implements SourceHost {
       // Startup may still be unwinding a cancelled probe or write; it must finish before environment restoration and DB/lock release.
       await Promise.allSettled([this.ready, passes, this.effects.drain(), this.projectCoordinator.stop()])
       // The workers' jobs and subagents stop too: their ends would start worker turns without the tool limits released below.
-      await this.executor.shutdown()
+      // A timeout is an unknown boundary. Keep the sessions, executor and Store fenced and open until native work is known idle.
+      const drained = await this.executor.shutdown()
+      if (!drained) return
       this.executor.dispose()
       this.sessions.dispose()
       for (const dispose of this.disposers.reverse()) dispose()
       await this.ctx.sessionPersistence.flush()
+      canRelease = true
     } finally {
-      // Close the database before releasing the directory lock so another process cannot open the database mid-write; a compromised lock may already be released.
       this.setup.restore()
+      if (!canRelease) return
+      // Close the database before releasing the directory lock so another process cannot open the database mid-write; a compromised lock may already be released.
       try { this.store.close() } finally {
         const unreleased = (error: unknown) => { this.ctx.logger.warn('dsh-superagent could not release its state directory lock: %s',
           String(error)) }

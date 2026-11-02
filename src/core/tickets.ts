@@ -229,9 +229,14 @@ export class Tickets extends EnginePart {
    */
   retry(ticketId: string): Ticket {
     const ticket = this.require(ticketId)
-    if (!executableTicket(ticket)) throw new UserError('projectNotRunnable')
     const latest = latestAssignment(ticket)
     if (!canRetry(ticket) || !latest) throw new UserError('notRetryable')
+    if (ticket.projectId && latest.contract) {
+      latest.state = 'pending'; delete latest.report; delete latest.waitingReason; delete latest.startedAt; delete latest.endedAt; delete latest.endedReason
+      this.requeueUntaken(ticket, latest); ticket.updatedAt = this.now(); this.repo.tickets.save(ticket)
+      this.options.executor.stop(ticket, latest, 'retried'); this.options.executor.start(ticket, latest); return ticket
+    }
+    if (!executableTicket(ticket)) throw new UserError('projectNotRunnable')
     this.endAssignment(ticket, latest, 'retried')
     this.requeueUntaken(ticket, latest)
     const assignment = this.newAssignment(ticket)
