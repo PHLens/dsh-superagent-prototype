@@ -136,7 +136,9 @@ export class Runtime extends Service implements SourceHost {
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       const databasePath = store.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file
       if (typeof databasePath !== 'string') throw new Error('Orchestrator database path is unavailable')
-      this.backup = new BackupService({ store, databasePath, destinationRoot: join(machine.stateDir, 'backups'), recovery: {}, health: board.claim('backup'), lifetime: this.lifetime })
+      this.backup = new BackupService({ store, databasePath, destinationRoot: join(machine.stateDir, 'backups'), recovery: {},
+        recoveryRoots: () => ({ workspaces: store.tickets.list().flatMap(ticket => ticket.execution?.directory && existsSync(ticket.execution.directory) ? [ticket.execution.directory] : []) }),
+        health: board.claim('backup'), lifetime: this.lifetime })
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() }, backupChanged: value => { this.backup.start(value) } })
       this.backup.start(store.settings().backup)

@@ -156,7 +156,7 @@ const DecisionsQuery = z.object({ kind: z.string().default(''), window: z.litera
 const count = z.coerce.number().int().nonnegative()
 const PromptsQuery = z.object({ revision: count.optional(), offset: count.default(0) })
 const SourceBlock = z.templateLiteral(['source:', z.string().regex(/^[a-z][a-z0-9-]*$/)])
-const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor']), SourceBlock])
+const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor', 'backup']), SourceBlock])
 const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().nonnegative() })
 
 function routes(runtime: HttpHost): Routes {
@@ -242,7 +242,7 @@ function routes(runtime: HttpHost): Routes {
     'POST tickets/:id/pause': ({ params }) => { writable(); const id = ticket(params.id); runtime.engine.pauseTicket(id); return { paused: true } },
     'POST tickets/:id/resume': ({ params }) => { writable(); const id = ticket(params.id); runtime.engine.resumeTicket(id); return { resumed: true } },
      'POST tickets/:id/attention': async ({ params, actorId, body }) => {
-      writable(); const id = ticket(params.id), input = z.object({ version: z.number().int().positive(), questionId: z.string().min(1).optional(), text: z.string().min(1) }).strict().parse(await body())
+      writable(); const id = ticket(params.id), input = z.object({ version: z.number().int().positive(), questionId: z.string().min(1), text: z.string().min(1) }).strict().parse(await body())
       const source = 'web', actor = { source, id: actorId ?? 'panel' }
       const result = runtime.engine.answerAttention(id, input.version, actor, source, input.text, input.questionId)
       if (result.resolved) await runtime.executor.continueAfterAttention(id, result.answer.id)

@@ -1,7 +1,7 @@
 /** Owns scheduled and manual recovery point creation without dispatching application work. */
 import { existsSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { createRecoveryPoint, restoreRecoveryPoint, type RecoveryManifest, type RecoveryOptions } from './backup.ts'
+import { createRecoveryPoint, restoreRecoveryPoint, verifyRecoveryPoint, type RecoveryManifest, type RecoveryOptions } from './backup.ts'
 import type { Store } from './store.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import type { Settings } from '../policy.ts'
@@ -11,6 +11,7 @@ export interface BackupServiceOptions {
   databasePath: string
   destinationRoot: string
   recovery: Omit<RecoveryOptions, 'databasePath' | 'destination'>
+  recoveryRoots?: () => RecoveryOptions['roots']
   health: HealthEntry
   lifetime: AbortSignal
   now?: () => Date
@@ -30,14 +31,15 @@ export class BackupService {
   start(settings: Settings['backup']): void {
     this.stopTimer()
     this.settings = settings
-    this.stopped = false
-    if (!settings.enabled) return
+    this.stopped = this.options.lifetime.aborted
+    if (!settings.enabled || this.stopped) return
     const delay = settings.intervalMinutes * 60_000
     this.timer = setInterval(() => { void this.run('schedule').catch(() => {}) }, delay)
     this.timer.unref?.()
   }
   stop(): void { this.stopped = true; this.stopTimer() }
   private stopTimer(): void { if (this.timer) clearInterval(this.timer); this.timer = undefined }
+  private cancelled(): boolean { return this.stopped || this.options.lifetime.aborted }
   run(reason: 'manual' | 'schedule'): Promise<RecoveryManifest> {
     if (this.stopped || (reason === 'schedule' && !this.settings?.enabled)) return Promise.reject(new Error('Backup service is stopped or disabled'))
     if (this.active) return this.active
@@ -46,7 +48,10 @@ export class BackupService {
     const root = settings.directory || this.options.destinationRoot
     const destination = join(root, `${this.now().toISOString().replaceAll(':', '-')}-${reason}`)
     this.active = Promise.resolve().then(() => {
-      const manifest = createRecoveryPoint(this.options.store, { ...this.options.recovery, databasePath: this.options.databasePath, destination })
+      if (this.cancelled()) throw new Error('Backup service stopped before recovery point creation')
+      const manifest = createRecoveryPoint(this.options.store, { ...this.options.recovery, roots: this.options.recoveryRoots?.() ?? this.options.recovery.roots, databasePath: this.options.databasePath, destination })
+      if (this.cancelled()) { rmSync(destination, { recursive: true, force: true }); throw new Error('Backup service stopped during recovery point creation') }
+      verifyRecoveryPoint(destination, manifest)
       this.options.health.set({ state: 'ready', detail: `Recovery point created at ${destination}` })
       this.retain(root, settings.retention, destination)
       return manifest
@@ -58,7 +63,9 @@ export class BackupService {
   }
   private retain(root: string, retention: number, keep: string): void {
     if (!existsSync(root)) return
-    const points = readdirSync(root, { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => join(root, entry.name)).sort().reverse()
+    const points = readdirSync(root, { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => join(root, entry.name)).filter(point => {
+      try { verifyRecoveryPoint(point); return true } catch { return false }
+    }).sort().reverse()
     for (const point of points.slice(retention)) if (point !== keep) rmSync(point, { recursive: true, force: true })
   }
   restore(source: string, destination: string): RecoveryManifest { return restoreRecoveryPoint(source, destination) }

@@ -57,6 +57,8 @@ it('marks missing roots and unsupported symbolic links incomplete and refuses to
 
 it('rejects tampered contents, database hashes, missing database entries and traversal paths before writing', () => {
   const manifest = snapshot(), source = join(directory, 'backup'), target = join(directory, 'restore')
+  rewrite({ ...manifest, schemaVersion: 999 })
+  expect(() => restoreRecoveryPoint(source, target)).toThrow('incomplete')
   rewrite({ ...manifest, database: { ...manifest.database, sha256: '0'.repeat(64) } })
   expect(() => restoreRecoveryPoint(source, target)).toThrow('matching file hash')
   rewrite({ ...manifest, files: [] })

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { SCHEMA_VERSION, type Store } from './store.ts'
+import { OLDEST_SCHEMA } from './migration.ts'
 
 export const RECOVERY_DATABASE = 'orchestrator.sqlite'
 export interface RecoveryFile { path: string; sha256: string; bytes: number }
@@ -103,6 +104,23 @@ export function createRecoveryPoint(store: Store, options: RecoveryOptions): Rec
   if (!manifest.missing.length && !manifest.incomplete.length) unlinkSync(marker)
   return manifest
 }
+/** Verifies a recovery point before it becomes visible to retention or restore. */
+export function verifyRecoveryPoint(source: string, expected?: RecoveryManifest): RecoveryManifest {
+  const root = realpathSync(resolve(source))
+  if (existsSync(join(root, 'INCOMPLETE'))) throw new Error('Recovery point is incomplete')
+  const manifest = JSON.parse(readFileSync(confined(root, 'manifest.json'), 'utf8')) as RecoveryManifest
+  if (manifest.format !== 1 || manifest.schemaVersion < OLDEST_SCHEMA || manifest.schemaVersion > SCHEMA_VERSION || manifest.missing.length || manifest.incomplete.length || !manifest.database?.walIncluded) {
+    throw new Error('Invalid or incomplete recovery manifest')
+  }
+  if (expected && JSON.stringify(manifest) !== JSON.stringify(expected)) throw new Error('Recovery manifest changed during verification')
+  for (const file of manifest.files) {
+    const path = confined(root, file.path)
+    if (!statSafe(path)?.isFile() || statSync(path).size !== file.bytes || digest(path) !== file.sha256) throw new Error(`Recovery file hash mismatch: ${file.path}`)
+  }
+  const database = manifest.files.find(file => file.path === manifest.database.file)
+  if (!database || database.sha256 !== manifest.database.sha256 || !['database.sqlite', RECOVERY_DATABASE].includes(database.path)) throw new Error('Recovery database must have a matching file hash')
+  return manifest
+}
 function confined(root: string, path: string): string {
   if (typeof path !== 'string' || !path || isAbsolute(path) || path.includes('\\') || path.split('/').some(part => !part || part === '.' || part === '..')) throw new Error(`Unsafe recovery path: ${path}`)
   const target = resolve(root, path)
@@ -123,11 +141,11 @@ export function restoreRecoveryPoint(source: string, destination: string): Recov
   if (existsSync(join(sourceRoot, 'INCOMPLETE'))) throw new Error('Recovery point is incomplete')
   const manifestPath = confined(sourceRoot, 'manifest.json')
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as RecoveryManifest
-  if (manifest.format !== 1 || !Array.isArray(manifest.files) || !Array.isArray(manifest.mappings) || !Array.isArray(manifest.missing) || !Array.isArray(manifest.incomplete) || manifest.missing.length || manifest.incomplete.length || !manifest.database || manifest.database.walIncluded !== true) throw new Error('Invalid or incomplete recovery manifest')
+  if (manifest.format !== 1 || !Number.isSafeInteger(manifest.schemaVersion) || manifest.schemaVersion < OLDEST_SCHEMA || manifest.schemaVersion > SCHEMA_VERSION || !Array.isArray(manifest.files) || !Array.isArray(manifest.mappings) || !Array.isArray(manifest.missing) || !Array.isArray(manifest.incomplete) || manifest.missing.length || manifest.incomplete.length || !manifest.database || manifest.database.walIncluded !== true) throw new Error('Invalid or incomplete recovery manifest')
   const paths = new Set<string>()
   for (const file of manifest.files) {
     const path = confined(sourceRoot, file.path)
-    if (paths.has(file.path) || !Number.isSafeInteger(file.bytes) || file.bytes < 0 || !/^[a-f0-9]{64}$/.test(file.sha256)) throw new Error(`Invalid recovery file: ${file.path}`)
+    if (paths.has(file.path) || file.path.split('/').some(credentialName) || !Number.isSafeInteger(file.bytes) || file.bytes < 0 || !/^[a-f0-9]{64}$/.test(file.sha256)) throw new Error(`Invalid recovery file: ${file.path}`)
     paths.add(file.path)
     if (!statSafe(path)?.isFile() || statSync(path).size !== file.bytes || digest(path) !== file.sha256) throw new Error(`Recovery file hash mismatch: ${file.path}`)
   }
@@ -136,7 +154,7 @@ export function restoreRecoveryPoint(source: string, destination: string): Recov
   const mapped = new Set<string>()
   for (const mapping of manifest.mappings) {
     const path = confined(sourceRoot, mapping.path)
-    if (!mapping.path.startsWith('managed-files/') || mapped.has(mapping.path) || !['file', 'directory'].includes(mapping.kind)) throw new Error('Invalid recovery file mapping')
+    if (!mapping.path.startsWith('managed-files/') || mapping.path.split('/').some(credentialName) || mapping.source.split(sep).some(credentialName) || mapped.has(mapping.path) || !['file', 'directory'].includes(mapping.kind)) throw new Error('Invalid recovery file mapping')
     mapped.add(mapping.path)
     if (mapping.kind === 'file' ? !paths.has(mapping.path) : !statSafe(path)?.isDirectory()) throw new Error('Missing recovery file mapping')
   }

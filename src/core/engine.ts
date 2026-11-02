@@ -172,7 +172,7 @@ export class Engine {
   checkpointTicket(ticketId: string, files: readonly string[], assignmentId?: string, attemptId?: string): Ticket {
     return this.repo.atomic(() => this.tickets.checkpoint(ticketId, files, assignmentId, attemptId))
   }
-  answerAttention(ticketId: string, version: number, actor: ActorRef, source: string, text: string, questionId?: string) {
+  answerAttention(ticketId: string, version: number, actor: ActorRef, source: string, text: string, questionId: string) {
     return this.repo.atomic(() => this.tickets.answerAttention(ticketId, version, actor, source, text, questionId))
   }
 

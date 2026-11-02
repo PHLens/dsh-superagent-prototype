@@ -471,6 +471,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/project-conversation.spec.ts` | Business input/reply persistence, idempotency, ownership and project lane isolation |
 | `tests/coordinator-recovery.spec.ts` | Mapping replacement, prompt restart persistence and stale-generation/state rejection |
 | `tests/project-coordinator.spec.ts` | Project lane concurrency, durable dispatch, retry races and restart recovery |
+| `tests/project-progress.spec.ts` | Read-only project progress projection, exact attempt/report/artifact gates and lifecycle phases |
 | `tests/project-session.spec.ts` | Completed durable turn projection, interrupted draft exclusion and Session message references |
 | `tests/project-auth.spec.ts` | Host admission, stable owner identity, authentication rejection and unavailable-host denial |
 | `tests/project-panel.spec.tsx` | Project creation, navigation, durable discussion, immutable artifact content and explicit semantic review |

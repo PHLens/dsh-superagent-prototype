@@ -208,15 +208,15 @@ export class Tickets extends EnginePart {
     ticket.lifecycle = lifecycle; ticket.updatedAt = at; this.repo.tickets.save(ticket); return ticket
   }
   /** Saves an answer against an exact question version before any continuation is requested. */
-  answerAttention(ticketId: string, version: number, actor: ActorRef, source: string, text: string, questionId?: string): { answer: AttentionAnswer; resolved: boolean } {
+  answerAttention(ticketId: string, version: number, actor: ActorRef, source: string, text: string, questionId: string): { answer: AttentionAnswer; resolved: boolean } {
     const ticket = this.require(ticketId), attention = ticket.attention
     if (!attention) {
-      const prior = ticket.attentionHistory?.find(item => item.version === version && (questionId === undefined || item.id === questionId))?.answers.find(item => !item.conflict)
+      const prior = ticket.attentionHistory?.find(item => item.version === version && item.id === questionId)?.answers.find(item => !item.conflict)
       if (prior) return { answer: { ...prior, conflict: true }, resolved: false }
       throw new UserError('unknownTicket')
     }
     const questionVersion = attention.version ?? 1
-    if (questionVersion !== version || (questionId !== undefined && attention.id !== questionId) || attention.resolvedAt) throw new UserError('unknownTicket')
+    if (questionVersion !== version || attention.id !== questionId || attention.resolvedAt) throw new UserError('unknownTicket')
     const at = this.now(), answer: AttentionAnswer = { id: key('attention-answer', attention.id, String(version), actor.source, actor.id, text), questionId: attention.id, version, actor, source, text, at }
     const prior = attention.answers?.find(item => item.version === version && !item.conflict)
     attention.answers = [...attention.answers ?? [], prior ? { ...answer, conflict: true } : answer]

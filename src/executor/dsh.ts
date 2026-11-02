@@ -354,6 +354,8 @@ export class DshExecutor implements Executor {
     if (this.host.closing() || this.host.paused()) return false
     const ticket = this.host.store.tickets.get(ticketId)
     if (!ticket || ticket.ended || this.held(ticket) || this.stopping.has(ticketId)) return false
+    const reconciliation = ticket.lifecycle?.reconciliation
+    if (reconciliation?.state === 'checking' || reconciliation?.state === 'unknown') return false
     const assignment = ticket.assignments.find(item => item.state !== 'ended' && item.contract)
     const attempt = assignment && this.host.attempts?.all().findLast(item => item.assignmentId === assignment.id)
     if (!assignment || !attempt || attempt.status !== 'running') return false
