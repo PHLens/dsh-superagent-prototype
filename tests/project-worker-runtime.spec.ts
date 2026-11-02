@@ -1,5 +1,19 @@
 /** Actual Runtime/Sessions decoration and registered guard/tool callbacks in the in-memory DSH fixture. */
-import { afterEach, beforeEach, expect, it } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { Session, SessionId } from '@deepseek-ai/dsh-session'
+import { Store } from '../src/app/store.ts'
+import { Sessions } from '../src/app/sessions.ts'
+import { Prompts, PROJECT_WORKER_RULES } from '../src/app/prompts.ts'
+import { ExecutionAttempts, type Attempt } from '../src/app/execution-attempts.ts'
+import { ArtifactStore } from '../src/app/artifact-store.ts'
+import { ReportAcceptance } from '../src/app/report-acceptance.ts'
+import { projectWorkerTools } from '../src/app/tools/executor.ts'
+import { ProjectPlans } from '../src/app/project-plans.ts'
+import { Projects } from '../src/core/projects.ts'
+import { workerFixture } from './fixtures/project-worker.ts'
 import { startRuntime, type Host } from './fixtures/host.ts'
 import { waitUntil } from './fixtures/async.ts'
 
@@ -17,6 +31,107 @@ function confirmTask(label: string) {
   return { project, plan }
 }
 const running = () => h.runtime.projectCoordinator.attempts.all().filter(item => item.status === 'running')
+
+function workerSessions(store: Store, attempts: ExecutionAttempts) {
+  const prompts = new Prompts(store, () => 100_000, () => [], () => false)
+  const artifacts = new ArtifactStore(store, attempts), reports = new ReportAcceptance(store, attempts, artifacts)
+  const sessions = new Sessions({ context: h.ctx, store, attempts, prompts,
+    effects: { handle() {}, enqueue() {}, async idle() {}, pending: () => false },
+    health: { get: () => undefined, set() {}, release() {} }, masterId: 'restore-test-main',
+    lifetime: new AbortController().signal, closing: () => false, environment: () => [],
+    tools: agent => projectWorkerTools(attempts, artifacts, reports, agent.id),
+  })
+  return { sessions, prompts }
+}
+function nativeSession(attempt: Attempt, seed: ReturnType<Session['snapshotEvents']> = []) {
+  const id = SessionId(attempt.sessionId)
+  return Session.create(id, seed, { ...Session.create(id).header, cwd: attempt.cwd })
+}
+async function nativeWorker(attempt: Attempt, attempts: ExecutionAttempts, seed: ReturnType<Session['snapshotEvents']> = []) {
+  const workspace = await h.ctx.workspaceRegistry.create(attempt.cwd)
+  const saved = attempts.bySession(attempt.sessionId)!
+  if (!saved.workspaceId) { saved.workspaceId = workspace.id; attempts.save(saved) }
+  else expect(saved.workspaceId).toBe(workspace.id)
+  await h.controller.create({ sessionId: attempt.sessionId, workspaceId: workspace.id })
+  const agent = h.agents.get(attempt.sessionId) as unknown as Agent
+  Object.defineProperty(agent, 'session', { value: nativeSession(attempt, seed), configurable: true })
+  const section = vi.spyOn(agent.ctx.systemPrompt, 'section')
+  return { agent, section }
+}
+
+it('reinstalls persisted instructions, revision and capabilities after Store close/reopen while fresh attempts use new settings', async () => {
+  const directory = mkdtempSync(join(h.directory, 'restore-')), f = workerFixture(directory)
+  const attempt = f.prepare(), oldModel = { provider: 'old-provider', model: 'old-model' }
+  const pinned = { promptRevision: 7, roleRules: 'Pinned role rules v1: check sources.', projectConventions: 'Use the saved project citation convention.',
+    model: oldModel, tools: ['project_worker_context', 'project_worker_report'], resources: [], skills: [] }
+  attempt.context = pinned; attempt.workspaceId = (await h.ctx.workspaceRegistry.create(attempt.cwd)).id; f.attempts.save(attempt)
+  const original = nativeSession(attempt)
+  original.append('request/header', { header: { config: oldModel }, reason: 'initial' })
+  const journal = join(directory, 'native-events.json')
+  writeFileSync(journal, JSON.stringify(original.snapshotEvents()))
+  const before = workerSessions(f.store, f.attempts)
+  for (let i = 0; i < 7; i++) before.prompts.save(before.prompts.current().config, i, 'panel')
+  before.sessions.dispose(); f.store.close()
+
+  const store = new Store(join(directory, 'project.sqlite')), attempts = new ExecutionAttempts(store, directory)
+  const { sessions, prompts } = workerSessions(store, attempts)
+  try {
+    prompts.save(prompts.current().config, 7, 'panel')
+    const settings = store.settings(), newModel = { provider: 'new-provider', model: 'new-global' }
+    store.saveSettings({ ...settings, executor: { ...settings.executor, model: newModel } })
+    const { agent, section } = await nativeWorker(attempt, attempts, JSON.parse(readFileSync(journal, 'utf8')))
+    // A newly available inherited tool must not enlarge this execution's saved capability range.
+    vi.spyOn(agent.ctx.tools, 'get').mockImplementation(name => name === 'web_fetch' ? { name } as never : undefined)
+    const resolve = vi.spyOn(h.ctx.llm, 'resolveCallConfig'); resolve.mockClear()
+    await sessions.ensure(attempt.sessionId, attempt.cwd, 'Restored worker', 'worker')
+    expect(attempts.bySession(attempt.sessionId)?.context).toEqual(pinned)
+    expect(resolve).not.toHaveBeenCalled()
+    expect(agent.session.requestHeader()?.config).toEqual(oldModel)
+    const installed = section.mock.calls.find(([value]) => value.name === 'project-worker')![0]
+    expect(installed.text).toContain(pinned.roleRules)
+    expect(installed.text).toContain(pinned.projectConventions)
+    expect(installed.text).toContain('prompt revision 7')
+    expect(installed.text).not.toContain(PROJECT_WORKER_RULES)
+    expect([...h.tools.get(attempt.sessionId)!.keys()]).toEqual(pinned.tools)
+    expect(agent.ctx.tools.restrict).toHaveBeenLastCalledWith({ allow: [] })
+    expect(await h.runGuardedTool(attempt.sessionId, 'project_worker_context', {})).toMatchObject({ context: pinned })
+    await expect(h.runGuardedTool(attempt.sessionId, 'web_fetch', {})).rejects.toThrow(/no registered project worker contract/)
+    await expect(h.runGuardedTool(attempt.sessionId, 'project_write_artifact', {})).rejects.toThrow(/no registered project worker contract/)
+
+    const plans = new ProjectPlans(store, new Projects({ repo: store }))
+    plans.conversations.appendUser(f.project.id, 'owner', { clientRequestKey: 'fresh', text: '再运行一次' })
+    const next = plans.confirm('owner', f.project.id, { projectId: f.project.id, ticketId: f.plan.ticketId, planRevision: 1, operationId: 'fresh', intent: 'rerun' })
+    const fresh = attempts.prepare(attempts.allocate(next.ticket, next.assignment)), freshNative = await nativeWorker(fresh, attempts)
+    await sessions.ensure(fresh.sessionId, fresh.cwd, 'Fresh worker', 'worker')
+    expect(attempts.bySession(fresh.sessionId)?.context).toMatchObject({ promptRevision: 8, roleRules: PROJECT_WORKER_RULES, model: newModel })
+    expect(freshNative.section.mock.calls.find(([value]) => value.name === 'project-worker')![0].text).toContain(PROJECT_WORKER_RULES)
+    expect(freshNative.agent.session.snapshotEvents()).toContainEqual(expect.objectContaining({ type: 'model/selection', data: newModel }))
+    expect(attempts.bySession(attempt.sessionId)?.context).toEqual(pinned)
+  } finally { sessions.dispose(); store.close() }
+})
+
+it.each(['tool', 'inherited', 'skill', 'version', 'resources', 'rules', 'missing', 'missing-header'] as const)('requires reconciliation instead of replacing unrestorable pinned %s scope', async kind => {
+  const directory = mkdtempSync(join(h.directory, 'unrestorable-')), f = workerFixture(directory)
+  const attempt = f.prepare()
+  attempt.context = { promptRevision: 7, roleRules: kind === 'rules' ? '' : 'Saved rules', projectConventions: 'Saved conventions', model: null,
+    tools: kind === 'tool' ? ['retired_tool'] : kind === 'inherited' ? ['web_fetch'] : ['project_worker_context'], resources: kind === 'resources' ? ['unapproved-resource'] : [], skills: kind === 'skill' ? [{ name: 'retired_skill', version: 'v1' }] : [],
+    ...(kind === 'version' ? { toolContractVersion: 99 } : {}) }
+  if (kind.startsWith('missing')) { delete attempt.context; if (kind === 'missing') attempt.status = 'running' }
+  f.attempts.save(attempt)
+  const pinned = structuredClone(attempt.context), { agent, section } = await nativeWorker(attempt, f.attempts)
+  if (kind === 'missing-header') agent.session.append('request/header', { header: { config: { provider: 'old', model: 'old' } }, reason: 'initial' })
+  const { sessions } = workerSessions(f.store, f.attempts)
+  try {
+    await expect(sessions.ensure(attempt.sessionId, attempt.cwd, 'Unrestorable worker', 'worker')).rejects.toThrow(/reconciliation.*(tool|skill|version|snapshot|resource|instruction)/i)
+    const saved = f.attempts.bySession(attempt.sessionId)!
+    expect(saved).toMatchObject({ status: 'reconcile', error: expect.stringMatching(/reconciliation/i) })
+    expect(saved.context).toEqual(pinned)
+    expect(section).not.toHaveBeenCalled()
+    expect(h.tools.get(attempt.sessionId)?.size).toBe(0)
+    expect(agent.ctx.tools.restrict).toHaveBeenCalledWith({ allow: [] })
+    await expect(h.runGuardedTool(attempt.sessionId, 'web_fetch', {})).rejects.toThrow(/reconciliation/i)
+  } finally { sessions.dispose(); f.store.close() }
+})
 
 it('accepts exact report and artifact receipts through the registered tool guard after completion but rejects new writes', async () => {
   const { plan } = confirmTask('receipt')

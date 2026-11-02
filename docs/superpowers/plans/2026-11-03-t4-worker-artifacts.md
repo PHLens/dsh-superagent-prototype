@@ -20,6 +20,14 @@ Ticket/Assignment 仍是唯一业务聚合；execution-attempts 保存运行现�
 - [x] `env -u GIT_CONFIG_GLOBAL pnpm check`：typecheck、74 个测试文件/1304 项测试、build 均通过。检查子进程移除宿主继承的该变量，是为了满足既有运行时测试的初始环境约定，不改变宿主配置。
 - [x] `git diff --check` 通过。
 
+## T4 恢复快照定向修复
+
+Root 在初次 PR HEAD 上复现已有 attempt 的 context 被 `Sessions.decorate` 覆盖。本修复仍从属于 T4，不扩展 T5 恢复平台。保持 native pending selection / durable request-header 的模型优先级，不修改角色模型选择。
+
+- [x] 在既有 worker runtime 回归中，以真实 Store 关闭/重开和 native Session 事件重建，验证 revision7、旧规则、项目约定、工具范围保持固定；新 attempt 可用 revision8 和新设置。
+- [x] `Sessions.decorate` 只在新 prepared attempt 且无已执行 native header 时初始化快照；已存快照提供实际 prompt section 和能力白名单。工具合同版本、缺失能力/技能、资源不匹配明确记录 reconciliation，并在注册工具前拒绝，绝不扩大范围。
+- [x] 检查实际注册工具/限制与记录一致；保留完成确认/rerun 和模型优先级回归。`env -u GIT_CONFIG_GLOBAL pnpm check` 通过 typecheck、74 个测试文件 / 1313 个测试及构建，`git diff --check` 通过。修复提交更新同一 PR；Root 固定 HEAD 原生/浏览器验收仍待独立执行。
+
 ## 交付和边界
 
 按指定身份提交并 REST 创建 `dev` PR；HEAD 与 PR 链接以最终交付报告为准。排除 `.pnpm-store/` 等依赖缓存，不合并、不部署。

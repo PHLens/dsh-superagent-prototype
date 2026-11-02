@@ -15,7 +15,7 @@ export interface Attempt {
   id: string; projectId: string; ticketId: string; assignmentId: string; lease: string; sessionId: string
   workspaceId?: string; cwd: string; root: string; status: 'preparing' | 'prepared' | 'running' | 'ended' | 'reconcile'
   prepare?: { realpath: string; at: string; method: 'managed-empty-directory-v1' }
-  context?: { promptRevision: number; roleRules: string; projectConventions: string; model: unknown; tools: string[]; resources: readonly string[]; skills: { name: string; version: string }[] }
+  context?: { toolContractVersion?: number; promptRevision: number; roleRules: string; projectConventions: string; model: unknown; tools: string[]; resources: readonly string[]; skills: { name: string; version: string }[] }
   createdAt: string; error?: string
 }
 export function contained(root: string, target: string): boolean {
