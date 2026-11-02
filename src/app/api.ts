@@ -71,6 +71,7 @@ export interface Api {
   'GET tickets': { query?: Paged & { state?: TicketFilter }; response: TicketListView }
   'GET tickets/:id': { response: TicketPageView }
   'POST tickets/:id/retry': { response: { retried: true } }
+  'POST tickets/:id/reconcile': { body: { operationId: string }; response: { state: 'checking' | 'clear' | 'unknown'; operationId: string } }
   'POST tickets/:id/stop': { response: { stopped: boolean; stopping?: boolean } }
   'POST tickets/:id/pause': { response: { paused: true } }
   'POST tickets/:id/resume': { response: { resumed: true } }

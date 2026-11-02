@@ -163,8 +163,14 @@ export class Tickets extends EnginePart {
     const at = this.now()
     ticket.lifecycle = this.lifecycle(ticket)
     ticket.lifecycle.stop = { intent: 'stop', state: 'stopping', at }
+    const until = readUntil(ticket)
+    const waiting = this.triggersOf(ticket, ticket.undelivered)
+    const left = this.untaken(ticket, ticket.inputs.flatMap(input => input.kind === 'trigger'
+      && (!readBefore(input, until) || ticket.undelivered.includes(input.id)) ? [input.id] : []))
+    ticket.undelivered = []
     ticket.updatedAt = at
     this.repo.tickets.save(ticket)
+    this.letGo(ticket.id, waiting, left)
     for (const assignment of ticket.assignments.filter(item => item.state !== 'ended')) this.options.executor.stop(ticket, assignment, reason ?? 'stopped')
     return this.require(ticketId)
   }

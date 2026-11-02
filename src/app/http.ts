@@ -40,7 +40,7 @@ export interface HttpHost {
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople
-  readonly executor: Pick<DshExecutor, 'activeCount'>
+  readonly executor: Pick<DshExecutor, 'activeCount' | 'reconcileTicket'>
   readonly health: Record<string, Health>
   readonly machine: Machine
   readonly masterId: string
@@ -237,10 +237,11 @@ function routes(runtime: HttpHost): Routes {
     },
     'GET tickets/:id': ({ params }) => ticketPage(runtime, params.id),
     'POST tickets/:id/retry': ({ params }) => { writable(); const id = ticket(params.id); runtime.engine.retryTicket(id); return { retried: true } },
+     'POST tickets/:id/reconcile': async ({ params, body }) => { writable(); const id = ticket(params.id); const input = z.object({ operationId: z.string().min(1) }).strict().parse(await body()); return runtime.executor.reconcileTicket(id, input.operationId) },
     'POST tickets/:id/stop': ({ params }) => { writable(); const id = ticket(params.id); runtime.engine.stopTicket(id); return { stopped: true, stopping: true } },
     'POST tickets/:id/pause': ({ params }) => { writable(); const id = ticket(params.id); runtime.engine.pauseTicket(id); return { paused: true } },
     'POST tickets/:id/resume': ({ params }) => { writable(); const id = ticket(params.id); runtime.engine.resumeTicket(id); return { resumed: true } },
-    'POST tickets/:id/attention': async ({ params, actorId, body }) => {
+     'POST tickets/:id/attention': async ({ params, actorId, body }) => {
       writable(); const id = ticket(params.id), input = z.object({ version: z.number().int().positive(), questionId: z.string().min(1).optional(), text: z.string().min(1) }).strict().parse(await body())
       const source = 'web', actor = { source, id: actorId ?? 'panel' }
       const result = runtime.engine.answerAttention(id, input.version, actor, source, input.text, input.questionId)

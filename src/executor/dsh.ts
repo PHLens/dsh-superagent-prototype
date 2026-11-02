@@ -213,8 +213,39 @@ export class DshExecutor implements Executor {
   private readonly disposers: (() => void)[] = []
   private readonly projectLaunching = new Map<string, Promise<void>>()
   private readonly projectObserved = new Set<string>()
+  private readonly reconciling = new Set<string>()
   private held(ticket: Ticket): boolean {
     return ticket.lifecycle?.pause.intent === 'pause' || ticket.lifecycle?.stop.intent === 'stop'
+  }
+  /** Deterministic server-owned recovery check; callers cannot submit an outcome. */
+  async reconcileTicket(ticketId: string, operationId: string): Promise<{ state: 'checking' | 'clear' | 'unknown'; operationId: string }> {
+    if (!operationId.trim()) throw new Error('Reconciliation operation id is required')
+    const initial = this.host.store.tickets.get(ticketId)
+    if (!initial) throw new Error('Ticket not found')
+    const lifecycle = initial.lifecycle
+    const assignment = initial.assignments.filter(item => item.contract && item.state !== 'ended').at(-1)
+    const attempt = assignment ? this.host.attempts?.all().findLast(item => item.assignmentId === assignment.id) : undefined
+    const startedAt = now()
+    const checking = { state: 'checking' as const, operationId, startedAt, ...(assignment ? { assignmentId: assignment.id } : {}), ...(attempt ? { attemptId: attempt.id, lease: attempt.lease, sessionId: attempt.sessionId } : {}) }
+    initial.lifecycle = { ...(lifecycle ?? { pause: { intent: 'none', state: 'running', at: startedAt }, stop: { intent: 'none', state: 'running', at: startedAt }, observed: { state: 'unknown', at: startedAt } }), reconciliation: checking }
+    this.host.store.tickets.save(initial)
+    let state: 'clear' | 'unknown' = 'clear', reason: string | undefined
+    if (attempt) {
+      const jobs = runningJobs(this.host.context, attempt.sessionId)
+      const resolved = await this.host.context.sessionController.resolveAgent(attempt.sessionId as SessionId)
+      if (jobs.length) { state = 'unknown'; reason = 'owner-jobs-still-running' }
+      else if ('error' in resolved && resolved.error.code !== 'session/not-found') { state = 'unknown'; reason = `session-error:${resolved.error.code}` }
+      else if ('agent' in resolved && (resolved.agent.id !== attempt.sessionId || resolved.agent.session.header.cwd !== attempt.cwd)) { state = 'unknown'; reason = 'session-cwd-mismatch' }
+      else { try { this.host.attempts?.validateDirectory(attempt) } catch { state = 'unknown'; reason = 'prepare-evidence-mismatch' } }
+    }
+    const current = this.host.store.tickets.get(ticketId)
+    const currentAttempt = assignment ? this.host.attempts?.all().findLast(item => item.assignmentId === assignment.id) : undefined
+    if (!current || current.lifecycle?.reconciliation?.operationId !== operationId || currentAttempt?.lease !== attempt?.lease || currentAttempt?.id !== attempt?.id) return { state: 'unknown', operationId }
+    const observedAt = now()
+    current.lifecycle!.reconciliation = { ...checking, state, observedAt, ...(reason ? { reason } : {}) }
+    this.host.store.tickets.save(current)
+    if (state === 'clear' && current.lifecycle) this.host.engine.observeTicket(ticketId, current.lifecycle.stop.intent === 'stop' ? 'exited' : 'idle', 'reconciled')
+    return { state, operationId }
   }
   /** Cancellation requests become observations only after the actual native workers drain. */
   private reconcileLifecycle(ticket: Ticket): void {
@@ -265,6 +296,11 @@ export class DshExecutor implements Executor {
     if (this.host.closing()) return
     for (const ticket of this.host.store.tickets.list()) {
       if (ticket.ended) continue
+      const recovery = ticket.lifecycle?.reconciliation
+      if (recovery && (recovery.state === 'unknown' || recovery.state === 'checking') && recovery.operationId && !this.reconciling.has(ticket.id)) {
+        this.reconciling.add(ticket.id)
+        void this.reconcileTicket(ticket.id, recovery.operationId).catch(() => {}).finally(() => { this.reconciling.delete(ticket.id) })
+      }
       this.reconcileLifecycle(ticket)
       if (!ticket.projectId && ticket.lifecycle?.pause.intent === 'resume' && ticket.lifecycle.observed.reason === 'resume-requested'
         && runningAssignment(ticket) && !this.stopping.has(ticket.id) && !this.host.paused()) {
