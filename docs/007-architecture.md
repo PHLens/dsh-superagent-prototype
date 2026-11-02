@@ -315,6 +315,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/kv.ts` | `KV`: every family of `kv` records with its key, its value's type and its owner, and the `Key` and `Family` types the Store and `SourceContext.state` take |
 | `src/navigation.ts` | Opens a DeepSeek Harness Session from the panel once the host's catalog lists it |
 | `src/core/projects.ts` | Project create/read/update service, stable identity and Ticket/Assignment ownership checks; all T1 project Tickets remain inert |
+| `src/core/plans.ts` | Immutable plan revisions, trusted confirmation evidence, idempotent authorization targets, revocation and T3 Assignment registration while the executor is unavailable |
 | `src/core/model.ts` | The domain types, among them the typed Ticket and `MandateBasis`, with `threadKey`, `ticketOutcome`, `reached`, `followupOwners`, `settled`, `waitsForPerson`, `liveTicket`, `runningAssignment`, `latestAssignment` and `latestReport` |
 | `src/core/ports.ts` | The ports: `Repositories`, `Policy`, `SourceScope`, `Assessor`, `Executor`, `Outbox`, and the domain events |
 | `src/core/engine.ts` | The Engine, the core's entry point, and the role interfaces `EngineForSources`, `EngineForMainSession`, `EngineForPeople`, `EngineForSettings` and `EngineForExecutor` |
@@ -339,6 +340,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/project-store.ts` | SQLite project repository with stable ids; project lifecycle stays in the core service |
 | `src/app/conversation-store.ts` | Durable owned business conversation, input idempotency, per-project leases, mapping generations and prompt checkpoints |
 | `src/app/project-coordinator.ts` | Independent project discussion lanes, restart reconciliation, retry and coordinator lifecycle |
+| `src/app/project-plans.ts` | Authenticated project-plan adapter: persisted confirmation evidence, plan version anchoring, authorization and Assignment projection |
 | `src/app/project-session.ts` | Verified native DSH Session/workspace/cwd adapter, completed-turn projection and restricted project reads |
 | `src/app/project-auth.ts` | Fail-closed project API authentication through DSH Host Connection admission and its stable owner principal |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
@@ -427,6 +429,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 | Test | Covers |
 | --- | --- |
+| `tests/plans.spec.ts` | Immutable plan revision service and save-operation conflicts |
+| `tests/authorization.spec.ts` | Exact confirmation evidence, provenance, revocation, target deduplication, Assignment ownership and input contracts |
+| `tests/project-assignment-intake.spec.ts` | Real SQLite application confirmation, draft save idempotency, replay, rerun, identity and ambiguous plan handling |
 | `tests/core-engine.spec.ts` | Domain rules on in-memory repositories: receiving, Eval, fan-out, resume and stop, interrupted Assignments, the pause, Policy changes, reports and outcomes, attaching, replies, failed deliveries and dismissed problems |
 | `tests/stage.spec.ts` | The Ticket stages, row by row |
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |

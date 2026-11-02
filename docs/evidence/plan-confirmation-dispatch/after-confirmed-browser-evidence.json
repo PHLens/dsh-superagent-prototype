@@ -1,0 +1,20 @@
+{
+  "ready": true,
+  "title": "Project conversation visual evidence",
+  "text": "Projects\nRelease readiness\n\nGoal: Prepare a safe, reviewed release plan for the next milestone.\n\nYou\nSaved\n2026/11/2 17:00:00\nPlease propose a plan for the next release. Break it into reviewable tasks and wait for my confirmation before dispatching any work.\nSuperagent\nSaved\n2026/11/2 17:00:04\nI will outline the release work, identify dependencies, and ask you to confirm the plan before starting execution.\nPlans and assignments\nPlan revision 1\nGoal\nReview release readiness, verify regressions, and prepare release notes.\nScope\nReview the next milestone; wait for explicit confirmation before execution.\nOutputs\nRelease checklist Regression findings Draft release notes\nResources\nSynthetic repository snapshot\nEnvironment\nIsolated local workspace\nCost\nOne review pass\nCompletion criteria\nChecklist reviewed and release notes ready for approval.\n\nConfirmed, waiting for executor\n\nRun againRevoke authorization\n\nWaiting for the T4 executor\n\nUnsent draft\nSend",
+  "calls": [
+    {
+      "url": "/orchestrator/api/projects/project-visual/conversation",
+      "method": "GET"
+    },
+    {
+      "url": "/orchestrator/api/state",
+      "method": "GET"
+    }
+  ],
+  "viewport": {
+    "width": 1280,
+    "height": 900
+  },
+  "exceptions": []
+}

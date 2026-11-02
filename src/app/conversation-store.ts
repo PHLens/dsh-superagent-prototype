@@ -23,7 +23,9 @@ CREATE TABLE IF NOT EXISTS conversation_message (
   session_id TEXT,
   turn TEXT,
   dsh_message_id TEXT,
-  error TEXT
+  error TEXT,
+  request_ticket_id TEXT,
+  request_plan_revision INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS conversation_user_request ON conversation_message(project_id, client_request_key) WHERE role='user';
 CREATE INDEX IF NOT EXISTS conversation_message_project ON conversation_message(project_id);
@@ -76,6 +78,8 @@ export type ConversationMessage = {
   sessionId?: string
   turn?: string
   dshMessageId?: string
+  requestTicketId?: string
+  requestPlanRevision?: number
 }
 export type Mapping = {
   projectId: string
@@ -111,6 +115,8 @@ const rowMessage = (row: Record<string, unknown>): ConversationMessage => ({
   ...(row.session_id == null ? {} : { sessionId: String(row.session_id) }),
   ...(row.turn == null ? {} : { turn: String(row.turn) }),
   ...(row.dsh_message_id == null ? {} : { dshMessageId: String(row.dsh_message_id) }),
+  ...(row.request_ticket_id == null ? {} : { requestTicketId: String(row.request_ticket_id) }),
+  ...(row.request_plan_revision == null ? {} : { requestPlanRevision: Number(row.request_plan_revision) }),
 })
 const rowMapping = (row: Record<string, unknown>): Mapping => ({
   projectId: String(row.project_id),
@@ -175,6 +181,8 @@ export class ConversationStore {
       clientRequestKey: string
       text: string
       createdAt?: string
+      requestTicketId?: string
+      requestPlanRevision?: number
     },
   ): ConversationMessage {
     return this.store.atomic(() => {
@@ -184,8 +192,8 @@ export class ConversationStore {
         .get(projectId, input.clientRequestKey) as Record<string, unknown> | undefined
       if (existing) {
         const message = rowMessage(existing)
-        if (message.role !== 'user' || message.text !== input.text || message.actorId !== actorId)
-          throw new Error('Client request key was already used with different content')
+        if (message.role !== 'user' || message.text !== input.text || message.actorId !== actorId || message.requestTicketId !== input.requestTicketId || message.requestPlanRevision !== input.requestPlanRevision)
+          throw new Error('Client request key was already used with different content or plan anchor')
         return message
       }
       const message: ConversationMessage = {
@@ -197,12 +205,14 @@ export class ConversationStore {
         text: input.text,
         createdAt: input.createdAt ?? now(),
         status: 'queued',
+        ...(input.requestTicketId ? { requestTicketId: input.requestTicketId } : {}),
+        ...(input.requestPlanRevision === undefined ? {} : { requestPlanRevision: input.requestPlanRevision }),
       }
       this.store.db
         .prepare(
-          'INSERT INTO conversation_message (id,project_id,client_request_key,role,actor_id,text,created_at,status) VALUES (?,?,?,?,?,?,?,?)',
+          'INSERT INTO conversation_message (id,project_id,client_request_key,role,actor_id,text,created_at,status,request_ticket_id,request_plan_revision) VALUES (?,?,?,?,?,?,?,?,?,?)',
         )
-        .run(message.id, projectId, input.clientRequestKey, 'user', actorId, input.text, message.createdAt, 'queued')
+        .run(message.id, projectId, input.clientRequestKey, 'user', actorId, input.text, message.createdAt, 'queued', input.requestTicketId ?? null, input.requestPlanRevision ?? null)
       return message
     })
   }
@@ -381,6 +391,23 @@ export class ConversationStore {
           input.turn ?? null,
           input.dshMessageId ?? null,
         )
+      this.store.db.prepare('UPDATE conversation_state SET version=version+1 WHERE project_id=?').run(projectId)
+      return message
+    })
+  }
+  clarify(projectId: string, actorId: string, inputId: string, text: string): ConversationMessage {
+    return this.store.atomic(() => {
+      this.owned(projectId, actorId)
+      const user = this.getRaw(inputId)
+      if (!user || user.role !== 'user' || user.projectId !== projectId || user.actorId !== actorId) throw new Error('Conversation input was not found')
+      const id = `${inputId}:clarification`
+      const existing = this.getRaw(id)
+      if (existing) return existing
+      const createdAt = now()
+      const message: ConversationMessage = { id, projectId, clientRequestKey: id, role: 'assistant', actorId, text, createdAt, status: 'saved', userMessageId: inputId }
+      this.store.db.prepare("UPDATE conversation_message SET status='answered' WHERE id=?").run(inputId)
+      this.store.db.prepare('INSERT INTO conversation_message (id,project_id,client_request_key,role,actor_id,text,created_at,status,user_message_id) VALUES (?,?,?,?,?,?,?,?,?)')
+        .run(id, projectId, id, 'assistant', actorId, text, createdAt, 'saved', inputId)
       this.store.db.prepare('UPDATE conversation_state SET version=version+1 WHERE project_id=?').run(projectId)
       return message
     })

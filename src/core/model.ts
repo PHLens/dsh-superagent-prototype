@@ -210,6 +210,76 @@ export interface Decision {
   dismissed?: true
 }
 
+/** Immutable reviewed contract. Text fields are descriptions, never executable instructions for the legacy engine. */
+export interface PlanContent {
+  readonly goal: string
+  readonly scope: string
+  readonly outputs: readonly string[]
+  readonly resources: readonly string[]
+  readonly environment: string
+  readonly cost: string
+  readonly completion: string
+}
+export interface PlanRevision extends PlanContent {
+  readonly projectId: string
+  readonly ticketId: string
+  readonly revision: number
+  readonly createdAt: string
+}
+export type PlanIntent = 'execute' | 'rerun'
+/** Identity and original message must come from the trusted host, never model tool arguments. */
+export interface TrustedPlanConfirmation {
+  actor: ActorRef
+  /** The actual explicit confirmation message. */
+  message: { id: string; text: string }
+  /** Optional trusted provenance for the request that preceded confirmation. */
+  originalMessage?: { id: string; text: string }
+  explicit: true
+  planRevision: number
+  intent: PlanIntent
+}
+export interface PlanAuthorization {
+  readonly id: string
+  readonly projectId: string
+  readonly ticketId: string
+  readonly planRevision: number
+  readonly actor: ActorRef
+  readonly message: { id: string; text: string }
+  readonly originalMessage?: { id: string; text: string }
+  readonly intent: PlanIntent
+  /** Execute deduplicates across messages; a rerun is a new intent identified by this operation id. */
+  readonly intentId: string
+  readonly targetId: string
+  readonly createdAt: string
+  revokedAt?: string
+}
+export interface PlanExecutionTarget {
+  readonly id: string
+  readonly authorizationId: string
+  readonly planRevision: number
+  readonly createdAt: string
+  readonly waitingReason: 'executor-unavailable'
+}
+/** Dependencies name a registered Assignment on this exact Ticket. Artifacts require a future trusted T4 registry. */
+export type PlanAssignmentInput =
+  | { kind: 'dependency'; ticketId: string; assignmentId: string }
+  | { kind: 'artifact'; artifactId: string; contentVersion: string }
+export interface PlanAssignmentContract {
+  readonly authorizationId: string
+  readonly targetId: string
+  readonly planRevision: number
+  readonly plan: PlanContent
+  readonly inputs: readonly PlanAssignmentInput[]
+}
+export interface PlanOperation {
+  readonly id: string
+  readonly payload: string
+  readonly kind: 'save' | 'confirm' | 'revoke'
+  readonly planRevision?: number
+  readonly authorizationId?: string
+  readonly targetId?: string
+}
+
 export type AssignmentState = 'pending' | 'running' | 'ended'
 /**
  * What an Assignment reports: work is in progress (`progress`), its worker waits for a Trigger (`waiting`), a result is
@@ -223,6 +293,9 @@ export interface Assignment {
   projectId?: string
   ticketId?: string
   state: AssignmentState
+  /** Present for T3 assignments only; these wait for the T4 project executor. */
+  contract?: PlanAssignmentContract
+  waitingReason?: 'executor-unavailable'
   createdAt: string
   startedAt?: string
   endedAt?: string
@@ -278,8 +351,8 @@ export type TicketEndBy = 'executor' | 'human'
 export type TicketOutcome = 'completed' | 'merged' | 'closed' | 'dropped' | 'stopped'
 /** A question for a person; `triggerId` is the human message that raised it, whose conversation it goes back to. */
 export interface Attention { id: string; question: string; triggerId?: string }
-/** Inert project stages supported by T1; neither stage authorizes execution. */
-export type ProjectTicketStage = 'draft' | 'awaiting-confirmation'
+/** Project stages remain inert to the legacy executor, including after T3 confirmation. */
+export type ProjectTicketStage = 'draft' | 'awaiting-confirmation' | 'confirmed'
 
 /** Ticket aggregate: a work item with its assignments, channels, thread bindings, inputs and authorization or draft marker. */
 export interface Ticket {
@@ -289,8 +362,13 @@ export interface Ticket {
   mandate: Mandate
   /** Stable project ownership; project tickets share this Ticket aggregate with legacy tickets. */
   projectId?: string
-  /** Project tickets are inert until T3 confirmation creates runnable authorization. */
+  /** T3 confirmation records authorization; all project stages wait for the T4 executor. */
   projectStage?: ProjectTicketStage
+  /** Optional so legacy tickets retain their stored shape. All T3 state shares this aggregate and transaction. */
+  planRevisions?: PlanRevision[]
+  authorizations?: PlanAuthorization[]
+  executionTargets?: PlanExecutionTarget[]
+  planOperations?: PlanOperation[]
   /** The Channels of the messages it was accepted from, which its replies go to. */
   channels: ChannelRef[]
   /** When, by whom, and how the ticket ended, with a person's or the host's reason beyond the outcome; an open ticket has none. */
@@ -340,14 +418,50 @@ export interface Project {
 export function validateTicketOwnership(ticket: Ticket, previous?: Ticket, project?: (id: string) => Project | undefined, others?: Iterable<Ticket>): void {
   if (previous && previous.projectId !== ticket.projectId) throw new Error('Ticket project ownership is immutable')
   if (ticket.projectId !== undefined) {
-    if (!ticket.projectId || (ticket.projectStage !== 'draft' && ticket.projectStage !== 'awaiting-confirmation') || (project && !project(ticket.projectId))) throw new Error('Unknown or invalid project ownership')
+    if (!ticket.projectId || (ticket.projectStage !== 'draft' && ticket.projectStage !== 'awaiting-confirmation' && ticket.projectStage !== 'confirmed') || (project && !project(ticket.projectId))) throw new Error('Unknown or invalid project ownership')
   } else if (ticket.projectStage !== undefined || ticket.mandate.projectDraft) throw new Error('Project ticket requires project ownership')
   if (ticket.mandate.projectDraft && ticket.mandate.projectDraft.projectId !== ticket.projectId) throw new Error('Draft project ownership does not match')
-  const ids = new Set<string>()
+  if (ticket.projectId === undefined && (ticket.planRevisions?.length || ticket.authorizations?.length || ticket.executionTargets?.length || ticket.planOperations?.length)) throw new Error('Plan requires project ownership')
+  const unchanged = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
+  for (const old of previous?.planRevisions ?? []) {
+    if (!unchanged(old, ticket.planRevisions?.find(item => item.revision === old.revision))) throw new Error('Plan revision is immutable')
+  }
+  for (const [index, plan] of (ticket.planRevisions ?? []).entries()) {
+    if (plan.projectId !== ticket.projectId || plan.ticketId !== ticket.id || plan.revision !== index + 1) throw new Error('Plan revision ownership or sequence does not match')
+  }
+  for (const old of previous?.authorizations ?? []) {
+    const current = ticket.authorizations?.find(item => item.id === old.id)
+    if (!current || !unchanged({ ...old, revokedAt: undefined }, { ...current, revokedAt: undefined })
+      || (old.revokedAt !== undefined && old.revokedAt !== current.revokedAt)) throw new Error('Plan authorization is immutable except revocation')
+  }
+  for (const old of previous?.executionTargets ?? []) {
+    if (!unchanged(old, ticket.executionTargets?.find(item => item.id === old.id))) throw new Error('Execution target is immutable')
+  }
+  for (const old of previous?.planOperations ?? []) {
+    if (!unchanged(old, ticket.planOperations?.find(item => item.id === old.id))) throw new Error('Plan operation is immutable')
+  }
+  const authIds = new Set<string>(), targetIds = new Set<string>(), opIds = new Set<string>()
+  for (const authorization of ticket.authorizations ?? []) {
+    if (authIds.has(authorization.id) || authorization.projectId !== ticket.projectId || authorization.ticketId !== ticket.id
+      || !ticket.planRevisions?.some(item => item.revision === authorization.planRevision)) throw new Error('Plan authorization ownership does not match')
+    if (authorization.originalMessage !== undefined && (!authorization.originalMessage?.id?.trim() || !authorization.originalMessage?.text?.trim())) throw new Error('Invalid original message provenance')
+    authIds.add(authorization.id)
+    if (!ticket.executionTargets?.some(item => item.id === authorization.targetId && item.authorizationId === authorization.id && item.planRevision === authorization.planRevision)) throw new Error('Plan authorization target does not match')
+  }
+  for (const target of ticket.executionTargets ?? []) {
+    if (targetIds.has(target.id) || !ticket.authorizations?.some(item => item.id === target.authorizationId && item.targetId === target.id && item.planRevision === target.planRevision)) throw new Error('Execution target authorization does not match')
+    targetIds.add(target.id)
+  }
+  for (const operation of ticket.planOperations ?? []) {
+    if (opIds.has(operation.id)) throw new Error('Duplicate plan operation identity')
+    opIds.add(operation.id)
+  }
+  const ids = new Set<string>(), assignedTargets = new Set<string>()
+  const otherTickets = [...(others ?? [])]
   if (previous?.projectId && previous.assignments.some(old => !ticket.assignments.some(item => item.id === old.id))) throw new Error('Project Assignment ownership history cannot be removed')
   const priorOwners = new Map<string, string>()
   if (ticket.assignments.some(item => !previous?.assignments.some(old => old.id === item.id))) {
-    for (const other of others ?? []) for (const assignment of other.assignments) priorOwners.set(assignment.id, other.id)
+    for (const other of otherTickets) for (const assignment of other.assignments) priorOwners.set(assignment.id, other.id)
   }
   for (const assignment of ticket.assignments) {
     const owner = priorOwners.get(assignment.id)
@@ -359,6 +473,26 @@ export function validateTicketOwnership(ticket: Ticket, previous?: Ticket, proje
       || (assignment.ticketId !== undefined && assignment.ticketId !== ticket.id)) throw new Error('Assignment ownership does not match ticket')
     const old = previous?.assignments.find(item => item.id === assignment.id)
     if (old && (old.projectId !== assignment.projectId || old.ticketId !== assignment.ticketId)) throw new Error('Assignment ownership is immutable')
+    if (old && !unchanged(old.contract, assignment.contract)) throw new Error('Assignment contract is immutable')
+    if (assignment.contract) {
+      const contract = assignment.contract
+      const authorization = ticket.authorizations?.find(item => item.id === contract.authorizationId)
+      const target = ticket.executionTargets?.find(item => item.id === contract.targetId)
+      const plan = ticket.planRevisions?.find(item => item.revision === contract.planRevision)
+      if (!ticket.projectId || assignedTargets.has(contract.targetId) || !authorization || !target || !plan
+        || authorization.targetId !== target.id || target.authorizationId !== authorization.id
+        || authorization.planRevision !== plan.revision || target.planRevision !== plan.revision) throw new Error('Assignment plan authorization does not match')
+      assignedTargets.add(contract.targetId)
+      const { projectId: _projectId, ticketId: _ticketId, revision: _revision, createdAt: _createdAt, ...expected } = plan
+      if (!unchanged(contract.plan, expected)) throw new Error('Assignment contract does not match plan revision')
+      if (!Array.isArray(contract.inputs)) throw new Error('Assignment input ownership does not match')
+      for (const input of contract.inputs) {
+        // T3 has no artifact registry: note/trigger inputs cannot stand in for versioned artifacts.
+        if (!input || input.kind !== 'dependency' || input.ticketId !== ticket.id || typeof input.assignmentId !== 'string' || !input.assignmentId.trim()
+          || input.assignmentId === assignment.id || !ticket.assignments.some(item => item.id === input.assignmentId && item.contract
+            && item.ticketId === ticket.id && item.projectId === ticket.projectId)) throw new Error('Assignment input must reference a registered Assignment on the same ticket; artifacts require T4')
+      }
+    }
   }
 }
 

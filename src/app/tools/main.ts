@@ -13,6 +13,8 @@ import type { Sessions } from '../sessions.ts'
 import type { Settings } from '../settings.ts'
 import type { Store } from '../store.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
+import type { ProjectPlans } from '../project-plans.ts'
+import type { PlanAssignmentInput } from '../../core/index.ts'
 
 const RoutingNoteSchema = z.string().trim()
   .refine(text => wordCount(text) <= NOTE_WORDS, `Routing note must not exceed ${NOTE_WORDS} words (Chinese uses word segmentation). Shorten it; do not split it across deliveries.`)
@@ -152,6 +154,30 @@ function routeTool(host: MainToolsHost): Tool {
   })
 }
 /** Builds the main Session's tools; `agent` scopes prompt preview resources to that Session. */
+export interface ProjectToolsHost {
+  readonly plans: Pick<ProjectPlans, 'save' | 'registerAssignment' | 'read' | 'list'>
+  readonly actorId: string
+  readonly projectId: string
+  readonly authorize: () => void
+}
+/** Model tools for project planning. Confirmation is deliberately absent; only the host can authorize it. */
+export function projectTools(host: ProjectToolsHost): Tool[] {
+  const plan = z.object({ goal: z.string().min(1), scope: z.string().min(1), outputs: z.array(z.string().min(1)).min(1), resources: z.array(z.string()), environment: z.string().min(1), cost: z.string().min(1), completion: z.string().min(1), ticket_id: z.string().optional(), expected_revision: z.number().int().nonnegative().default(0), operation_id: z.string().optional() }).strict()
+  const input = z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('dependency'), ticketId: z.string().min(1), assignmentId: z.string().min(1) }).strict(),
+    z.object({ kind: z.literal('artifact'), artifactId: z.string().min(1), contentVersion: z.string().min(1) }).strict(),
+  ])
+  return [tool({ name: 'project_list_plans', description: 'List a bounded page of authoritative project task summaries. Use offset to discover older tickets, then project_read_plan for a complete selected revision.', schema: z.object({ offset: z.number().int().nonnegative().default(0), limit: z.number().int().positive().max(20).default(8) }).strict(),
+    execute: async args => { host.authorize(); return host.plans.list(host.actorId, host.projectId, args) } }),
+    tool({ name: 'project_read_plan', description: 'Read one authoritative saved plan revision for this project. Use the ticket IDs and revision numbers from the coordinator context; this is read-only.', schema: z.object({ ticket_id: z.string().min(1), revision: z.number().int().positive().optional() }).strict(),
+    execute: async args => { host.authorize(); return host.plans.read(host.actorId, host.projectId, { ticketId: args.ticket_id, revision: args.revision }) } }),
+    tool({ name: 'project_save_plan', description: 'Save a reviewed project plan revision. This records a draft for later human confirmation; it cannot execute work.', schema: plan,
+    execute: async args => { host.authorize(); const { ticket_id, expected_revision, operation_id, ...content } = args; return host.plans.save(host.actorId, host.projectId, { ticketId: ticket_id, expectedRevision: expected_revision, operationId: operation_id, plan: content }) } }),
+    tool({ name: 'project_register_assignment', description: 'Register the first pending assignment for an already authorized project execution target. This never confirms or authorizes a plan.', schema: z.object({ ticket_id: z.string(), authorization_id: z.string(), target_id: z.string(), plan_revision: z.number().int().positive(), inputs: z.array(input).default([]) }).strict(),
+      execute: async args => { host.authorize(); return host.plans.registerAssignment(host.actorId, host.projectId, { ticketId: args.ticket_id, authorizationId: args.authorization_id, targetId: args.target_id, planRevision: args.plan_revision, inputs: args.inputs as PlanAssignmentInput[] }) } }),
+  ]
+}
+
 export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
   const resources: MainResourceHost = { ...host.resources, sessions: host.sessions, settings: host.settings }
   return [

@@ -251,7 +251,7 @@ function initial(): PanelServer {
   return {
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
     projects: [{ id: 'p1', name: 'Demo project', goal: 'A durable goal', createdAt: '2026-09-23T00:00:00Z', updatedAt: '2026-09-23T00:00:00Z' }],
-    conversations: { p1: { project: { id: 'p1', name: 'Demo project', goal: 'A durable goal', createdAt: '2026-09-23T00:00:00Z', updatedAt: '2026-09-23T00:00:00Z' }, messages: [] } },
+    conversations: { p1: { project: { id: 'p1', name: 'Demo project', goal: 'A durable goal', createdAt: '2026-09-23T00:00:00Z', updatedAt: '2026-09-23T00:00:00Z' }, messages: [], tasks: [] } },
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
@@ -298,7 +298,7 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET projects': { answer: () => ({ projects: server.projects }) },
   'POST projects': { body: true, answer: ({ body }) => {
     const project = { id: `p${server.projects.length + 1}`, ...body, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
-    server.projects.push(project); server.conversations[project.id] = { project, messages: [] }
+    server.projects.push(project); server.conversations[project.id] = { project, messages: [], tasks: [] }
     return { project }
   } },
   'GET projects/:id/conversation': { answer: ({ params }) => server.conversations[params.id] ?? refuse(404, 'Unknown project') },
@@ -310,7 +310,15 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     if (!conversation.messages.includes(message)) conversation.messages.push(message)
     return { message }
   } },
-  'POST projects/:id/retry': { answer: ({ params }) => {
+  'POST projects/:id/plan-confirmation': { body: true, answer: ({ params, body }) => {
+     const conversation = server.conversations[params.id]
+     if (!conversation) return refuse(404, 'Unknown project')
+     const task = conversation.tasks?.find(item => item.id === body.ticketId)
+     if (!task) return refuse(404, 'Unknown task')
+     return { authorization: { id: 'auth-1' }, target: { id: 'target-1' }, assignment: { id: 'assignment-1', waitingReason: 'executor-unavailable' }, ticket: task } as ApiResponse<'POST projects/:id/plan-confirmation'>
+   } },
+   'POST projects/:id/plan-revocation': { body: true, answer: ({ params, body }) => ({ id: body.authorizationId, projectId: params.id, ticketId: body.ticketId, planRevision: 1, actor: { source: 'web', id: 'owner' }, message: { id: 'confirm', text: '按这个方案做' }, intent: 'execute', intentId: 'execute', targetId: 'target-1', createdAt: '2026-09-23T00:00:00Z', revokedAt: '2026-09-23T00:00:00Z' }) },
+   'POST projects/:id/retry': { answer: ({ params }) => {
     const conversation = server.conversations[params.id]
     if (!conversation) return refuse(404, 'Unknown project')
     conversation.coordinator = { status: 'running' }; return { retried: true }

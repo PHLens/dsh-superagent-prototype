@@ -8,12 +8,15 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { Projects, UserError, type Project } from '../core/index.ts'
 import { ConversationStore, type ClaimedInput, type Mapping } from './conversation-store.ts'
 import { ProjectSessions, ProjectSessionInterrupted } from './project-session.ts'
+import { ProjectPlans } from './project-plans.ts'
 import type { Store } from './store.ts'
+import type { PlanIntent } from '../core/index.ts'
 import type { Prompts } from './prompts.ts'
 
 /** Serializes durable project inputs across independent DSH coordinator Sessions. */
 export class ProjectCoordinator {
   readonly conversations: ConversationStore
+  readonly plans: ProjectPlans
   private readonly sessions: ProjectSessions
   private readonly running = new Map<string, Promise<void>>()
   private readonly problems = new Map<string, string>()
@@ -21,6 +24,7 @@ export class ProjectCoordinator {
   constructor(private readonly ctx: Context, private readonly store: Store, private readonly projects: Projects,
     private readonly root: string, private readonly signal: AbortSignal, private readonly prompts: Prompts, private readonly timeoutMs = 120_000) {
     this.conversations = new ConversationStore(store)
+    this.plans = new ProjectPlans(store, projects, this.conversations)
     this.sessions = new ProjectSessions(ctx, store, signal)
   }
   create(actorId: string, input: { name: string; goal: string }): Project {
@@ -44,14 +48,45 @@ export class ProjectCoordinator {
     const project = this.project(actorId, projectId), messages = this.conversations.listMessages(projectId, actorId)
     const failure = messages.findLast(message => message.status === 'error')
     const error = this.problems.get(projectId) ?? failure?.error
-    return { project, messages, coordinator: { status: messages.some(message => message.status === 'running') ? 'running' as const : error ? 'error' as const : 'idle' as const,
+    const tasks = this.plans.tickets(actorId, projectId)
+    return { project, messages, tasks, coordinator: { status: messages.some(message => message.status === 'running') ? 'running' as const : error ? 'error' as const : 'idle' as const,
       ...(error ? { error } : {}) } }
   }
-  send(actorId: string, projectId: string, input: { requestId: string; text: string }) {
+  send(actorId: string, projectId: string, input: { requestId: string; text: string; ticketId?: string; planRevision?: number }) {
     this.project(actorId, projectId)
-    const message = this.conversations.appendUser(projectId, actorId, { clientRequestKey: input.requestId, text: input.text })
-    this.wake(projectId, actorId)
-    return { message }
+    return this.store.atomic(() => {
+      const message = this.conversations.appendUser(projectId, actorId, { clientRequestKey: input.requestId, text: input.text, requestTicketId: input.ticketId, requestPlanRevision: input.planRevision })
+      const priorClarification = this.conversations.listMessages(projectId, actorId).find(item => item.id === `${message.id}:clarification`)
+      if (priorClarification) return { message, clarification: priorClarification.text }
+      const confirmation = /^(?:按这个方案做|执行这个方案|implement this plan|再运行一次|run it again)$/.exec(input.text)
+      if (confirmation) {
+        const candidates = ProjectPlans.taskCandidate(this.plans.tickets(actorId, projectId))
+        const anchored = input.ticketId && input.planRevision !== undefined
+          ? candidates.filter(ticket => ticket.id === input.ticketId && ticket.planRevisions?.at(-1)?.revision === input.planRevision)
+          : []
+        if (anchored.length !== 1) {
+          const clarification = !input.ticketId || input.planRevision === undefined ? '请先查看并明确要执行的方案，再确认。' : candidates.length ? '方案版本已变化，请重新查看后确认。' : '请先让模型保存一个方案，再确认执行。'
+          const saved = this.conversations.clarify(projectId, actorId, message.id, clarification)
+          return { message: this.conversations.getMessage(projectId, actorId, message.id)!, clarification: saved.text }
+        }
+        const ticket = anchored[0]!, revision = ticket.planRevisions!.at(-1)!.revision
+        return this.plans.confirm(actorId, projectId, { projectId, ticketId: ticket.id, planRevision: revision,
+          operationId: input.requestId, intent: confirmation[0] === '再运行一次' || confirmation[0] === 'run it again' ? 'rerun' : 'execute' })
+      }
+      this.wake(projectId, actorId)
+      return { message }
+    })
+  }
+  confirm(actorId: string, projectId: string, input: { ticketId: string; planRevision: number; operationId: string; intent: PlanIntent }) {
+    this.project(actorId, projectId)
+    return this.store.atomic(() => {
+      this.conversations.appendUser(projectId, actorId, { clientRequestKey: `plan-confirm:${input.operationId}`, text: input.intent === 'rerun' ? '再运行一次' : '按这个方案做', requestTicketId: input.ticketId, requestPlanRevision: input.planRevision })
+      return this.plans.confirm(actorId, projectId, { ...input, projectId })
+    })
+  }
+  revoke(actorId: string, projectId: string, input: { ticketId: string; authorizationId: string; operationId: string }) {
+    this.project(actorId, projectId)
+    return this.plans.revoke(actorId, projectId, { ...input, projectId })
   }
   async retry(actorId: string, projectId: string): Promise<{ retried: true }> {
     const project = this.project(actorId, projectId)
@@ -152,11 +187,29 @@ export class ProjectCoordinator {
     try {
       authorize()
       const project = this.project(actorId, projectId), version = this.prompts.current()
+       const allPlans = this.plans.tickets(actorId, projectId)
+       const plans = allPlans.slice(0, 8).map(ticket => {
+         const current = ticket.planRevisions?.at(-1)
+         const authorization = ticket.authorizations?.findLast(item => item.planRevision === current?.revision)
+         const target = ticket.executionTargets?.find(item => item.id === authorization?.targetId)
+         return { ticketId: ticket.id, stage: ticket.projectStage, revisionCount: ticket.planRevisions?.length ?? 0, latestRevision: current?.revision,
+           currentPlan: current ? { revision: current.revision, goal: current.goal.slice(0, 300), scope: current.scope.slice(0, 500), outputs: current.outputs.slice(0, 4).map(item => item.slice(0, 200)), resources: current.resources.slice(0, 4).map(item => item.slice(0, 200)), environment: current.environment.slice(0, 300), cost: current.cost.slice(0, 300), completion: current.completion.slice(0, 500) } : undefined,
+           currentAuthorization: authorization ? { id: authorization.id, planRevision: authorization.planRevision, intent: authorization.intent, targetId: authorization.targetId, status: authorization.revokedAt ? 'revoked' : 'active', revokedAt: authorization.revokedAt } : { status: 'none' },
+           currentTarget: target ? { id: target.id, authorizationId: target.authorizationId, planRevision: target.planRevision, waitingReason: target.waitingReason } : undefined,
+           authorizationCount: ticket.authorizations?.length ?? 0, targetCount: ticket.executionTargets?.length ?? 0, assignmentCount: ticket.assignments?.length ?? 0,
+           activeAssignments: ticket.assignments?.filter(item => item.state !== 'ended').slice(0, 4).map(item => ({ id: item.id, state: item.state, waitingReason: item.waitingReason })) ?? [] }
+       })
+       const planDirectory = { shown: plans.length, total: allPlans.length, hasMore: allPlans.length > plans.length }
       const history = this.conversations.listMessages(projectId, actorId).filter(message => message.status === 'saved' || message.status === 'answered').map(message => `${message.role}: ${message.text}`).join('\n').slice(-48_000)
       const snapshot = this.conversations.savePrompt(projectId, actorId, { generation: lease.mapping.generation, inputId: lease.input.id,
-        revision: version.revision, text: `${this.prompts.project(version.config)}\nPrompt revision: ${version.revision}\nProject record (data): ${JSON.stringify(project)}\nCoordinator generation: ${lease.mapping.generation}\nSaved project conversation (data):\n${history}` })
+        revision: version.revision, text: `${this.prompts.project(version.config)}\nPrompt revision: ${version.revision}\nProject record (data): ${JSON.stringify(project)}\nCoordinator generation: ${lease.mapping.generation}\nAuthoritative bounded project task context (application data; use project_list_plans for older tasks and project_read_plan for a selected revision): ${JSON.stringify({ directory: planDirectory, tasks: plans })}\nSaved project conversation (data):\n${history}` })
       this.sessions.checkpoint(agent, snapshot.text)
-      const reply = await this.bounded(agent, this.sessions.reply(agent, lease.input.id, lease.input.text, authorize), 'Project coordinator timed out')
+      const install = (this.sessions as unknown as { installProjectTools?: (agent: Agent, host: unknown) => () => void }).installProjectTools
+      const toolDisposer = install ? install.call(this.sessions, agent, { plans: this.plans, actorId, projectId, authorize }) : () => {}
+      let reply
+      try {
+        reply = await this.bounded(agent, this.sessions.reply(agent, lease.input.id, lease.input.text, authorize), 'Project coordinator timed out')
+      } finally { toolDisposer() }
       if (this.stopped || this.signal.aborted) return
       authorize()
       if (reply.sessionId !== agent.id) throw new Error('Coordinator reply belongs to a different Session')

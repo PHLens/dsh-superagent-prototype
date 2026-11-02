@@ -177,10 +177,20 @@ function routes(runtime: HttpHost): Routes {
     'GET projects/:id/conversation': ({ actorId, params }) => { const host = projectHost(actorId); return host.coordinator.view(host.actorId, params.id) },
     'POST projects/:id/messages': async ({ actorId, params, body }) => {
       const host = projectHost(actorId)
-      const input = z.object({ requestId: z.string().min(1).max(200), text: z.string().trim().min(1).max(16000) }).strict().parse(await body())
+      const input = z.object({ requestId: z.string().min(1).max(200), text: z.string().trim().min(1).max(16000), ticketId: z.string().min(1).optional(), planRevision: z.number().int().positive().optional() }).strict().parse(await body())
       return host.coordinator.send(host.actorId, params.id, input)
     },
     'POST projects/:id/retry': ({ actorId, params }) => { const host = projectHost(actorId); return host.coordinator.retry(host.actorId, params.id) },
+    'POST projects/:id/plan-confirmation': async ({ actorId, params, body }) => {
+      const host = projectHost(actorId)
+      const input = z.object({ ticketId: z.string().min(1), planRevision: z.number().int().positive(), operationId: z.string().min(1).max(200), intent: z.enum(['execute', 'rerun']).default('execute') }).strict().parse(await body())
+      return host.coordinator.confirm(host.actorId, params.id, input)
+    },
+    'POST projects/:id/plan-revocation': async ({ actorId, params, body }) => {
+      const host = projectHost(actorId)
+      const input = z.object({ ticketId: z.string().min(1), authorizationId: z.string().min(1), operationId: z.string().min(1).max(200) }).strict().parse(await body())
+      return host.coordinator.revoke(host.actorId, params.id, input)
+    },
     'GET state': () => stateView(runtime),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
       executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),

@@ -1,0 +1,12 @@
+{
+  "source": "/tmp/plan-confirmation-evidence/after-source-v2",
+  "revision": "998b62cdc242232bad49ff8dea5dc930c07d167c+working-tree:09744d9936cbedbe79828af35f5be0af362cb675",
+  "componentGitBlob": "09744d9936cbedbe79828af35f5be0af362cb675",
+  "hashes": {
+    "src/client/project-conversation.tsx": "2f4420c6343ae26402c092e6aac9f5edf89ea17fc93c9d77555c5ab44829c62f",
+    "src/client/provider.tsx": "5639db28e87c1fa0752a30b5280c2e492685bea0593809f72c975b5274d12a8f",
+    "src/client/api.ts": "800b0347183c39601b8b7cd33607dee2538eb8da5feb5f1c7e13a1a7c2268f36",
+    "src/client/client.css": "c3d76355b821383a87e1da7fdbc9f27077bf8714065f888ba321ed6d4d7abb00",
+    "src/client/locales.ts": "2d5477c53b7e38fb8037a7a0eb8f221d76b95329dba58d42e58ce99dd9644d6b"
+  }
+}
