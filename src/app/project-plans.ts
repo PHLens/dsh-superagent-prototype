@@ -45,6 +45,14 @@ export class ProjectPlans {
       },
     })
   }
+  read(actorId: string, projectId: string, input: { ticketId: string; revision?: number }): PlanRevision {
+    this.owner(actorId, projectId)
+    const ticket = this.store.tickets.get(input.ticketId)
+    if (!ticket || ticket.projectId !== projectId) throw new UserError('unknownTicket')
+    const revision = ticket.planRevisions?.find(item => input.revision === undefined ? item.revision === ticket.planRevisions!.at(-1)!.revision : item.revision === input.revision)
+    if (!revision) throw new UserError('unknownTicket')
+    return revision
+  }
   static isConfirmation(text: string): boolean {
     return /^(?:按这个方案做|执行这个方案|implement this plan|再运行一次|run it again)$/.test(text)
   }

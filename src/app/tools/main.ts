@@ -155,7 +155,7 @@ function routeTool(host: MainToolsHost): Tool {
 }
 /** Builds the main Session's tools; `agent` scopes prompt preview resources to that Session. */
 export interface ProjectToolsHost {
-  readonly plans: Pick<ProjectPlans, 'save' | 'registerAssignment'>
+  readonly plans: Pick<ProjectPlans, 'save' | 'registerAssignment' | 'read'>
   readonly actorId: string
   readonly projectId: string
   readonly authorize: () => void
@@ -167,7 +167,9 @@ export function projectTools(host: ProjectToolsHost): Tool[] {
     z.object({ kind: z.literal('dependency'), ticketId: z.string().min(1), assignmentId: z.string().min(1) }).strict(),
     z.object({ kind: z.literal('artifact'), artifactId: z.string().min(1), contentVersion: z.string().min(1) }).strict(),
   ])
-  return [tool({ name: 'project_save_plan', description: 'Save a reviewed project plan revision. This records a draft for later human confirmation; it cannot execute work.', schema: plan,
+  return [tool({ name: 'project_read_plan', description: 'Read one authoritative saved plan revision for this project. Use the ticket IDs and revision numbers from the coordinator context; this is read-only.', schema: z.object({ ticket_id: z.string().min(1), revision: z.number().int().positive().optional() }).strict(),
+    execute: async args => { host.authorize(); return host.plans.read(host.actorId, host.projectId, { ticketId: args.ticket_id, revision: args.revision }) } }),
+    tool({ name: 'project_save_plan', description: 'Save a reviewed project plan revision. This records a draft for later human confirmation; it cannot execute work.', schema: plan,
     execute: async args => { host.authorize(); const { ticket_id, expected_revision, operation_id, ...content } = args; return host.plans.save(host.actorId, host.projectId, { ticketId: ticket_id, expectedRevision: expected_revision, operationId: operation_id, plan: content }) } }),
     tool({ name: 'project_register_assignment', description: 'Register the first pending assignment for an already authorized project execution target. This never confirms or authorizes a plan.', schema: z.object({ ticket_id: z.string(), authorization_id: z.string(), target_id: z.string(), plan_revision: z.number().int().positive(), inputs: z.array(input).default([]) }).strict(),
       execute: async args => { host.authorize(); return host.plans.registerAssignment(host.actorId, host.projectId, { ticketId: args.ticket_id, authorizationId: args.authorization_id, targetId: args.target_id, planRevision: args.plan_revision, inputs: args.inputs as PlanAssignmentInput[] }) } }),

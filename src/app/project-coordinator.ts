@@ -189,7 +189,8 @@ export class ProjectCoordinator {
       const project = this.project(actorId, projectId), version = this.prompts.current()
        const plans = this.plans.tickets(actorId, projectId).map(ticket => ({
          ticketId: ticket.id,
-         revisions: ticket.planRevisions?.map(item => ({ revision: item.revision, goal: item.goal, scope: item.scope, outputs: item.outputs, resources: item.resources, environment: item.environment, cost: item.cost, completion: item.completion })) ?? [],
+         revisions: ticket.planRevisions?.map(item => ({ revision: item.revision, createdAt: item.createdAt })) ?? [],
+         currentPlan: ticket.planRevisions?.at(-1) ? { revision: ticket.planRevisions.at(-1)!.revision, goal: ticket.planRevisions.at(-1)!.goal, scope: ticket.planRevisions.at(-1)!.scope.slice(0, 1000), outputs: ticket.planRevisions.at(-1)!.outputs, resources: ticket.planRevisions.at(-1)!.resources, environment: ticket.planRevisions.at(-1)!.environment, cost: ticket.planRevisions.at(-1)!.cost, completion: ticket.planRevisions.at(-1)!.completion } : undefined,
          authorizations: ticket.authorizations?.map(item => ({ id: item.id, planRevision: item.planRevision, intent: item.intent, revokedAt: item.revokedAt, targetId: item.targetId })) ?? [],
          targets: ticket.executionTargets?.map(item => ({ id: item.id, authorizationId: item.authorizationId, planRevision: item.planRevision, waitingReason: item.waitingReason })) ?? [],
          assignments: ticket.assignments?.map(item => ({ id: item.id, state: item.state, waitingReason: item.waitingReason, contract: item.contract ? { authorizationId: item.contract.authorizationId, targetId: item.contract.targetId, planRevision: item.contract.planRevision } : undefined })) ?? [],
