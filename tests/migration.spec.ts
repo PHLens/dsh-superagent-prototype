@@ -58,6 +58,25 @@ it('takes a consistent pre-migration snapshot including committed WAL records', 
   reopened.close()
 })
 
+it('migrates schema 13 conversation columns after snapshotting WAL and old column layout', () => {
+  const path = join(directory, 'schema13.sqlite')
+  new Store(path).close()
+  const writer = new DatabaseSync(path)
+  writer.exec('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; ALTER TABLE conversation_message DROP COLUMN request_ticket_id; ALTER TABLE conversation_message DROP COLUMN request_plan_revision')
+  writer.prepare("UPDATE kv SET value='13' WHERE key='schema'").run()
+  writer.prepare('INSERT INTO kv VALUES (?, ?)').run('schema13-wal', JSON.stringify({ committed: true }))
+  const store = new Store(path)
+  expect(store.get('schema')).toBe(SCHEMA_VERSION)
+  expect(store.get('schema13-wal')).toEqual({ committed: true })
+  const snapshots = readdirSync(`${path}.snapshots`)
+  expect(snapshots).toHaveLength(1)
+  const snapshot = new DatabaseSync(join(`${path}.snapshots`, snapshots[0]!), { readOnly: true })
+  const oldColumns = snapshot.prepare("SELECT name FROM pragma_table_xinfo('conversation_message')").all().map(row => row.name)
+  expect(oldColumns).not.toContain('request_ticket_id')
+  expect(oldColumns).not.toContain('request_plan_revision')
+  snapshot.close(); store.close(); writer.close()
+})
+
 it('retains a recovery snapshot when migration rolls back, without inferring project authorization', () => {
   const path = join(directory, 'bad.sqlite')
   schema10(path, { settings: { executor: { maxWorkers: 'invalid' } } })
