@@ -1,0 +1,125 @@
+{
+  "sourceHead": "3b63b31f32ef2ace78ffe41e38d6ed262fa6a43d",
+  "host": "DSH0.2.1-rc.5",
+  "provider": "openai",
+  "model": "gpt-6.1-sol",
+  "scenario": "registered nonempty UTF-8 file checks; no semantic content requirement",
+  "githubRepository": "",
+  "githubAgent": "",
+  "feishu": null,
+  "firstExecution": {
+    "at": "2026-11-02T19:33:53.781Z",
+    "ticketId": "02405b56-b448-4f2f-980a-161179055905",
+    "ended": {
+      "at": "2026-11-02T19:32:00.337Z",
+      "by": "executor",
+      "outcome": "completed"
+    },
+    "assignmentState": "ended",
+    "artifactChecks": [
+      {
+        "id": "424bbbb0-fb24-43f3-9cbe-f7ebffb26bf9",
+        "name": "output.txt",
+        "bytes": 14,
+        "contentVersion": "d9014c4624844aa5bac314773d6b689ad467fa4e1d1a50a1b8a99d5a95f72ff5",
+        "status": "registered",
+        "actualHash": "d9014c4624844aa5bac314773d6b689ad467fa4e1d1a50a1b8a99d5a95f72ff5",
+        "actualContent": "Hello, world!\n"
+      }
+    ],
+    "reports": [
+      {
+        "id": "fc2dc493-7455-4b9d-80b8-0caf59d98626",
+        "state": "ready",
+        "sessionId": "project-worker-4e67177b-fdf0-460a-b07d-13440c2e61e1",
+        "unresolved": []
+      }
+    ],
+    "coordinatorStatus": {
+      "status": "idle"
+    }
+  },
+  "coordinatorUnavailableRerun": {
+    "at": "2026-11-02T19:35:47.733Z",
+    "coordinator": {
+      "status": "error",
+      "error": "Coordinator turn has not completed"
+    },
+    "inputStatus": "error",
+    "inputError": "Coordinator turn has not completed",
+    "nativeCoordinatorEnd": {
+      "reason": "aborted",
+      "at": "2026-11-02T19:33:53.799Z"
+    },
+    "ticketCount": 1,
+    "ended": {
+      "at": "2026-11-02T19:34:17.979Z",
+      "by": "executor",
+      "outcome": "completed"
+    },
+    "authorizationCount": 2,
+    "targetCount": 2,
+    "assignments": [
+      {
+        "id": "81e69c97-ea8f-4999-86f9-e14fa3e493eb",
+        "state": "ended",
+        "endedReason": "accepted"
+      },
+      {
+        "id": "65f6136a-c4a9-4193-b3ae-073e601d7f79",
+        "state": "ended",
+        "endedReason": "accepted"
+      }
+    ],
+    "attempts": [
+      {
+        "id": "5e469c63-c1cc-4ed3-b3b6-a8296f1a5124",
+        "sessionId": "project-worker-4e67177b-fdf0-460a-b07d-13440c2e61e1",
+        "status": "ended"
+      },
+      {
+        "id": "aa3a32f9-3d5d-480a-928b-ce62e477bef7",
+        "sessionId": "project-worker-07b0ea7c-f897-4fa5-ba12-957ce102e106",
+        "status": "ended"
+      }
+    ],
+    "reports": [
+      {
+        "id": "fc2dc493-7455-4b9d-80b8-0caf59d98626",
+        "at": "2026-11-02T19:32:00.337Z",
+        "state": "ready",
+        "attemptId": "5e469c63-c1cc-4ed3-b3b6-a8296f1a5124"
+      },
+      {
+        "id": "7effe015-27df-41d6-8323-6fad24cbff05",
+        "at": "2026-11-02T19:34:17.979Z",
+        "state": "ready",
+        "attemptId": "aa3a32f9-3d5d-480a-928b-ce62e477bef7"
+      }
+    ],
+    "artifactCount": 2,
+    "artifactHashesMatch": true,
+    "githubRepository": "",
+    "githubAgent": "",
+    "feishu": null
+  },
+  "prepareEvidence": {
+    "method": "managed-empty-directory-v1",
+    "cwdMatchesEvidence": true,
+    "explicitWorkspaceId": "d18f6b01-ad7f-4adb-aa9c-8d78fbaed264"
+  },
+  "browser": {
+    "engine": "CUA actual native DSH rc.5 UI",
+    "viewport": {
+      "width": 1280,
+      "height": 720
+    },
+    "theme": "native dark",
+    "acceptanceVisibleBeforeConfirm": true,
+    "filePreviewVerified": "output.txt: Hello, world!"
+  },
+  "images": {
+    "before-confirm.jpg": "868daed2bac0e17244c36053db3b11977489822663abd65c1060170609572448",
+    "completed.jpg": "681599211031387745ba8d284474459e0654c7646dd5c56cde88dd4a6ef26a34"
+  }
+}
