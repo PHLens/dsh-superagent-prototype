@@ -1,5 +1,5 @@
 /**
- * Migrates a schema 10 database to schema 11 in a single transaction so runtime readers never convert legacy shapes.
+ * Migrates schema 10 records to their schema 11 shapes; schema 12 adds project storage without reassigning legacy records.
  * Databases older than schema 10 are rejected: this version cannot migrate them.
  */
 import { basename } from 'node:path'
@@ -17,7 +17,7 @@ import type { SettingsVersion, Store } from './store.ts'
 import { Versions } from './versions.ts'
 import { KV, type Key } from '../kv.ts'
 
-export const SCHEMA_VERSION = 11
+export const SCHEMA_VERSION = 12
 /** The oldest database schema version this build can open and migrate directly. */
 export const OLDEST_SCHEMA = 10
 /** Returns an error message explaining why `version` cannot be opened: older schemas need a new state directory. */
@@ -34,6 +34,11 @@ function step<T>(record: string, work: () => T): T {
 }
 /** Rewrite all schema 10 records into their schema 11 shapes in place. */
 export function migrateTo11(store: Store): void {
+  // Schema 10's redundant Assignment.ticketId is removed by this conversion. It is not T1 ownership:
+  // use migration-local writes rather than interpreting legacy fields through current ownership validation.
+  const saveTicket = (ticket: Ticket): void => {
+    store.db.prepare('UPDATE ticket SET value=? WHERE id=?').run(JSON.stringify(ticket), ticket.id)
+  }
   step('the settings', () => { migrateSettingsRecords(store) })
   step('the prompt versions', () => { migratePrompts(store) })
   const answers = new Map<string, string[]>()
@@ -44,7 +49,7 @@ export function migrateTo11(store: Store): void {
   const human = (triggerId: string) => store.triggers.get(triggerId)?.human === true
   const closed = (number: number) => pullEnd(store.get<unknown>(`github-ended:${number}`))
   for (const row of store.db.prepare('SELECT id, value FROM ticket').all()) {
-    step(`ticket ${String(row.id)}`, () => { store.tickets.save(ticketOf(JSON.parse(String(row.value)) as Stored, answers, human, closed)) })
+    step(`ticket ${String(row.id)}`, () => { saveTicket(ticketOf(JSON.parse(String(row.value)) as Stored, answers, human, closed)) })
   }
   for (const row of store.db.prepare("SELECT id, value FROM decision WHERE json_type(value, '$.mandate') = 'object'").all()) {
     step(`decision ${String(row.id)}`, () => {
@@ -84,7 +89,7 @@ export function migrateTo11(store: Store): void {
   step('the pull request ends', () => { dropPullEnds(store) })
   step('the dismissed problems', () => { moveDismissals(store) })
   for (const row of store.db.prepare('SELECT id, value FROM ticket').all()) {
-    step(`ticket ${String(row.id)}`, () => { store.tickets.save(withoutCopies(JSON.parse(String(row.value)) as Stored)) })
+    step(`ticket ${String(row.id)}`, () => { saveTicket(withoutCopies(JSON.parse(String(row.value)) as Stored)) })
   }
   step('the reasons', () => { reasonsAsCodes(store) })
   step('the Triggers\' times', () => { triggerTimes(store) })

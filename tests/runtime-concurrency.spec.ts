@@ -28,6 +28,31 @@ const idle = (sessionId: string) => {
   h.ctx.emit('agent/status', { agent, status: 'idle' } as never)
 }
 
+it('does not execute project drafts through stale launch, delivery or restart effects', async () => {
+  const legacy = await h.acceptedTicket(feishu('draft-template', '@bot 修一'))
+  await h.runtime.settings.pause(true, 'panel')
+  const project = h.runtime.projects.create({ name: 'Research', goal: 'Discuss first' })
+  const ticket = { ...legacy.ticket, id: 'project-draft', projectId: project.id, projectStage: 'draft',
+    assignments: [{ id: 'draft-assignment', state: 'pending', projectId: project.id, ticketId: 'project-draft', createdAt: 'now' }],
+    inputs: [{ id: 'draft-input', kind: 'text', text: 'Do not run without confirmation', at: 'now' }], undelivered: ['draft-input'] }
+  // Simulate stale/corrupt persisted effects, bypassing write-side validation. A legacy Mandate grants no project authority.
+  h.runtime.store.db.prepare('INSERT INTO ticket (id, value) VALUES (?, ?)').run(ticket.id, JSON.stringify(ticket))
+  h.runtime.effects.enqueue('launch', 'draft-assignment', { ticketId: ticket.id, assignmentId: 'draft-assignment' })
+  h.runtime.effects.enqueue('delivery', ticket.id, { ticketId: ticket.id })
+  const running = { ...ticket, id: 'project-draft-running',
+    assignments: [{ ...ticket.assignments[0], id: 'draft-running-assignment', ticketId: 'project-draft-running', state: 'running' }] }
+  h.runtime.store.db.prepare('INSERT INTO ticket (id, value) VALUES (?, ?)').run(running.id, JSON.stringify(running))
+  h.runtime.effects.enqueue('delivery', running.id, { ticketId: running.id })
+  const before = h.deliveries.mock.calls.length
+  h.runtime.executor.resume()
+  await h.runtime.settings.pause(false, 'panel')
+  await h.runtime.idle()
+  expect(h.agents.has('worker-project-draft')).toBe(false)
+  expect(h.agents.has('worker-project-draft-running')).toBe(false)
+  expect(h.deliveries.mock.calls.slice(before).some(([call]) => call.sessionId.startsWith('worker-project-draft'))).toBe(false)
+  expect(h.runtime.store.tickets.get(ticket.id)?.assignments[0]?.state).toBe('pending')
+})
+
 it('evaluates a message that arrives on a thread while an earlier candidate\'s card waits for its link, in the thread\'s next Eval', async () => {
   const gate = deferred()
   // The first candidate's source link lookup is slow; Feishu allows it up to linkTimeoutMs.

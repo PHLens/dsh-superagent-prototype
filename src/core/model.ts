@@ -130,6 +130,8 @@ export interface Mandate {
   basis: MandateBasis
   actor: ActorRef
   scope: string
+  /** Present only on a project draft; this marker is never authorization for execution. */
+  projectDraft?: { projectId: string }
 }
 
 /** Active trigger evaluation on a thread; at most one exists per thread. */
@@ -217,6 +219,9 @@ export type ReportState = 'progress' | 'waiting' | 'ready' | 'blocked' | 'failed
 /** Binding between a ticket and one executor instance. */
 export interface Assignment {
   id: string
+  /** Immutable ownership references for project and ticket aggregates. */
+  projectId?: string
+  ticketId?: string
   state: AssignmentState
   createdAt: string
   startedAt?: string
@@ -273,12 +278,19 @@ export type TicketEndBy = 'executor' | 'human'
 export type TicketOutcome = 'completed' | 'merged' | 'closed' | 'dropped' | 'stopped'
 /** A question for a person; `triggerId` is the human message that raised it, whose conversation it goes back to. */
 export interface Attention { id: string; question: string; triggerId?: string }
-/** Ticket aggregate: an authorized work item with its assignments, channels, thread bindings, and inputs. */
+/** Inert project stages supported by T1; neither stage authorizes execution. */
+export type ProjectTicketStage = 'draft' | 'awaiting-confirmation'
+
+/** Ticket aggregate: a work item with its assignments, channels, thread bindings, inputs and authorization or draft marker. */
 export interface Ticket {
   id: string
   title: string
   decisionId: string
   mandate: Mandate
+  /** Stable project ownership; project tickets share this Ticket aggregate with legacy tickets. */
+  projectId?: string
+  /** Project tickets are inert until T3 confirmation creates runnable authorization. */
+  projectStage?: ProjectTicketStage
   /** The Channels of the messages it was accepted from, which its replies go to. */
   channels: ChannelRef[]
   /** When, by whom, and how the ticket ended, with a person's or the host's reason beyond the outcome; an open ticket has none. */
@@ -313,6 +325,46 @@ export interface Ticket {
  */
 export interface Follow { thread: string; own: boolean; closed?: { at: string; outcome: 'merged' | 'closed' } }
 export interface Execution { name: string; directory: string; assignment: string }
+
+/** Stable product project identity. The id is independent of display name and directory. */
+export interface Project {
+  id: string
+  name: string
+  goal: string
+  directory?: string
+  createdAt: string
+  updatedAt: string
+}
+
+/** Validate durable aggregate ownership, including attempted legacy rebinding and assignment transfer. */
+export function validateTicketOwnership(ticket: Ticket, previous?: Ticket, project?: (id: string) => Project | undefined, others?: Iterable<Ticket>): void {
+  if (previous && previous.projectId !== ticket.projectId) throw new Error('Ticket project ownership is immutable')
+  if (ticket.projectId !== undefined) {
+    if (!ticket.projectId || (ticket.projectStage !== 'draft' && ticket.projectStage !== 'awaiting-confirmation') || (project && !project(ticket.projectId))) throw new Error('Unknown or invalid project ownership')
+  } else if (ticket.projectStage !== undefined || ticket.mandate.projectDraft) throw new Error('Project ticket requires project ownership')
+  if (ticket.mandate.projectDraft && ticket.mandate.projectDraft.projectId !== ticket.projectId) throw new Error('Draft project ownership does not match')
+  const ids = new Set<string>()
+  if (previous?.projectId && previous.assignments.some(old => !ticket.assignments.some(item => item.id === old.id))) throw new Error('Project Assignment ownership history cannot be removed')
+  const priorOwners = new Map<string, string>()
+  if (ticket.assignments.some(item => !previous?.assignments.some(old => old.id === item.id))) {
+    for (const other of others ?? []) for (const assignment of other.assignments) priorOwners.set(assignment.id, other.id)
+  }
+  for (const assignment of ticket.assignments) {
+    const owner = priorOwners.get(assignment.id)
+    if (owner && owner !== ticket.id && !previous?.assignments.some(old => old.id === assignment.id)) throw new Error('Assignment identity belongs to another ticket')
+    if (ids.has(assignment.id)) throw new Error('Duplicate assignment identity')
+    ids.add(assignment.id)
+    if ((ticket.projectId !== undefined && (assignment.projectId !== ticket.projectId || assignment.ticketId !== ticket.id))
+      || (assignment.projectId !== undefined && assignment.projectId !== ticket.projectId)
+      || (assignment.ticketId !== undefined && assignment.ticketId !== ticket.id)) throw new Error('Assignment ownership does not match ticket')
+    const old = previous?.assignments.find(item => item.id === assignment.id)
+    if (old && (old.projectId !== assignment.projectId || old.ticketId !== assignment.ticketId)) throw new Error('Assignment ownership is immutable')
+  }
+}
+
+/** Project tickets remain drafts until T3 confirmation and are never runnable in T1. */
+export const executableTicket = (ticket: Pick<Ticket, 'projectId' | 'projectStage' | 'mandate'>): boolean =>
+  ticket.projectId === undefined && ticket.projectStage === undefined && ticket.mandate.projectDraft === undefined
 
 /** Whether a ticket is open: it has not ended. */
 export const liveTicket = (ticket: Pick<Ticket, 'ended'>): boolean => !ticket.ended

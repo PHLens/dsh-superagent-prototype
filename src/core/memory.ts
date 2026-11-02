@@ -1,5 +1,5 @@
 /** In-memory repository implementation for testing and ephemeral engine instances. */
-import { latestAssignment, type Decision, type Thread, type Ticket, type Trigger, type TriggerDisposition } from './model.ts'
+import { latestAssignment, validateTicketOwnership, type Decision, type Project, type Thread, type Ticket, type Trigger, type TriggerDisposition } from './model.ts'
 import type { Repositories } from './ports.ts'
 
 const clone = <T>(value: T): T => structuredClone(value)
@@ -13,8 +13,9 @@ export class MemoryRepositories implements Repositories {
   private readonly threadRows = new Map<string, Thread>()
   private readonly ticketRows = new Map<string, Ticket>()
   private readonly decisionRows = new Map<string, Decision>()
+  private readonly projectRows = new Map<string, Project>()
   atomic<T>(work: () => T): T {
-    const maps: Map<string, unknown>[] = [this.triggerRows, this.dispositions, this.threadRows, this.ticketRows, this.decisionRows]
+    const maps: Map<string, unknown>[] = [this.triggerRows, this.dispositions, this.threadRows, this.ticketRows, this.decisionRows, this.projectRows]
     const snapshot = maps.map(map => new Map(map))
     try { return work() }
     catch (error) {
@@ -36,11 +37,19 @@ export class MemoryRepositories implements Repositories {
   }
   readonly tickets = {
     get: (id: string) => clone(this.ticketRows.get(id)),
-    save: (ticket: Ticket) => { this.ticketRows.set(ticket.id, clone(ticket)) },
+    save: (ticket: Ticket) => {
+      validateTicketOwnership(ticket, this.ticketRows.get(ticket.id), id => this.projectRows.get(id), this.ticketRows.values())
+      this.ticketRows.set(ticket.id, clone(ticket))
+    },
     /** Newest first, matching the SQLite Store's order. */
     list: () => [...this.ticketRows.values()].reverse().map(clone),
     open: () => this.tickets.list().filter(ticket => !ticket.ended),
     active: () => this.tickets.list().filter(ticket => ticket.undelivered.length > 0 || ['pending', 'running'].includes(latestAssignment(ticket)?.state ?? '')),
+  }
+  readonly projects = {
+    get: (id: string) => clone(this.projectRows.get(id)),
+    save: (project: Project) => { this.projectRows.set(project.id, clone(project)) },
+    list: () => [...this.projectRows.values()].map(clone),
   }
   readonly decisions = {
     get: (id: string) => clone(this.decisionRows.get(id)),

@@ -13,9 +13,12 @@ export interface SetupHost {
   restart(): void
 }
 
-const setupFields = (settings: Settings) =>
-  JSON.stringify(Object.entries(SETUP_FIELDS).map(([id, keys]) => keys.map(key => settings.sources[id]?.config[key] ?? '')))
-export const setupChanged = (before: Settings, after: Settings): boolean => setupFields(before) !== setupFields(after)
+const setupFields = (settings: Settings, includeEnabled: boolean) =>
+  JSON.stringify(Object.entries(SETUP_FIELDS).map(([id, keys]) => [id, ...(includeEnabled ? [settings.sources[id]?.enabled] : []), ...keys.map(key => settings.sources[id]?.config[key] ?? '')]))
+/** Resource activation changes require setup to rerun, even when account fields stay the same. */
+export const setupChanged = (before: Settings, after: Settings): boolean => setupFields(before, true) !== setupFields(after, true)
+/** Account fields retain their panel-only guard independently of resource activation. */
+export const setupAccountsChanged = (before: Settings, after: Settings): boolean => setupFields(before, false) !== setupFields(after, false)
 
 /**
  * Resolves the target repository, GitHub account, and optional Feishu bot by probing CLIs, then writes and applies the isolated git and shim environment used by worker processes.
@@ -24,6 +27,7 @@ export const setupChanged = (before: Settings, after: Settings): boolean => setu
 export class Setup {
   private resolved?: Deployment
   problem?: SetupProblem
+  githubProblem?: SetupProblem
   feishuProblem?: SetupProblem
   /** PATH with the worker shim directory removed so the host's own CLI calls invoke the real binaries. */
   private readonly path: string
@@ -43,8 +47,15 @@ export class Setup {
   configured(): boolean { return this.resolved !== undefined }
   /** Resolve deployment accounts and apply the worker environment, recording `SetupError` failures in `problem`/`feishuProblem` and rethrowing unexpected errors. */
   async run(settings: Settings): Promise<boolean> {
-    try { this.resolved = await this.resolve(settings); return true }
+    try {
+      const resolved = await this.resolve(settings)
+      this.host.lifetime.throwIfAborted()
+      this.resolved = resolved
+      return true
+    }
     catch (error) {
+      this.restore()
+      this.host.lifetime.throwIfAborted()
       if (!(error instanceof SetupError)) throw error
       this.problem = error.problem
       return false
@@ -52,13 +63,14 @@ export class Setup {
   }
   /** Trigger a restart to re-run setup, refusing if setup and Feishu are already healthy so running assignments are not interrupted. */
   check(): void {
-    if (this.configured() && !this.feishuProblem) throw new UserError('setupComplete')
+    if (this.configured() && !this.githubProblem && !this.feishuProblem) throw new UserError('setupComplete')
     this.restart()
   }
   /** Defer the restart to the next macrotask so the current HTTP or tool caller receives its response first. */
   restart(): void { setTimeout(this.host.restart, 0) }
   /** Verify account CLIs for a modified source block before saving, ignoring setup errors belonging to other blocks. */
   async checkAccounts(block: SettingsBlock, settings: Settings): Promise<void> {
+    if (settings.sources[block.slice(7)]?.enabled === false) return
     const { machine } = this.host
     const check = block === 'source:feishu' ? resolveFeishuBot(machine, settings.sources.feishu?.config, this.probe())
       : resolveDeployment(machine, settings.sources.github?.config, this.probe())
@@ -76,24 +88,67 @@ export class Setup {
   private async resolve(settings: Settings): Promise<Deployment> {
     const { context, machine, lifetime } = this.host
     const probe = this.probe()
-    const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe)
-    const feishu = await resolveFeishuBot(machine, settings.sources.feishu?.config, probe).catch((error: unknown) => {
+    const throwIfAborted = (): void => lifetime.throwIfAborted()
+    this.problem = undefined
+    this.githubProblem = undefined
+    this.feishuProblem = undefined
+    throwIfAborted()
+    const github = settings.sources.github
+    const deployment: Deployment = await resolveDeployment(machine, github?.enabled === false ? undefined : github?.config, probe).catch((error: unknown) => {
+      throwIfAborted()
+      if (!(error instanceof SetupError)) throw error
+      this.githubProblem = error.problem
+      context.logger.warn('dsh-superagent leaves GitHub out: %s', error.message)
+      return { ...machine, repository: '' }
+    })
+    throwIfAborted()
+    const source = settings.sources.feishu
+    const feishu = await resolveFeishuBot(machine, source?.enabled === false ? undefined : source?.config, probe).catch((error: unknown) => {
+      throwIfAborted()
       if (!(error instanceof SetupError)) throw error
       this.feishuProblem = error.problem
       context.logger.warn('dsh-superagent leaves Feishu out: %s', error.message)
       return undefined
     })
+    throwIfAborted()
     const resolved = { ...deployment, ...(feishu ? { feishu } : {}) }
     const machineProblem = (error: unknown): never => {
       if (error instanceof SetupError) throw error
       throw new SetupError('environmentFailed', { output: error instanceof Error ? error.message : String(error) })
     }
-    await writeEnvironment(resolved, settings.executor.blockedCommands).catch(machineProblem)
-    this.restoreEnvironment = applyEnvironment(this.variables, machine.stateDir, this.path)
-    await verifyEnvironment(resolved, context.subprocess, lifetime).catch((error: unknown) => {
-      this.restore()
+    await writeEnvironment(resolved, settings.executor.blockedCommands).catch((error: unknown) => {
+      throwIfAborted()
       machineProblem(error)
     })
+    throwIfAborted()
+    this.restoreEnvironment = applyEnvironment(this.variables, machine.stateDir, this.path)
+    try {
+      await verifyEnvironment(resolved, context.subprocess, lifetime)
+    } catch (error) {
+      throwIfAborted()
+      if (!(error instanceof SetupError) || error.code !== 'gitTooOld' || !resolved.github) {
+        return machineProblem(error)
+      }
+      this.restore()
+      const githubError = error as SetupError
+      this.githubProblem = githubError.problem
+      context.logger.warn('dsh-superagent leaves GitHub out: %s', githubError.message)
+      const withoutGithub: Deployment = { ...resolved, repository: '', github: undefined }
+      await writeEnvironment(withoutGithub, settings.executor.blockedCommands).catch((writeError: unknown) => {
+        throwIfAborted()
+        machineProblem(writeError)
+      })
+      throwIfAborted()
+      this.restoreEnvironment = applyEnvironment(this.variables, machine.stateDir, this.path)
+      await verifyEnvironment(withoutGithub, context.subprocess, lifetime).catch((verifyError: unknown) => {
+        throwIfAborted()
+        this.restore()
+        machineProblem(verifyError)
+      })
+      throwIfAborted()
+      return withoutGithub
+    }
+    throwIfAborted()
     return resolved
   }
 }

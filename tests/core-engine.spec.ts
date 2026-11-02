@@ -71,6 +71,41 @@ function accepted(h: ReturnType<typeof harness>, id = '1', thread = 't1') {
   return decision
 }
 
+describe('project tickets fail closed before T3 confirmation', () => {
+  for (const stage of ['draft', 'awaiting-confirmation'] as const) {
+    it(`does not launch a ${stage} ticket carrying a valid legacy mandate`, () => {
+      const h = harness({}, { prepareTicket: ticket => ({ ...ticket, projectId: 'project-a', projectStage: stage }) })
+      h.engine.receive(trigger('1')); h.engine.evaluateDue()
+      expect(() => h.decide(h.requests[0]!, { kind: 'accept', title: 'Draft', scope: 'small', reason: 'requested' })).toThrow()
+      expect(h.executor.start).not.toHaveBeenCalled()
+    })
+    it(`does not deliver, retry, resume, recover or accept worker callbacks for ${stage}`, () => {
+      const h = harness()
+      const legacyId = accepted(h).ticketId!
+      const ticket = h.repo.tickets.get(legacyId)!
+      const id = ticket.id = 'project-ticket'
+      ticket.projectId = 'project-a'; ticket.projectStage = stage
+      ticket.assignments = ticket.assignments.map(item => ({ ...item, id: `project-${item.id}`, projectId: 'project-a', ticketId: id }))
+      h.repo.projects.save({ id: 'project-a', name: 'A', goal: 'Goal', createdAt: ticket.createdAt, updatedAt: ticket.updatedAt })
+      h.repo.tickets.save(ticket)
+      vi.mocked(h.executor.start).mockClear(); vi.mocked(h.executor.deliver).mockClear()
+      expect(() => h.engine.note(id, 'continue')).toThrow()
+      expect(() => h.engine.retryTicket(id)).toThrow()
+      const assignment = ticket.assignments[0]!
+      h.engine.assignmentStarted(id, assignment.id)
+      h.engine.assignmentInterrupted(id, assignment.id)
+      expect(() => h.engine.report(id, { state: 'ready', summary: 'done' })).toThrow()
+      ticket.ended = { by: 'executor', outcome: 'completed', at: ticket.updatedAt }
+      ticket.inputs.push({ id: 'followup', kind: 'trigger', triggerId: '1', human: true, at: ticket.updatedAt })
+      ticket.undelivered.push('followup'); h.repo.tickets.save(ticket)
+      h.engine.evaluateDue()
+      expect(h.repo.tickets.get(id)?.ended).toBeDefined()
+      expect(h.executor.start).not.toHaveBeenCalled()
+      expect(h.executor.deliver).not.toHaveBeenCalled()
+    })
+  }
+})
+
 describe('intake', () => {
   it('stores a trigger once and records source filtering', () => {
     const h = harness()

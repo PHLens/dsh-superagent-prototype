@@ -29,6 +29,7 @@ import { commentTrigger, githubChannel } from '../src/sources/github-trigger.ts'
 import { IM_WORDS } from '../src/infra/text.ts'
 import { observePull, pullOf } from '../src/sources/github-pull.ts'
 import { credentialHelper, workerGitConfig } from '../src/infra/environment.ts'
+import * as workerEnvironment from '../src/infra/environment.ts'
 import { policyHistory } from '../src/app/settings-history.ts'
 import { overview } from '../src/app/views/overview.ts'
 import { preview, readable } from '../src/app/views/text.ts'
@@ -85,7 +86,7 @@ const OTHER = () => join(directory, 'other-gh')
 const BOT = () => join(directory, 'lark-bot')
 const HELPERS = 'git config -z --show-origin --get-all credential.https://github.com.helper'
 const SCOPED = 'git config -z --show-scope --get-regexp ^(credential\\..*|http\\..*extraheader)$'
-const subprocess = { spawn: vi.fn((spec: { argv: readonly string[] }) => {
+const subprocess = { spawn: vi.fn((spec: { argv: readonly string[]; signal?: AbortSignal }) => {
   // Strip leading `env` and `KEY=VALUE` arguments before looking up the command response.
   const argv = [...spec.argv]
   while (argv[0] === 'env' || /^[A-Z_]+=/.test(argv[0] ?? '')) argv.shift()
@@ -810,34 +811,20 @@ it('leaves waiting and blocked assignments alone after a restart and keeps block
   expect(runtime.store.tickets.get(other.ticket.id)!.assignments.map(item => item.state)).toEqual(['ended', 'pending'])
 })
 
-it('waits for setup without the agent\'s GitHub CLI: the panel works, and nothing is polled, assessed or dispatched', async () => {
-  const { ticket, sessionId } = await acceptedTicket()
-  await runTool(sessionId, 'orchestrator_report', { state: 'failed', summary: 'crashed' })
-  expect(() => runtime.checkSetup()).toThrow('Setup is complete')
-  controller.create.mockClear(); deliveries.mockClear()
+it('keeps base startup and Feishu ready when the configured GitHub CLI is unavailable', async () => {
   const next = await restart({}, { github: { cli: '' } })
   await next.ready
-  expect(next.configured()).toBe(false)
+  expect(next.configured()).toBe(true)
   expect(next.setupProblem).toEqual({ place: 'github', code: 'agentCliUnset', values: {}, detail: 'The agent GitHub CLI is not set.' })
-  expect(next.health.runtime).toMatchObject({ state: 'paused', code: 'setupPending' })
-  expect(() => next.deployment).toThrow('dsh-superagent is waiting for setup: The agent GitHub CLI is not set.')
-  expect((await api('GET', 'state')).body).toMatchObject({ setup: { problem: { place: 'github' }, accounts: null, machine: { stateDir: directory } } })
+  expect(next.health.runtime).toMatchObject({ state: 'ready' })
+  expect(next.deployment.github).toBeUndefined()
+  expect(next.deployment.feishu?.appId).toBe('cli_bot')
+  expect(next.context({ kind: 'github', health: ['github'] }).configured()).toBe(false)
+  expect(next.context({ kind: 'feishu', health: ['feishu'] }).configured()).toBe(true)
+  expect((await api('GET', 'state')).body).toMatchObject({ setup: { problem: { place: 'github' }, accounts: { repository: '', agent: '' }, machine: { stateDir: directory } } })
   expect(overviewOf(next).problems[0]).toEqual({ kind: 'setup', ...next.setupProblem })
-  await receive(feishu('30', '@bot 修一下'), next)
-  // A retry waits for setup instead of launching a worker that cannot run, and no report reaches the orchestrator.
-  await next.engine.retryTicket(ticket.id)
-  expect(next.store.tickets.get(ticket.id)!.assignments.map(item => item.state)).toEqual(['ended', 'pending'])
-  expect(controller.create).not.toHaveBeenCalled()
-  expect(deliveries).not.toHaveBeenCalled()
-  // A save that changes nothing records nothing; any other save runs setup again, since it may be the fix, and so does a
-  // check after a fix outside dsh-superagent.
-  const revision = next.store.get<number>('settings-revision')
-  expect(await next.settings.save('policy', next.store.settings().policy, next.store.blockRevision('policy'), 'panel')).toMatchObject({ saved: true, restarting: false })
-  expect(next.store.get<number>('settings-revision')).toBe(revision)
-  expect(await next.settings.save('policy', { ...next.store.settings().policy, rules: [] }, next.store.blockRevision('policy'), 'panel')).toMatchObject({ saved: true, restarting: true })
-  await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(1))
   next.checkSetup()
-  await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(2))
+  await vi.waitFor(() => expect(restarts).toHaveBeenCalledTimes(1))
 })
 
 it('reports each setup problem where the operator fixes it, and checks the agent CLI the way worker shells run it', async () => {
@@ -954,7 +941,63 @@ it('pauses and resumes processing as its own action, a setting outside every blo
   expect(runtime.store.settings().paused).toBe(false)
 })
 
-it('runs setup again while the Feishu bot check failed, and restores the process environment when git fails its check', async () => {
+it.each(['probe', 'completed probe', 'write'] as const)('waits for a cancelled startup %s before final cleanup and never installs late sessions or hooks', async phase => {
+  await runtime.stop()
+  const environment = { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL, GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM, GIT_ASKPASS: process.env.GIT_ASKPASS }
+  const original = subprocess.spawn.getMockImplementation()!
+  let release!: () => void, entered!: () => void, signal: AbortSignal | undefined
+  const probing = new Promise<void>(resolve => { entered = resolve })
+  const originalWrite = workerEnvironment.writeEnvironment
+  const writing = vi.spyOn(workerEnvironment, 'writeEnvironment')
+  const apply = vi.spyOn(workerEnvironment, 'applyEnvironment')
+  if (phase !== 'write') subprocess.spawn.mockImplementation(spec => {
+    const handle = original(spec)
+    if (!spec.argv.includes(AGENT()) || !spec.argv.includes('user')) return handle
+    signal = spec.signal
+    entered()
+    return { ...handle, done: new Promise<void>(resolve => { release = resolve }).then(() => {
+      if (phase === 'probe') throw new Error('cancelled startup probe')
+      return handle.done
+    }) }
+  })
+  else writing.mockImplementation(async (...args) => {
+    entered()
+    await new Promise<void>(resolve => { release = resolve })
+    await originalWrite(...args)
+  })
+  const next = await restart()
+  const ready = next.ready.catch(error => error)
+  await probing
+  const install = vi.spyOn(next.sessions, 'install'), ensure = vi.spyOn(next.sessions, 'ensure')
+  const executorInstall = vi.spyOn(next.executor, 'install'), close = vi.spyOn(next.store, 'close')
+  controller.create.mockClear()
+  const stopping = next.stop()
+  expect(next.lifetime.aborted).toBe(true)
+  if (phase !== 'write') expect(signal?.aborted).toBe(true)
+  try {
+    // Let shutdown reach its cleanup boundary while the cancelled subprocess is still unwinding.
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(close).not.toHaveBeenCalled()
+  } finally {
+    release()
+    await Promise.all([ready, stopping])
+    subprocess.spawn.mockImplementation(original)
+    writing.mockRestore()
+  }
+  expect(await ready).toBeUndefined()
+  expect(apply).not.toHaveBeenCalled()
+  expect(install).not.toHaveBeenCalled()
+  expect(executorInstall).not.toHaveBeenCalled()
+  expect(ensure).not.toHaveBeenCalled()
+  expect(controller.create).not.toHaveBeenCalled()
+  expect(close).toHaveBeenCalledOnce()
+  for (const [name, value] of Object.entries(environment)) expect(process.env[name]).toBe(value)
+  const again = await restart()
+  await again.ready
+  expect(again.configured()).toBe(true)
+})
+
+it('runs setup again while the Feishu bot check failed, and keeps the safe environment when only GitHub fails its check', async () => {
   answers[`${BOT()} config strict-mode`] = 'strict-mode: off (source: profile)'
   const next = await restart()
   await next.ready
@@ -966,6 +1009,11 @@ it('runs setup again while the Feishu bot check failed, and restores the process
   const broken = await restart()
   await broken.ready
   expect(broken.setupProblem).toMatchObject({ place: 'deployment', code: 'gitTooOld' })
+  expect(broken.configured()).toBe(true)
+  expect(broken.deployment.github).toBeUndefined()
+  expect(process.env.GIT_CONFIG_GLOBAL).toBe(workerGitConfig(directory))
+  expect(process.env.PATH?.split(':')).toContain(join(directory, 'worker-bin'))
+  await broken.stop()
   expect(process.env.GIT_CONFIG_GLOBAL).toBeUndefined()
   expect(process.env.PATH?.split(':')).not.toContain(join(directory, 'worker-bin'))
 })

@@ -1,6 +1,10 @@
 /** User-facing error codes mapped to their category ('missing' or 'refused') and English message template. */
 export const USER_ERRORS = {
   unknownTicket: ['missing', 'Unknown ticket'],
+  unknownProject: ['missing', 'Unknown project'],
+  projectOwnership: ['refused', 'Project ownership does not match'],
+  projectNotRunnable: ['refused', 'Project ticket is awaiting confirmation'],
+  invalidProject: ['refused', 'Invalid project'],
   unknownProblem: ['missing', 'Unavailable Eval not found'],
   unknownTrigger: ['missing', 'Unknown trigger'],
   unknownAssignment: ['missing', 'Unknown assignment'],

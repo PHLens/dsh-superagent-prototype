@@ -34,8 +34,12 @@ async function receive(ctx: SourceContext, trigger: Trigger): Promise<void> {
 const chatLink = (ctx: SourceContext, chatId: string): string => feishuChatLink(ctx.deployment.feishu?.brand ?? 'feishu', chatId)
 function available(ctx: SourceContext): boolean {
   if (ctx.configured() && ctx.deployment.feishu) return true
-  const waiting = health('paused', ctx.configured() ? 'feishuCliUnset' : 'setupPending')
-  ctx.report('feishu', ctx.problem ? { state: 'paused', detail: ctx.problem.detail } : waiting)
+  // `configured()` also includes resource readiness, so an unavailable bot must retain its concrete setup detail instead of looking like base setup is pending.
+  let baseReady = true
+  try { void ctx.deployment } catch { baseReady = false }
+  if (ctx.baseConfigured) baseReady = ctx.baseConfigured()
+  const waiting = ctx.problem ? { state: 'paused' as const, detail: ctx.problem.detail } : health('paused', baseReady ? 'feishuCliUnset' : 'setupPending')
+  ctx.report('feishu', waiting)
   return false
 }
 
