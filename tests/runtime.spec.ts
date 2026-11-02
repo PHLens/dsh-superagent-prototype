@@ -1481,7 +1481,10 @@ it('tells the conversation that the PR merged when work a restart recovered ends
   const id = key('pr-terminal', '42', 'feishu', JSON.stringify({ chatId: CHAT, messageId: 'om_1' }), 'merged')
   expect(runtime.store.replyStatus(id)).toBeUndefined()
   // Its ready report ends the ticket with the PR, and the conversation hears of the merge once.
-  await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Recovered and verified' })
+  // Model the report after recovery delivery rather than relying on distinct wall-clock milliseconds.
+  vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 1000 })
+  try { await runTool(sessionId, 'orchestrator_report', { state: 'ready', summary: 'Recovered and verified' }) }
+  finally { vi.useRealTimers() }
   expect(runtime.store.tickets.get(ticket.id)!.ended).toMatchObject({ outcome: 'merged' })
   expect(runtime.store.replyStatus(id)).toBeDefined()
   // The report that ended the ticket was the worker's own: its turn is not cancelled inside that tool call.
