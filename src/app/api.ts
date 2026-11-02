@@ -11,6 +11,7 @@ import type { SourceStatusView } from './views/sources.ts'
 import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } from './views/threads.ts'
 import type { TicketListView } from './views/tickets.ts'
 import type { Assignment, PlanAuthorization, PlanExecutionTarget, Project as ProjectModel, Ticket } from '../core/model.ts'
+import type { ProjectProgress } from './project-progress.ts'
 
 export type Project = ProjectModel
 export type ConversationRole = 'user' | 'assistant'
@@ -25,6 +26,7 @@ export interface ConversationMessage {
   error?: string
 }
 export interface ProjectTaskView extends Ticket {
+  progress?: ProjectProgress
   planRevisions?: Ticket['planRevisions']
   authorizations?: Ticket['authorizations']
   executionTargets?: Ticket['executionTargets']

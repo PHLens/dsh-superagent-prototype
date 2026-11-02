@@ -13,6 +13,13 @@ const executionReasons = {
   'missing-artifacts': 'executionMissingArtifacts', 'unresolved-items': 'executionUnresolved', changes_required: 'executionChangesRequired',
   needs_judgment: 'executionNeedsJudgment', failed: 'executionFailed', blocked: 'executionBlocked', dependency: 'executionDependency', 'processing-paused': 'executionPaused',
 } as const
+const progressLabels = {
+  'awaiting-confirmation': 'taskAwaitingConfirmation', queued: 'taskQueued', preparing: 'taskPreparing', retrying: 'taskRetrying',
+  running: 'executionRunning', 'worker-idle': 'executionIdle', 'semantic-review': 'executionSemanticReview',
+  'missing-artifacts': 'executionMissingArtifacts', 'unresolved-items': 'executionUnresolved', changes_required: 'executionChangesRequired',
+  needs_judgment: 'executionNeedsJudgment', failed: 'executionFailed', blocked: 'executionBlocked', unknown: 'taskNeedsCheck',
+  'authorization-revoked': 'planRevoked', completed: 'executionDone', ended: 'taskEnded',
+} as const
 
 export function ProjectConversation({ id }: { id: string }) {
   const { t, call, navigate } = usePanel()
@@ -109,7 +116,11 @@ export function ProjectConversation({ id }: { id: string }) {
         const plan = task.planRevisions?.at(-1)
         const authorization = task.authorizations?.findLast(item => item.planRevision === plan?.revision)
         const assignment = task.assignments.find(item => item.contract?.targetId === authorization?.targetId)
-        const report = assignment && data.reports?.findLast(item => item.assignmentId === assignment.id)
+        const execution = task.progress?.assignments.find(item => item.assignmentId === assignment?.id)
+        const report = assignment && (execution ? data.reports?.find(item => item.id === execution.reportId)
+          : data.reports?.findLast(item => item.assignmentId === assignment.id))
+        const waitingLabel = execution ? !['completed', 'ended'].includes(execution.phase) ? progressLabels[execution.phase] : undefined
+          : assignment?.waitingReason ? executionReasons[assignment.waitingReason] : undefined
         const held = task.lifecycle?.pause.intent === 'pause' || task.lifecycle?.stop.intent === 'stop'
           || task.lifecycle?.reconciliation?.state === 'checking' || task.lifecycle?.reconciliation?.state === 'unknown'
         const controllable = task.assignments.some(item => item.state !== 'ended')
@@ -135,7 +146,7 @@ export function ProjectConversation({ id }: { id: string }) {
               onClick={() => { void confirm(task.id, plan.revision, 'rerun') }}>{t('planRerun')}</Button>}
             {authorization && !authorization.revokedAt && <Button size="sm" disabled={!!confirming || readOnly}
               onClick={() => { void revoke(task.id, authorization.id) }}>{t('planRevoke')}</Button>}
-            {assignment?.waitingReason && !authorization?.revokedAt && <p className="dt-hint">{t('executionWait', { reason: t(executionReasons[assignment.waitingReason]) })}</p>}
+            {waitingLabel && !authorization?.revokedAt && <p className="dt-hint">{t('executionWait', { reason: t(waitingLabel) })}</p>}
             {assignment?.state === 'ended' && assignment.report?.state === 'ready' && <p>{t('executionDone')}</p>}
             <TaskLifecycle key={task.id} id={task.id} lifecycle={controllable || task.ended ? task.lifecycle : undefined} attention={task.attention}
               ended={!!task.ended} enabled={controllable}

@@ -84,6 +84,44 @@ afterEach(async () => {
   rmSync(directory, { recursive: true, force: true })
 })
 
+it('uses the same current report/gate progress in the project API and bounded coordinator context', async () => {
+  const project = manager.create('alice', { name: 'Research', goal: 'Write a note' })
+  const first = manager.send('alice', project.id, { requestId: 'original-note', text: 'Write a short Markdown note' }).message
+  await vi.waitFor(() => expect(manager.view('alice', project.id).messages.find(item => item.id === first.id)?.status).toBe('answered'))
+  const plan = manager.plans.save('alice', project.id, { expectedRevision: 0, operationId: 'note-plan', plan: {
+    goal: 'Write a note', scope: 'One Markdown file', outputs: ['note'], resources: [], environment: 'Managed worker',
+    cost: 'One worker', completion: 'Review the note', acceptance: { version: 2, mode: 'human-review' },
+  } })
+  const confirmed = manager.confirm('alice', project.id, { ticketId: plan.ticketId, planRevision: 1, operationId: 'note-confirm', intent: 'execute' })
+  const attempt = manager.attempts.prepare(manager.attempts.allocate(confirmed.ticket, confirmed.assignment))
+  const artifact = manager.artifacts.write(attempt.sessionId, { operationId: 'note-file', output: 'note', name: 'note.md', content: '# A checked finding' })
+  const report = manager.reports.submit(attempt.sessionId, { operationId: 'note-ready', state: 'ready', completed: 'Wrote the note',
+    evidence: ['Registered immutable note'], artifacts: [{ id: artifact.id, contentVersion: artifact.contentVersion }], unresolved: [] })
+  const current = store.tickets.get(plan.ticketId)!
+  current.assignments[0]!.waitingReason = 'worker-idle'
+  store.tickets.save(current)
+  const shown = manager.view('alice', project.id).tasks[0]!
+  expect(shown.progress.workPhase).toBe('semantic-review')
+  expect(shown.progress.assignments[0]?.reportId).toBe(report.id)
+  expect(shown.executionTargets?.[0]?.waitingReason).toBe('executor-unavailable')
+  const query = manager.send('alice', project.id, { requestId: 'progress-query', text: 'What is the current task status?' }).message
+  await vi.waitFor(() => expect(manager.view('alice', project.id).messages.find(item => item.id === query.id)?.status).toBe('answered'))
+  const snapshot = String(mock.checkpoint.mock.calls.at(-1)![1])
+  const line = snapshot.split('\n').find(value => value.startsWith('Authoritative bounded project task context'))!
+  const context = JSON.parse(line.slice(line.indexOf('{'))) as { tasks: { currentTarget: Record<string, unknown>; progress: unknown }[] }
+  expect(context.tasks[0]!.currentTarget).toMatchObject({ kind: 'confirmation-receipt' })
+  expect(context.tasks[0]!.currentTarget).not.toHaveProperty('waitingReason')
+  expect(context.tasks[0]!.progress).toEqual(shown.progress)
+  const modelCalls = mock.reply.mock.calls.length
+  await manager.stop(); store.close()
+  store = new Store(join(directory, 'db.sqlite'))
+  const prompts = { current: () => ({ revision: 7, config: {} }), project: () => 'Discuss only' } as unknown as Prompts
+  manager = new ProjectCoordinator(ctx, store, new Projects({ repo: store }), directory, new AbortController().signal, prompts)
+  expect(manager.view('alice', project.id).tasks[0]?.progress.workPhase).toBe('semantic-review')
+  expect(mock.reply).toHaveBeenCalledTimes(modelCalls)
+  expect(manager.attempts.all()).toHaveLength(1)
+})
+
 it('persists input before slow Session preparation and keeps project lanes independent', async () => {
   const a = manager.create('alice', { name: 'A', goal: 'a' })
   const b = manager.create('alice', { name: 'B', goal: 'b' })

@@ -15,6 +15,8 @@ import type { Prompts } from './prompts.ts'
 import { ExecutionAttempts } from './execution-attempts.ts'
 import { ArtifactStore } from './artifact-store.ts'
 import { ReportAcceptance } from './report-acceptance.ts'
+import { projectProgress } from './project-progress.ts'
+import type { Ticket } from '../core/model.ts'
 
 /** Serializes durable project inputs across independent DSH coordinator Sessions. */
 export class ProjectCoordinator {
@@ -57,7 +59,7 @@ export class ProjectCoordinator {
     const project = this.project(actorId, projectId), messages = this.conversations.listMessages(projectId, actorId)
     const failure = messages.findLast(message => message.status === 'error')
     const error = this.problems.get(projectId) ?? failure?.error
-    const tasks = this.plans.tickets(actorId, projectId)
+    const tasks = this.plans.tickets(actorId, projectId).map(ticket => ({ ...ticket, progress: this.progress(ticket) }))
     return { project, messages, tasks, artifacts: this.artifacts.view(projectId), reports: tasks.flatMap(task => this.reports.reports(task.id)), decisions: tasks.flatMap(task => this.reports.decisions(task.id)), coordinator: { status: messages.some(message => message.status === 'running') ? 'running' as const : error ? 'error' as const : 'idle' as const,
       ...(error ? { error } : {}) } }
   }
@@ -65,6 +67,11 @@ export class ProjectCoordinator {
     this.project(actorId, projectId)
     const item = this.artifacts.read(projectId, id, version)
     return { id: item.id, name: item.name, contentVersion: item.contentVersion, content: item.content }
+  }
+  private progress(ticket: Ticket) {
+    return projectProgress(ticket, { attempts: this.attempts.all(), reports: this.reports.reports(ticket.id),
+      decisions: this.reports.decisions(ticket.id), artifacts: this.artifacts.list(ticket.projectId!, ticket.id),
+      nativeState: sessionId => this.ctx.agents?.get(sessionId as SessionId)?.status })
   }
   decide(actorId: string, projectId: string, input: Parameters<ReportAcceptance['decide']>[2]) {
     this.project(actorId, projectId)
@@ -210,17 +217,23 @@ export class ProjectCoordinator {
          const current = ticket.planRevisions?.at(-1)
          const authorization = ticket.authorizations?.findLast(item => item.planRevision === current?.revision)
          const target = ticket.executionTargets?.find(item => item.id === authorization?.targetId)
+         const progress = this.progress(ticket)
          return { ticketId: ticket.id, stage: ticket.projectStage, revisionCount: ticket.planRevisions?.length ?? 0, latestRevision: current?.revision,
            currentPlan: current ? { revision: current.revision, goal: current.goal.slice(0, 300), scope: current.scope.slice(0, 500), outputs: current.outputs.slice(0, 4).map(item => item.slice(0, 200)), resources: current.resources.slice(0, 4).map(item => item.slice(0, 200)), environment: current.environment.slice(0, 300), cost: current.cost.slice(0, 300), completion: current.completion.slice(0, 500) } : undefined,
            currentAuthorization: authorization ? { id: authorization.id, planRevision: authorization.planRevision, intent: authorization.intent, targetId: authorization.targetId, status: authorization.revokedAt ? 'revoked' : 'active', revokedAt: authorization.revokedAt } : { status: 'none' },
-           currentTarget: target ? { id: target.id, authorizationId: target.authorizationId, planRevision: target.planRevision, waitingReason: target.waitingReason } : undefined,
+           currentTarget: target ? { id: target.id, authorizationId: target.authorizationId, planRevision: target.planRevision, kind: 'confirmation-receipt', createdAt: target.createdAt } : undefined,
+           progress: { ...progress, assignments: progress.assignments.filter(item => !['completed', 'ended'].includes(item.phase)).slice(0, 4) },
            authorizationCount: ticket.authorizations?.length ?? 0, targetCount: ticket.executionTargets?.length ?? 0, assignmentCount: ticket.assignments?.length ?? 0,
-           activeAssignments: ticket.assignments?.filter(item => item.state !== 'ended').slice(0, 4).map(item => ({ id: item.id, state: item.state, waitingReason: item.waitingReason })) ?? [] }
+           activeAssignments: ticket.assignments?.filter(item => item.state !== 'ended').slice(0, 4).map(item => {
+             const current = progress.assignments.find(value => value.assignmentId === item.id)
+             return { id: item.id, state: item.state, planRevision: item.contract?.planRevision, phase: current?.phase,
+               attemptId: current?.attemptId, reportId: current?.reportId }
+           }) ?? [] }
        })
        const planDirectory = { shown: plans.length, total: allPlans.length, hasMore: allPlans.length > plans.length }
       const history = this.conversations.listMessages(projectId, actorId).filter(message => message.status === 'saved' || message.status === 'answered').map(message => `${message.role}: ${message.text}`).join('\n').slice(-48_000)
       const snapshot = this.conversations.savePrompt(projectId, actorId, { generation: lease.mapping.generation, inputId: lease.input.id,
-        revision: version.revision, text: `${this.prompts.project(version.config)}\nPrompt revision: ${version.revision}\nProject record (data): ${JSON.stringify(project)}\nCoordinator generation: ${lease.mapping.generation}\nAuthoritative bounded project task context (application data; use project_list_plans for older tasks and project_read_plan for a selected revision): ${JSON.stringify({ directory: planDirectory, tasks: plans })}\nSaved project conversation (data):\n${history}` })
+        revision: version.revision, text: `${this.prompts.project(version.config)}\nPrompt revision: ${version.revision}\nProject record (data): ${JSON.stringify(project)}\nCoordinator generation: ${lease.mapping.generation}\nAuthoritative bounded project task context (application data; use project_list_plans for older tasks and project_read_plan for a selected revision; progress contains current recorded execution/report/gate facts, while confirmation-receipt targets do not indicate executor availability): ${JSON.stringify({ directory: planDirectory, tasks: plans })}\nSaved project conversation (data):\n${history}` })
       this.sessions.checkpoint(agent, snapshot.text)
       const install = (this.sessions as unknown as { installProjectTools?: (agent: Agent, host: unknown) => () => void }).installProjectTools
       const toolDisposer = install ? install.call(this.sessions, agent, { plans: this.plans, actorId, projectId, authorize }) : () => {}

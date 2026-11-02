@@ -9,6 +9,7 @@ import { en, zh } from '../src/client/locales.ts'
 import { usePanel, at, mount, remount, click, field, text, type, all, settle } from './fixtures/panel.tsx'
 import { server } from './fixtures/panel-server.ts'
 import { workerFixture } from './fixtures/project-worker.ts'
+import { projectProgress } from '../src/app/project-progress.ts'
 
 usePanel()
 const atTime = '2026-11-02T12:00:00Z'
@@ -38,6 +39,27 @@ it('keeps an unconfirmed plan inert instead of presenting an unstarted execution
     expect(text()).toContain(en.planConfirm)
     expect(text()).not.toContain(en.taskUnknown)
     expect(all('button').some(item => [en.taskPause, en.taskResume, en.taskStop].includes(item.textContent ?? ''))).toBe(false)
+  } finally { f.dispose() }
+})
+
+it('shows current execution progress and hides an old ready report after a fresh attempt', async () => {
+  const f = fixture()
+  try {
+    f.prepare()
+    const artifact = f.write()
+    const oldReport = f.reports.submit(f.attempt.sessionId, f.report([{ id: artifact.id, contentVersion: artifact.contentVersion }]))
+    Object.assign(f.task, f.store.tickets.get(f.plan.ticketId)!)
+    const next = f.attempts.prepare(f.attempts.allocate(f.task, f.task.assignments[0]!, { fresh: true }))
+    f.task.assignments[0]!.waitingReason = 'worker-running'
+    const data = server.conversations[f.project.id]!
+    data.reports = [oldReport]
+    data.tasks![0]!.progress = projectProgress(f.task, { attempts: f.attempts.all(), reports: [oldReport], decisions: [],
+      artifacts: f.artifacts.list(f.project.id), nativeState: () => 'idle' })
+    await mount(en)
+    expect(text()).toContain(en.taskPreparing)
+    expect(text()).not.toContain(en.executionRunning)
+    expect(all('button').some(item => item.textContent === en.acceptancePass)).toBe(false)
+    expect(data.tasks![0]!.progress!.assignments[0]?.attemptId).toBe(next.id)
   } finally { f.dispose() }
 })
 
