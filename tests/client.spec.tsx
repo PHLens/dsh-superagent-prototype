@@ -36,6 +36,9 @@ async function render(entry: Entry, props: Record<string, unknown>) {
   return { container, dispose: () => { act(() => { root.unmount() }); container.remove() } }
 }
 const openMaster = async (container: HTMLElement) => {
+  // The global Session entry belongs to the legacy management pages.
+  const overview = [...container.querySelectorAll<HTMLElement>('[role="tab"]')].find(item => item.textContent === zh['tab.overview'])!
+  await act(async () => { overview.click() })
   const button = [...container.querySelectorAll('button')].find(item => item.textContent === zh.openMaster)!
   await act(async () => { button.click() })
   for (let i = 0; i < 5; i++) await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
