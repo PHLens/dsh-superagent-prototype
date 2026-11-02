@@ -342,6 +342,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/project-store.ts` | SQLite project repository with stable ids; project lifecycle stays in the core service |
 | `src/app/conversation-store.ts` | Durable owned business conversation, input idempotency, per-project leases, mapping generations and prompt checkpoints |
 | `src/app/project-coordinator.ts` | Independent project discussion lanes, restart reconciliation, retry and coordinator lifecycle |
+| `src/app/project-progress.ts` | Root-owned project task progress projection helpers |
 | `src/app/project-plans.ts` | Authenticated project-plan adapter: persisted confirmation evidence, plan version anchoring, authorization and Assignment projection |
 | `src/app/execution-attempts.ts` | Server-owned Assignment execution identity, preparation evidence, filesystem boundaries and lease validation |
 | `src/app/artifact-store.ts` | Managed write intents, immutable SHA256 file versions, exact-version reads and interrupted-operation reconciliation |
