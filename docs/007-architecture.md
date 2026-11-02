@@ -475,6 +475,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/project-execution.spec.ts` | Authorized worker context, file acceptance, independent owner decisions, terminal receipt replay and stale execution rejection |
 | `tests/artifact-recovery.spec.ts` | Interrupted write intent/effect reconciliation, fixed input versions, corruption/isolation rejection and durable returns after reopen |
 | `tests/project-worker-runtime.spec.ts` | Registered native tools with Session guards, shared worker slots and completed confirmation replay/explicit rerun through the coordinator |
+| `tests/lifecycle-boundaries.spec.ts` | Durable shutdown fences, missing/unloaded owner jobs, fresh retry leases, failed resume gates, pause settle coalescing, stale-worker fencing, semantic review reuse and Store reopen receipt boundaries |
 | `tests/reconciliation.spec.ts` | Authenticated owner reconciliation contract, strict operation schema and persisted server-owned evidence |
 | `tests/backup.spec.ts` | WAL-inclusive recovery snapshots, credential exclusions, incomplete capture markers, confined hash-verified restore and inert recovery profile |
 | `tests/projects.spec.ts` | Project identity and Ticket/Assignment ownership; unauthorized drafts never execute |
