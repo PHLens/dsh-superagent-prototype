@@ -62,7 +62,9 @@ export class ProjectCoordinator {
         : []
       if (anchored.length !== 1) {
         const message = this.conversations.appendUser(projectId, actorId, { clientRequestKey: input.requestId, text: input.text })
-        return { message, clarification: !input.ticketId || input.planRevision === undefined ? '请提供当前方案的任务和版本后再确认。' : candidates.length ? '方案版本已变化，请重新查看后确认。' : '请先让模型保存一个方案，再确认执行。' }
+        const clarification = !input.ticketId || input.planRevision === undefined ? '请提供当前方案的任务和版本后再确认。' : candidates.length ? '方案版本已变化，请重新查看后确认。' : '请先让模型保存一个方案，再确认执行。'
+        this.conversations.clarify(projectId, actorId, message.id, clarification)
+        return { message, clarification }
       }
       const ticket = anchored[0]!, revision = ticket.planRevisions!.at(-1)!.revision
       return this.store.atomic(() => {

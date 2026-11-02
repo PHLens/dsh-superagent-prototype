@@ -89,6 +89,15 @@ it('rejects an explicitly unknown ticket instead of creating a draft', () => {
   expect(manager.view('alice', project.id).tasks).toHaveLength(0)
 })
 
+it('persists deterministic clarification and completes the handled input', () => {
+  const project = manager.create('alice', { name: 'A', goal: 'ship' })
+  const result = manager.send('alice', project.id, { requestId: 'ambiguous', text: '按这个方案做' })
+  if (!('clarification' in result)) throw new Error('clarification was not returned')
+  const messages = manager.view('alice', project.id).messages
+  expect(messages.at(-1)).toMatchObject({ role: 'assistant', status: 'saved', text: result.clarification })
+  expect(messages.find(message => message.clientRequestKey === 'ambiguous')).toMatchObject({ status: 'answered' })
+})
+
 it('does not dispatch a strict confirmation when multiple current plans exist', () => {
   const project = manager.create('alice', { name: 'A', goal: 'ship' })
   manager.plans.save('alice', project.id, { plan, expectedRevision: 0 })

@@ -385,6 +385,23 @@ export class ConversationStore {
       return message
     })
   }
+  clarify(projectId: string, actorId: string, inputId: string, text: string): ConversationMessage {
+    return this.store.atomic(() => {
+      this.owned(projectId, actorId)
+      const user = this.getRaw(inputId)
+      if (!user || user.role !== 'user' || user.projectId !== projectId || user.actorId !== actorId) throw new Error('Conversation input was not found')
+      const id = `${inputId}:clarification`
+      const existing = this.getRaw(id)
+      if (existing) return existing
+      const createdAt = now()
+      const message: ConversationMessage = { id, projectId, clientRequestKey: id, role: 'assistant', actorId, text, createdAt, status: 'saved', userMessageId: inputId }
+      this.store.db.prepare("UPDATE conversation_message SET status='answered' WHERE id=?").run(inputId)
+      this.store.db.prepare('INSERT INTO conversation_message (id,project_id,client_request_key,role,actor_id,text,created_at,status,user_message_id) VALUES (?,?,?,?,?,?,?,?,?)')
+        .run(id, projectId, id, 'assistant', actorId, text, createdAt, 'saved', inputId)
+      this.store.db.prepare('UPDATE conversation_state SET version=version+1 WHERE project_id=?').run(projectId)
+      return message
+    })
+  }
   fail(
     projectId: string,
     actorId: string,
