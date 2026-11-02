@@ -62,6 +62,10 @@ export interface ExecutorHost {
   readonly masterId?: string
   checkpointFiles?(ticket: Ticket): readonly string[]
   reportReady?(ticket: Ticket, assignment: Assignment, attempt: Attempt): boolean
+  /** Verifies durable artifact bytes and writing-journal state for a reported attempt. */
+  evidenceReady?(ticket: Ticket, assignment: Assignment, attempt: Attempt): boolean
+  /** Returns true when an outbound receipt has an unresolved external result for this ticket. */
+  outboundUnknown?(ticket: Ticket): boolean
   /** DSH Cordis context: agents and their events, and the subprocess service used to run prepare commands. */
   readonly context: Context
   /** Where the Executor reports what happened to Assignments and Inputs. */
@@ -220,43 +224,81 @@ export class DshExecutor implements Executor {
   /** Deterministic server-owned recovery check; callers cannot submit an outcome. */
   async reconcileTicket(ticketId: string, operationId: string): Promise<{ state: 'checking' | 'clear' | 'unknown'; operationId: string }> {
     if (!operationId.trim()) throw new Error('Reconciliation operation id is required')
-    if (this.reconciling.has(ticketId)) return { state: this.host.store.tickets.get(ticketId)?.lifecycle?.reconciliation?.state ?? 'checking', operationId }
-    this.reconciling.add(ticketId)
     const initial = this.host.store.tickets.get(ticketId)
     if (!initial) throw new Error('Ticket not found')
-    const lifecycle = initial.lifecycle
+    const previous = initial.lifecycle?.reconciliationHistory?.findLast(item => item.operationId === operationId)
+    if (previous) return { state: previous.state, operationId }
+    if (this.reconciling.has(ticketId)) return { state: this.host.store.tickets.get(ticketId)?.lifecycle?.reconciliation?.state ?? 'checking', operationId }
+    this.reconciling.add(ticketId)
+    const startedAt = now(), lifecycle = initial.lifecycle
+    const intentAt = { pause: lifecycle?.pause.at ?? startedAt, stop: lifecycle?.stop.at ?? startedAt }
+    const intent = { pause: lifecycle?.pause.intent ?? 'none' as const, stop: lifecycle?.stop.intent ?? 'none' as const }
     const assignment = initial.assignments.filter(item => item.contract && item.state !== 'ended').at(-1)
-    const attempt = assignment ? this.host.attempts?.all().findLast(item => item.assignmentId === assignment.id) : undefined
-    const intentAt = { pause: lifecycle?.pause.at, stop: lifecycle?.stop.at }
-    const ownerId = attempt?.sessionId ?? (!initial.projectId ? workerSessionId(ticketId) : undefined)
-    const startedAt = now()
-    const checking = { state: 'checking' as const, operationId, startedAt, ...(assignment ? { assignmentId: assignment.id } : {}), ...(attempt ? { attemptId: attempt.id, lease: attempt.lease, sessionId: attempt.sessionId } : {}) }
+    const allAttempts = this.host.attempts?.all().filter(item => item.ticketId === ticketId) ?? []
+    const attempt = assignment ? allAttempts.findLast(item => item.assignmentId === assignment.id) : undefined
+    const scopedAttempts = allAttempts.filter(item => item.status !== 'ended')
+    const ownerIds = [...new Set([...scopedAttempts.map(item => item.sessionId), ...(!initial.projectId ? [workerSessionId(ticketId)] : [])])].sort()
+    const attemptLeases = scopedAttempts.map(item => `${item.id}:${item.lease}`).sort()
+    const checking = { state: 'checking' as const, operationId, startedAt, ownerIds, attemptLeases, pauseIntent: intent.pause, stopIntent: intent.stop,
+      ...(assignment ? { assignmentId: assignment.id } : {}), ...(attempt ? { attemptId: attempt.id, lease: attempt.lease, sessionId: attempt.sessionId } : {}) }
     initial.lifecycle = { ...(lifecycle ?? { pause: { intent: 'none', state: 'running', at: startedAt }, stop: { intent: 'none', state: 'running', at: startedAt }, observed: { state: 'unknown', at: startedAt } }), reconciliation: checking }
     this.host.store.tickets.save(initial)
-    let state: 'clear' | 'unknown' = 'clear', reason: string | undefined
-    if (ownerId) {
-      const jobs = runningJobs(this.host.context, ownerId)
-      const resolved = await this.host.context.sessionController.resolveAgent(ownerId as SessionId)
-      if (jobs.length) { state = 'unknown'; reason = 'owner-jobs-still-running' }
-      else if ('error' in resolved && resolved.error.code !== 'session/not-found') { state = 'unknown'; reason = `session-error:${resolved.error.code}` }
-      else if ('agent' in resolved) {
-        const agent = resolved.agent
-        const inbox = agent.inbox.nextTurn.length + agent.inbox.nextStep.length
-        if (agent.status !== 'idle') { state = 'unknown'; reason = `session-status:${agent.status}` }
-        else if (inbox) { state = 'unknown'; reason = 'session-inbox-pending' }
-        else if (attempt && (agent.id !== attempt.sessionId || agent.session.header.cwd !== attempt.cwd)) { state = 'unknown'; reason = 'session-cwd-mismatch' }
-      }
-      if (state === 'clear' && attempt) { try { this.host.attempts?.validateDirectory(attempt) } catch { state = 'unknown'; reason = 'prepare-evidence-mismatch' } }
+    const persistUnknown = (reason: string): void => {
+      const current = this.host.store.tickets.get(ticketId)
+      if (!current || current.lifecycle?.reconciliation?.operationId !== operationId) return
+      const observedAt = now()
+      current.lifecycle.reconciliation = { ...checking, state: 'unknown', observedAt, reason }
+      const history = current.lifecycle.reconciliationHistory ?? []
+      current.lifecycle.reconciliationHistory = [...history.filter(item => item.operationId !== operationId), { ...checking, state: 'unknown', observedAt, reason }]
+      this.host.store.tickets.save(current)
     }
-    const current = this.host.store.tickets.get(ticketId)
-    const currentAttempt = assignment ? this.host.attempts?.all().findLast(item => item.assignmentId === assignment.id) : undefined
-    if (!current || current.lifecycle?.reconciliation?.operationId !== operationId || (intentAt.pause !== undefined && current.lifecycle.pause.at !== intentAt.pause) || (intentAt.stop !== undefined && current.lifecycle.stop.at !== intentAt.stop) || currentAttempt?.lease !== attempt?.lease || currentAttempt?.id !== attempt?.id) { this.reconciling.delete(ticketId); return { state: 'unknown', operationId } }
-    const observedAt = now()
-    current.lifecycle!.reconciliation = { ...checking, state, observedAt, ...(reason ? { reason } : {}) }
-    this.host.store.tickets.save(current)
-    if (state === 'clear' && current.lifecycle) this.host.engine.observeTicket(ticketId, current.lifecycle.stop.intent === 'stop' ? 'exited' : 'idle', 'reconciled')
-    this.reconciling.delete(ticketId)
-    return { state, operationId }
+    try {
+      let state: 'clear' | 'unknown' = 'clear', reason: string | undefined
+      for (const ownerId of ownerIds) {
+        const resolved = await this.host.context.sessionController.resolveAgent(ownerId as SessionId)
+        // Read jobs after the await: a job registered while native state was being read is still active evidence.
+        const jobs = runningJobs(this.host.context, ownerId)
+        if (jobs.length) { state = 'unknown'; reason = 'owner-jobs-still-running'; break }
+        if ('error' in resolved && resolved.error.code !== 'session/not-found') { state = 'unknown'; reason = `session-error:${resolved.error.code}`; break }
+        if ('agent' in resolved) {
+          const agent = resolved.agent
+          const ownerAttempt = scopedAttempts.find(item => item.sessionId === ownerId)
+          const inbox = agent.inbox.nextTurn.length + agent.inbox.nextStep.length
+          if (agent.status !== 'idle') { state = 'unknown'; reason = `session-status:${agent.status}`; break }
+          if (inbox) { state = 'unknown'; reason = 'session-inbox-pending'; break }
+          if (ownerAttempt && (agent.id !== ownerAttempt.sessionId || agent.session.header.cwd !== ownerAttempt.cwd)) { state = 'unknown'; reason = 'session-cwd-mismatch'; break }
+        }
+      }
+      if (state === 'clear' && attempt) {
+        try { this.host.attempts?.validateDirectory(attempt) } catch { state = 'unknown'; reason = 'prepare-evidence-mismatch' }
+        if (state === 'clear' && assignment && this.host.reportReady?.(initial, assignment, attempt) && !this.host.evidenceReady?.(initial, assignment, attempt)) {
+          state = 'unknown'; reason = 'artifact-evidence-mismatch'
+        }
+      }
+      if (state === 'clear' && this.host.outboundUnknown?.(initial)) { state = 'unknown'; reason = 'outbound-receipt-unknown' }
+      const current = this.host.store.tickets.get(ticketId)
+      const currentAttempts = this.host.attempts?.all().filter(item => item.ticketId === ticketId && item.status !== 'ended') ?? []
+      const currentScope = [...new Set([...currentAttempts.map(item => item.sessionId), ...(!initial.projectId ? [workerSessionId(ticketId)] : [])])].sort()
+      const currentLeases = currentAttempts.map(item => `${item.id}:${item.lease}`).sort()
+      const unchanged = !!current && current.lifecycle?.reconciliation?.operationId === operationId
+        && current.lifecycle.pause.at === intentAt.pause && current.lifecycle.stop.at === intentAt.stop
+        && current.lifecycle.pause.intent === intent.pause && current.lifecycle.stop.intent === intent.stop
+        && JSON.stringify(currentScope) === JSON.stringify(ownerIds) && JSON.stringify(currentLeases) === JSON.stringify(attemptLeases)
+      if (!unchanged) { persistUnknown('reconciliation-facts-changed'); return { state: 'unknown', operationId } }
+      const observedAt = now()
+      current!.lifecycle!.reconciliation = { ...checking, state, observedAt, ...(reason ? { reason } : {}) }
+      if (state === 'clear' && attempt?.status === 'reconcile' && attempt.prepare) { attempt.status = 'prepared'; this.host.attempts!.save(attempt) }
+      const history = current!.lifecycle!.reconciliationHistory ?? []
+      current!.lifecycle!.reconciliationHistory = [...history.filter(item => item.operationId !== operationId), { ...checking, state, observedAt, ...(reason ? { reason } : {}) }]
+      this.host.store.tickets.save(current!)
+      if (state === 'clear' && current!.lifecycle) this.host.engine.observeTicket(ticketId, current!.lifecycle.stop.intent === 'stop' ? 'exited' : 'idle', 'reconciled')
+      return { state, operationId }
+    } catch (error) {
+      persistUnknown(`reconcile-error:${error instanceof Error ? error.message : String(error)}`)
+      throw error
+    } finally {
+      this.reconciling.delete(ticketId)
+    }
   }
   /** Cancellation requests become observations only after the actual native workers drain. */
   private reconcileLifecycle(ticket: Ticket): void {

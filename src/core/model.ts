@@ -362,7 +362,8 @@ export interface LifecycleState {
   stop: { intent: StopIntent; state: 'running' | 'stopping' | 'exited'; at: string; observedAt?: string }
   observed: { state: ObservedHostState; at: string; reason?: string }
   checkpoint?: { id: string; at: string; assignmentId?: string; attemptId?: string; files: readonly string[] }
-  reconciliation?: { state: 'checking' | 'clear' | 'unknown'; operationId?: string; startedAt: string; observedAt?: string; assignmentId?: string; attemptId?: string; lease?: string; sessionId?: string; reason?: string }
+  reconciliation?: { state: 'checking' | 'clear' | 'unknown'; operationId?: string; startedAt: string; observedAt?: string; assignmentId?: string; attemptId?: string; lease?: string; sessionId?: string; reason?: string; ownerIds?: string[]; attemptLeases?: string[]; pauseIntent?: PauseIntent; stopIntent?: StopIntent }
+  reconciliationHistory?: { state: 'clear' | 'unknown'; operationId: string; startedAt: string; observedAt: string; assignmentId?: string; attemptId?: string; lease?: string; sessionId?: string; reason?: string; ownerIds?: string[]; attemptLeases?: string[]; pauseIntent?: PauseIntent; stopIntent?: StopIntent }[]
 }
 /** Immutable question version; answers are append-only and only the first valid one is consumed. */
 export interface AttentionAnswer { id: string; questionId: string; version: number; actor: ActorRef; source: string; text: string; at: string; consumed?: true; conflict?: true }

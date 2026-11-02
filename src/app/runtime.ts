@@ -144,6 +144,12 @@ export class Runtime extends Service implements SourceHost {
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         checkpointFiles: ticket => ticket.projectId ? artifacts.list(ticket.projectId, ticket.id).filter(item => item.status === 'registered').map(item => item.path) : [],
         reportReady: (ticket, assignment, attempt) => reports.reports(ticket.id).some(report => report.attemptId === attempt.id && report.lease === attempt.lease && report.assignmentId === assignment.id && report.state === 'ready'),
+        evidenceReady: (ticket, assignment, attempt) => {
+          const related = reports.reports(ticket.id).filter(report => report.attemptId === attempt.id && report.lease === attempt.lease && report.assignmentId === assignment.id)
+          if (related.some(report => report.artifacts.some(ref => { try { artifacts.read(attempt.projectId, ref.id, ref.contentVersion); return false } catch { return true } }))) return false
+          return !artifacts.list(attempt.projectId, ticket.id).some(item => item.attemptId === attempt.id && item.lease === attempt.lease && item.status === 'writing')
+        },
+        outboundUnknown: ticket => store.db.prepare("SELECT 1 FROM outbox WHERE json_extract(value, '$.ticketId') = ? AND json_extract(value, '$.reconciliation.state') = 'unknown' LIMIT 1").get(ticket.id) !== undefined,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),

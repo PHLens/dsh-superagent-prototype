@@ -478,6 +478,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/project-worker-runtime.spec.ts` | Registered native tools with Session guards, shared worker slots and completed confirmation replay/explicit rerun through the coordinator |
 | `tests/lifecycle-boundaries.spec.ts` | Durable shutdown fences, missing/unloaded owner jobs, fresh retry leases, failed resume gates, pause settle coalescing, stale-worker fencing, semantic review reuse and Store reopen receipt boundaries |
 | `tests/reconciliation.spec.ts` | Authenticated owner reconciliation contract, strict operation schema and persisted server-owned evidence |
+| `tests/t5-reconcile-boundaries.spec.ts` | Permanent reconciliation boundaries for post-await jobs, intent and lease CAS, attempt repair, artifact journals, outbound receipts and failure recovery |
 | `tests/backup.spec.ts` | WAL-inclusive recovery snapshots, credential exclusions, incomplete capture markers, confined hash-verified restore and inert recovery profile |
 | `tests/backup-service.spec.ts` | Scheduler replacement, concurrent run coalescing, retention configuration and stopped-service behavior |
 | `tests/projects.spec.ts` | Project identity and Ticket/Assignment ownership; unauthorized drafts never execute |
