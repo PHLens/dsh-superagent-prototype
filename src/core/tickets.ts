@@ -181,7 +181,7 @@ export class Tickets extends EnginePart {
     lifecycle.pause = { intent: 'resume', state: 'running', at, observedAt: at }
     lifecycle.observed = { state: 'unknown', at, reason: 'resume-requested' }
     ticket.lifecycle = lifecycle; ticket.updatedAt = at; this.repo.tickets.save(ticket)
-    if (liveTicket(ticket) && !waitsForPerson(ticket)) this.wake(ticketId)
+    if (!ticket.projectId && liveTicket(ticket) && !waitsForPerson(ticket)) this.wake(ticketId)
     return ticket
   }
   /** Confirms an external stop only after the host reports that execution exited. */
@@ -192,9 +192,8 @@ export class Tickets extends EnginePart {
       ...(lifecycle.pause.intent === 'pause' && state === 'idle' ? { state: 'paused' as const } : {}) }
     lifecycle.stop = { ...lifecycle.stop, observedAt: at,
       ...(lifecycle.stop.intent === 'stop' && state === 'exited' ? { state: 'exited' as const } : {}) }
-    ticket.lifecycle = lifecycle; ticket.updatedAt = at
+    ticket.lifecycle = lifecycle; ticket.updatedAt = at; this.repo.tickets.save(ticket)
     if (lifecycle.stop.state === 'exited' && !ticket.ended) this.end(ticketId, 'human', 'stopped', at, reason)
-    else this.repo.tickets.save(ticket)
     return this.require(ticketId)
   }
   checkpoint(ticketId: string, files: readonly string[], assignmentId?: string, attemptId?: string): Ticket {

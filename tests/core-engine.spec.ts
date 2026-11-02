@@ -42,6 +42,10 @@ function harness(policyOverrides: Partial<Policy> = {}, { emit, prepareTicket }:
   }
   const engine = new Engine({ repo, scope, policy: () => policy, assessor, executor, outbox: queued,
     ...emit ? { emit } : {}, ...prepareTicket ? { prepareTicket } : {}, now: () => new Date(Date.UTC(2026, 8, 23, 0, 0, clock)).toISOString() })
+  // The in-memory executor reports the native worker's immediate exit; production DSH reports this after Agent.whenIdle().
+  executor.stop = vi.fn((ticket, _assignment, reason) => {
+    if (repo.tickets.get(ticket.id)?.lifecycle?.stop.state !== 'exited') engine.observeTicket(ticket.id, 'exited', reason)
+  })
   /** Simulate the executor starting queued assignments (unless `launch` is false) and delivering pending ticket inputs. */
   function settle({ launch = true } = {}) {
     for (;;) {
@@ -366,7 +370,7 @@ describe('resume and stop', () => {
   it('keeps a ticket a person stopped ended: the stop withdrew its mandate', async () => {
     const h = harness()
     const ticketId = await ended(h, 'human')
-    expect(h.executor.stop).toHaveBeenCalledOnce()
+    expect(h.executor.stop).toHaveBeenCalled()
     h.engine.receive(trigger('2')); h.pump()
     expect(h.repo.tickets.get(ticketId)).toMatchObject({ ended: expect.objectContaining({ by: 'human' }) })
     expect(h.executor.start).toHaveBeenCalledOnce()

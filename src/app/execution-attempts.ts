@@ -48,7 +48,8 @@ export class ExecutionAttempts {
     const assignment = ticket?.assignments.find(item => item.id === attempt?.assignmentId)
     const auth = assignment?.contract && ticket?.authorizations?.find(item => item.id === assignment.contract!.authorizationId)
     const newest = this.all().findLast(item => item.assignmentId === attempt?.assignmentId)
-    if (!attempt || !ticket || !assignment?.contract || (!receipt && ticket.ended) || ticket.projectId !== attempt.projectId || assignment.projectId !== attempt.projectId
+    const lifecycleBlocked = ticket?.lifecycle && (ticket.lifecycle.pause.intent === 'pause' || ticket.lifecycle.stop.intent === 'stop')
+    if (!attempt || !ticket || !assignment?.contract || (!receipt && (ticket.ended || lifecycleBlocked)) || ticket.projectId !== attempt.projectId || assignment.projectId !== attempt.projectId
       || assignment.ticketId !== ticket.id || (!receipt && assignment.state === 'ended') || !auth || auth.revokedAt || newest?.lease !== attempt.lease
       || !(receipt ? ['prepared', 'running', 'ended'] : ['prepared', 'running']).includes(attempt.status)) throw new Error('Stale or unauthorized worker execution')
     this.validateDirectory(attempt)

@@ -166,6 +166,12 @@ export class Engine {
   retryTicket(ticketId: string): Ticket { return this.repo.atomic(() => this.tickets.retry(ticketId)) }
   pauseTicket(ticketId: string): Ticket { return this.repo.atomic(() => this.tickets.pause(ticketId)) }
   resumeTicket(ticketId: string): Ticket { return this.repo.atomic(() => this.tickets.resume(ticketId)) }
+  observeTicket(ticketId: string, state: Parameters<Tickets['observe']>[1], reason?: string): Ticket {
+    return this.repo.atomic(() => this.tickets.observe(ticketId, state, reason))
+  }
+  checkpointTicket(ticketId: string, files: readonly string[], assignmentId?: string, attemptId?: string): Ticket {
+    return this.repo.atomic(() => this.tickets.checkpoint(ticketId, files, assignmentId, attemptId))
+  }
   answerAttention(ticketId: string, version: number, actor: ActorRef, source: string, text: string, questionId?: string) {
     return this.repo.atomic(() => this.tickets.answerAttention(ticketId, version, actor, source, text, questionId))
   }
@@ -272,4 +278,4 @@ export type EngineForPeople = Pick<Engine, 'stopTicket' | 'retryTicket' | 'pause
 export type EngineForSettings = Pick<Engine, 'policyChanged'>
 /** What the Executor tells the Engine, and what its workers ask of it. */
 export type EngineForExecutor = Pick<Engine, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed'
-  | 'assignmentInterrupted' | 'report' | 'markUnrelated' | 'handback' | 'followForContext' | 'reply'>
+  | 'assignmentInterrupted' | 'report' | 'markUnrelated' | 'handback' | 'followForContext' | 'reply' | 'observeTicket' | 'checkpointTicket'>

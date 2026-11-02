@@ -150,6 +150,42 @@ it('stops the actual project Session through POST while retaining its slot until
   await waitUntil(() => h.runtime.projectCoordinator.attempts.bySession(attempt.sessionId)?.status === 'ended')
 })
 
+it('holds a paused project until native idle and resumes the same prepared execution', async () => {
+  const { plan, project } = confirmTask('pause-resume-native')
+  h.runtime.executor.dispatchProjects(); await waitUntil(() => running().length === 1)
+  const attempt = running()[0]!, agent = h.agents.get(attempt.sessionId)!
+  await h.runGuardedTool(attempt.sessionId, 'project_write_artifact', { operation_id: 'checkpoint-file', output: 'note', name: 'checkpoint.md', content: 'Saved before pause' })
+  const file = h.runtime.projectCoordinator.artifacts.list(project.id, plan.ticketId)[0]!
+  agent.cancel.mockImplementation(() => {})
+  h.runtime.engine.pauseTicket(plan.ticketId)
+  h.runtime.executor.dispatchProjects()
+  await waitUntil(() => agent.cancel.mock.calls.length > 0)
+  expect(h.runtime.store.tickets.get(plan.ticketId)?.lifecycle?.pause.state).toBe('pausing')
+  await expect(h.runGuardedTool(attempt.sessionId, 'project_worker_context', {})).rejects.toThrow(/unauthorized/)
+  agent.status = 'idle'
+  await waitUntil(() => h.runtime.store.tickets.get(plan.ticketId)?.lifecycle?.pause.state === 'paused')
+  expect(h.runtime.store.tickets.get(plan.ticketId)?.lifecycle?.checkpoint?.files).toEqual([file.path])
+  h.runtime.executor.dispatchProjects()
+  expect(h.runtime.projectCoordinator.attempts.all()).toHaveLength(1)
+  h.runtime.engine.resumeTicket(plan.ticketId)
+  h.runtime.executor.dispatchProjects()
+  await waitUntil(() => agent.status === 'running')
+  expect(h.runtime.projectCoordinator.attempts.all()).toHaveLength(1)
+  expect(h.runtime.projectCoordinator.attempts.bySession(attempt.sessionId)?.cwd).toBe(attempt.cwd)
+  agent.status = 'idle'
+})
+
+it('does not dispatch a project whose pause or stop intent precedes its first worker', async () => {
+  const paused = confirmTask('pause-before-launch'), stopped = confirmTask('stop-before-launch')
+  h.runtime.engine.pauseTicket(paused.plan.ticketId)
+  h.runtime.engine.stopTicket(stopped.plan.ticketId)
+  h.runtime.executor.dispatchProjects()
+  await waitUntil(() => h.runtime.store.tickets.get(paused.plan.ticketId)?.lifecycle?.pause.state === 'paused')
+  await waitUntil(() => h.runtime.store.tickets.get(stopped.plan.ticketId)?.lifecycle?.stop.state === 'exited')
+  expect(h.runtime.projectCoordinator.attempts.all()).toHaveLength(0)
+  expect(h.runtime.store.tickets.get(stopped.plan.ticketId)?.ended?.outcome).toBe('stopped')
+})
+
 it('never cancels on stop rollback or follows a managed mapping belonging to another Ticket', async () => {
   const { plan } = confirmTask('stop-rollback')
   h.runtime.executor.dispatchProjects(); await waitUntil(() => running().length === 1)
