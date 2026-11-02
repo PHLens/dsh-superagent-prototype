@@ -15,6 +15,7 @@ export interface PlanServiceOptions {
   repo: ProjectRepositories
   /** Host resolves identity and original user intent from its trusted request/session context. */
   resolveConfirmation: (request: Readonly<ConfirmPlan>) => TrustedPlanConfirmation | undefined
+  validateArtifact?: (projectId: string, artifactId: string, contentVersion: string) => boolean
   now?: () => string
   id?: () => string
 }
@@ -49,10 +50,14 @@ function content(plan: PlanContent): PlanContent {
     || !Array.isArray(plan.outputs) || !plan.outputs.length || !plan.outputs.every(text)
     || !Array.isArray(plan.resources) || !plan.resources.every(text)) throw new UserError('invalidPlan')
   // Explicitly copy the contract fields; unknown model-supplied fields grant no authority.
-  return copy({ goal: plan.goal, scope: plan.scope, outputs: plan.outputs, resources: plan.resources, environment: plan.environment, cost: plan.cost, completion: plan.completion })
+  if (plan.acceptance && (!Number.isSafeInteger(plan.acceptance.version) || plan.acceptance.version < 1 || !['registered-files', 'human-review'].includes(plan.acceptance.mode))) throw new UserError('invalidPlan')
+  if (plan.artifactInputs !== undefined && (!Array.isArray(plan.artifactInputs) || !plan.artifactInputs.every(item => item && text(item.artifactId) && text(item.contentVersion)))) throw new UserError('invalidPlanInput')
+  return copy({ goal: plan.goal, scope: plan.scope, outputs: plan.outputs, resources: plan.resources, environment: plan.environment, cost: plan.cost, completion: plan.completion,
+    ...(plan.acceptance ? { acceptance: { version: plan.acceptance.version, mode: plan.acceptance.mode } } : {}),
+    ...(plan.artifactInputs ? { artifactInputs: plan.artifactInputs.map(item => ({ artifactId: item.artifactId, contentVersion: item.contentVersion })) } : {}) })
 }
 
-/** No dispatcher: a confirmed target and its pending Assignment wait for the T4 executor. */
+/** Plan authorization and immutable Assignment contracts; runtime dispatch is owned by the executor. */
 export class Plans {
   private readonly now: () => string
   private readonly makeId: () => string
@@ -60,11 +65,11 @@ export class Plans {
     this.now = options.now ?? (() => new Date().toISOString())
     this.makeId = options.id ?? (() => crypto.randomUUID?.() ?? key('plan', Date.now().toString(36), Math.random().toString(36)))
   }
-  private ticket(projectId: string, ticketId: string): Ticket {
+  private ticket(projectId: string, ticketId: string, historical = false): Ticket {
     if (!this.options.repo.projects.get(projectId)) throw new UserError('unknownProject')
     const ticket = this.options.repo.tickets.get(ticketId)
     if (!ticket || ticket.projectId !== projectId) throw new UserError('projectOwnership')
-    if (ticket.ended) throw new UserError('ticketEnded')
+    if (ticket.ended && !historical) throw new UserError('ticketEnded')
     return ticket
   }
   private operation(ticket: Ticket, id: string | undefined, payload: string): PlanOperation | undefined {
@@ -77,7 +82,7 @@ export class Plans {
     (ticket.planOperations ??= []).push(operation)
   }
   get(projectId: string, ticketId: string, revision?: number): PlanRevision {
-    const ticket = this.ticket(projectId, ticketId)
+    const ticket = this.ticket(projectId, ticketId, true)
     const plan = revision === undefined ? ticket.planRevisions?.at(-1) : ticket.planRevisions?.find(item => item.revision === revision)
     if (!plan) throw new UserError('unknownPlanRevision')
     return copy(plan)
@@ -88,6 +93,7 @@ export class Plans {
       const payload = canonical({ kind: 'save', projectId: input.projectId, ticketId: input.ticketId, expectedRevision: input.expectedRevision, plan })
       const old = this.operation(ticket, input.operationId, payload)
       if (old) return copy(ticket.planRevisions!.find(item => item.revision === old.planRevision)!)
+      for (const ref of plan.artifactInputs ?? []) if (!this.options.validateArtifact?.(input.projectId, ref.artifactId, ref.contentVersion)) throw new UserError('invalidPlanInput')
       const current = ticket.planRevisions?.at(-1)?.revision ?? 0
       if (input.expectedRevision !== current) throw new UserError('stalePlanRevision')
       const at = this.now(), revision: PlanRevision = { ...plan, projectId: ticket.projectId!, ticketId: ticket.id, revision: current + 1, createdAt: at }
@@ -101,7 +107,7 @@ export class Plans {
   }
   confirm(input: ConfirmPlan): PlanConfirmationResult {
     return this.options.repo.atomic(() => {
-      const ticket = this.ticket(input.projectId, input.ticketId)
+      const ticket = this.ticket(input.projectId, input.ticketId, true)
       // Rebuild this request so model-supplied actor/message/explicit fields cannot reach the trusted port.
       const request: ConfirmPlan = { projectId: input.projectId, ticketId: input.ticketId, planRevision: input.planRevision, operationId: input.operationId, intent: input.intent }
       const trusted = this.options.resolveConfirmation(Object.freeze(request))
@@ -123,6 +129,13 @@ export class Plans {
       if (!existing && input.intent === 'rerun' && !ticket.authorizations?.some(item => item.planRevision === input.planRevision && item.intent === 'execute')) throw new UserError('planRerunRequired')
       let authorization = existing
       if (!authorization) {
+        if (ticket.ended) {
+          const latestAuthorization = ticket.authorizations?.findLast(item => item.planRevision === plan.revision)
+          if (input.intent !== 'rerun' || ticket.ended.outcome !== 'completed' || ticket.ended.by !== 'executor'
+            || latestAuthorization?.revokedAt || !ticket.assignments.some(item => item.contract)
+            || !ticket.assignments.filter(item => item.contract).every(item => item.state === 'ended' && item.report?.state === 'ready')) throw new UserError('ticketEnded')
+          delete ticket.ended
+        }
         const at = this.now(), id = this.makeId(), targetId = this.makeId()
         authorization = { id, projectId: ticket.projectId!, ticketId: ticket.id, planRevision: plan.revision, actor: copy(trusted.actor), message: copy(trusted.message), ...(trusted.originalMessage !== undefined ? { originalMessage: copy(trusted.originalMessage) } : {}), intent: input.intent, intentId, targetId, createdAt: at }
         ;(ticket.authorizations ??= []).push(authorization)
@@ -159,25 +172,32 @@ export class Plans {
   }
   registerAssignment(input: RegisterPlanAssignment): Assignment {
     return this.options.repo.atomic(() => {
-      const ticket = this.ticket(input.projectId, input.ticketId)
+      const ticket = this.ticket(input.projectId, input.ticketId, true)
       const authorization = ticket.authorizations?.find(item => item.id === input.authorizationId)
       const target = ticket.executionTargets?.find(item => item.id === input.targetId)
       if (!authorization || !target || target.authorizationId !== authorization.id || authorization.targetId !== target.id) throw new UserError('unknownPlanAuthorization')
       if (authorization.revokedAt) throw new UserError('planAuthorizationRevoked')
       if (authorization.projectId !== input.projectId || authorization.ticketId !== input.ticketId) throw new UserError('projectOwnership')
+      const old = ticket.assignments.find(item => item.contract?.targetId === target.id)
       const plan = ticket.planRevisions?.find(item => item.revision === input.planRevision)
       if (!plan || authorization.planRevision !== input.planRevision || target.planRevision !== input.planRevision
-        || ticket.planRevisions?.at(-1)?.revision !== input.planRevision) throw new UserError('stalePlanRevision')
-      const inputs = copy(input.inputs ?? [])
+        || (!old && ticket.planRevisions?.at(-1)?.revision !== input.planRevision)) throw new UserError('stalePlanRevision')
+      if (!old && ticket.ended) throw new UserError('ticketEnded')
+      const inputs = copy(input.inputs ?? plan.artifactInputs?.map(item => ({ kind: 'artifact' as const, ...item })) ?? [])
+      for (const pinned of plan.artifactInputs ?? []) {
+        if (!inputs.some(item => item.kind === 'artifact' && item.artifactId === pinned.artifactId && item.contentVersion === pinned.contentVersion)) throw new UserError('invalidPlanInput')
+      }
       if (!Array.isArray(inputs)) throw new UserError('invalidPlanInput')
       for (const ref of inputs) {
-        // No trusted artifact registry exists before T4. Reject artifact references, including notes dressed up as artifacts.
+        if (ref?.kind === 'artifact') {
+          if (!this.options.validateArtifact?.(input.projectId, ref.artifactId, ref.contentVersion)) throw new UserError('invalidPlanInput')
+          continue
+        }
         if (!ref || ref.kind !== 'dependency' || ref.ticketId !== ticket.id || typeof ref.assignmentId !== 'string' || !ref.assignmentId.trim()
           || !ticket.assignments.some(item => item.id === ref.assignmentId && item.contract
             && item.ticketId === ticket.id && item.projectId === ticket.projectId)) throw new UserError('invalidPlanInput')
       }
       const contract = { authorizationId: authorization.id, targetId: target.id, planRevision: plan.revision, plan: content(plan), inputs }
-      const old = ticket.assignments.find(item => item.contract?.targetId === target.id)
       if (old) {
         if (canonical(old.contract) !== canonical(contract)) throw new UserError('planAssignmentConflict')
         return copy(old)

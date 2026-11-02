@@ -341,10 +341,13 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/conversation-store.ts` | Durable owned business conversation, input idempotency, per-project leases, mapping generations and prompt checkpoints |
 | `src/app/project-coordinator.ts` | Independent project discussion lanes, restart reconciliation, retry and coordinator lifecycle |
 | `src/app/project-plans.ts` | Authenticated project-plan adapter: persisted confirmation evidence, plan version anchoring, authorization and Assignment projection |
+| `src/app/execution-attempts.ts` | Server-owned Assignment execution identity, preparation evidence, filesystem boundaries and lease validation |
+| `src/app/artifact-store.ts` | Managed write intents, immutable SHA256 file versions, exact-version reads and interrupted-operation reconciliation |
+| `src/app/report-acceptance.ts` | Durable worker report receipts, independent version-bound acceptance decisions and deterministic completion returns |
 | `src/app/project-session.ts` | Verified native DSH Session/workspace/cwd adapter, completed-turn projection and restricted project reads |
 | `src/app/project-auth.ts` | Fail-closed project API authentication through DSH Host Connection admission and its stable owner principal |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
-| `src/app/migration.ts` | Schema 13 boundary: converts schema 10 records to their current legacy shape; adds no inferred project or authorization to legacy history |
+| `src/app/migration.ts` | Schema 15 boundary: preserves legacy history, transactional migrations and WAL-inclusive backups; execution/report/artifact tables grant no inferred authorization |
 | `src/app/effects.ts` | Effects |
 | `src/app/versions.ts` | `Versions`: a record kept as numbered snapshots with a pointer to the current one, for the settings and the prompts |
 | `src/app/cache.ts` | `TextCache`: texts kept in memory within a size, the least recently used dropped first |
@@ -459,14 +462,17 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |
-| `tests/migration.spec.ts` | Legacy migrations and schema 13: consistent WAL recovery snapshots, rollback, refusal of unsupported schemas and snapshot failures |
+| `tests/migration.spec.ts` | Legacy migrations and schema 14→15: consistent WAL recovery snapshots, rollback, refusal of unsupported schemas and snapshot failures |
 | `tests/project-store.spec.ts` | Project persistence, restart, rename/directory identity, isolation and transactional rollback |
 | `tests/project-conversation.spec.ts` | Business input/reply persistence, idempotency, ownership and project lane isolation |
 | `tests/coordinator-recovery.spec.ts` | Mapping replacement, prompt restart persistence and stale-generation/state rejection |
 | `tests/project-coordinator.spec.ts` | Project lane concurrency, durable dispatch, retry races and restart recovery |
 | `tests/project-session.spec.ts` | Completed durable turn projection, interrupted draft exclusion and Session message references |
 | `tests/project-auth.spec.ts` | Host admission, stable owner identity, authentication rejection and unavailable-host denial |
-| `tests/project-panel.spec.tsx` | Project creation, navigation, durable discussion status and retry behavior |
+| `tests/project-panel.spec.tsx` | Project creation, navigation, durable discussion, immutable artifact content and explicit semantic review |
+| `tests/project-execution.spec.ts` | Authorized worker context, file acceptance, independent owner decisions, terminal receipt replay and stale execution rejection |
+| `tests/artifact-recovery.spec.ts` | Interrupted write intent/effect reconciliation, fixed input versions, corruption/isolation rejection and durable returns after reopen |
+| `tests/project-worker-runtime.spec.ts` | Registered native tools with Session guards, shared worker slots and completed confirmation replay/explicit rerun through the coordinator |
 | `tests/projects.spec.ts` | Project identity and Ticket/Assignment ownership; unauthorized drafts never execute |
 | `tests/no-github-startup.spec.ts` | Startup and application project APIs without external accounts; resource-specific readiness and safe environment |
 | `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |

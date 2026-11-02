@@ -301,6 +301,11 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     server.projects.push(project); server.conversations[project.id] = { project, messages: [], tasks: [] }
     return { project }
   } },
+  'GET projects/:id/artifacts/:artifactId/:version': { answer: ({ params }) => {
+    const item = server.conversations[params.id]?.artifacts?.find(value => value.id === params.artifactId && value.contentVersion === params.version)
+    return item ? { id: item.id, name: item.name, contentVersion: item.contentVersion, content: 'Fixture artifact content' } : refuse(404, 'Unknown artifact')
+  } },
+  'POST projects/:id/acceptance': { body: true, answer: () => refuse(409, 'Fixture gate requires a registered report') },
   'GET projects/:id/conversation': { answer: ({ params }) => server.conversations[params.id] ?? refuse(404, 'Unknown project') },
   'POST projects/:id/messages': { body: true, answer: ({ params, body }) => {
     const conversation = server.conversations[params.id]

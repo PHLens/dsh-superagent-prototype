@@ -8,6 +8,7 @@ export interface PassesHost {
   readonly effects: Pick<Effects, 'kick' | 'idle'>
   readonly health: HealthEntry
   readonly lifetime: AbortSignal
+  projectPass?(): void
   configured(): boolean
   closing(): boolean
 }
@@ -55,12 +56,14 @@ export class Passes {
   /** Run one pass, coalescing concurrent callers into a single follow-up pass. */
   async pump(): Promise<void> {
     // Do not assess, dispatch, or send while waiting for setup; queued work waits for the restart that completes setup.
-    if (!this.host.configured() || this.host.closing()) return
+    if (this.host.closing()) return
     if (!this.pumping) return this.pumping = this.pumpOnce().finally(() => { this.pumping = undefined })
     const next = () => { this.pumpAgain = undefined; return this.pump() }
     return this.pumpAgain ??= this.pumping.then(next, next)
   }
   private async pumpOnce(): Promise<void> {
+    this.host.projectPass?.()
+    if (!this.host.configured()) return
     this.host.effects.kick()
     if (this.host.closing()) return
     // While processing is paused, the Engine only records the pause on active Evals so they do not expire.

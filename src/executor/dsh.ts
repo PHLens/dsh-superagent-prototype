@@ -11,6 +11,7 @@ import type { Machine } from '../deployment.ts'
 import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
 import type { Settings } from '../policy.ts'
 import type { Store } from '../app/store.ts'
+import type { ExecutionAttempts, Attempt } from '../app/execution-attempts.ts'
 import { Later, type Effects } from '../app/effects.ts'
 import { executionRoot, type Variable } from '../app/execution-environment.ts'
 import type { Sessions } from '../app/sessions.ts'
@@ -57,6 +58,7 @@ export function transient(error: unknown): boolean {
 const ticketWorktreeName = (name: string, id: string): string => `${WorktreeNameSchema.parse(name)}-${id.slice(0, 12)}`
 /** Host dependencies used by `DshExecutor`. */
 export interface ExecutorHost {
+  readonly attempts?: ExecutionAttempts
   /** DSH Cordis context: agents and their events, and the subprocess service used to run prepare commands. */
   readonly context: Context
   /** Where the Executor reports what happened to Assignments and Inputs. */
@@ -206,6 +208,57 @@ export class WorkerSlots {
  */
 export class DshExecutor implements Executor {
   private readonly disposers: (() => void)[] = []
+  private readonly projectLaunching = new Map<string, Promise<void>>()
+  private readonly projectObserved = new Set<string>()
+  /** Called by the existing pass loop; project workers use the same slots as legacy workers. */
+  dispatchProjects(): void {
+    const attempts = this.host.attempts
+    if (!attempts || this.host.closing()) return
+    for (const ticket of this.host.store.tickets.list().filter(item => item.projectId && !item.ended)) {
+      for (const assignment of ticket.assignments.filter(item => item.contract && item.state !== 'ended')) {
+        const existing = attempts.all().findLast(item => item.assignmentId === assignment.id)
+        if (existing && this.projectObserved.has(existing.id)) {
+          try { attempts.resolve(existing.sessionId) } catch { this.host.context.agents.get(existing.sessionId as SessionId)?.cancel({ kind: 'user' }, { keepInbox: false }); continue }
+          if (existing.status === 'running' && this.host.context.agents.get(existing.sessionId as SessionId)?.status === 'idle' && assignment.waitingReason === 'worker-running') {
+            assignment.waitingReason = 'worker-idle'; this.host.store.tickets.save(ticket)
+          }
+          continue
+        }
+        if (existing?.status === 'reconcile' || this.projectLaunching.has(ticket.id)) continue
+        if (attempts.all().some(item => item.ticketId === ticket.id && item.assignmentId !== assignment.id && item.status === 'running' && this.host.context.agents.get(item.sessionId as SessionId)?.status === 'running')) { assignment.waitingReason = 'worker-slot'; this.host.store.tickets.save(ticket); continue }
+        if (this.host.paused()) { assignment.waitingReason = 'processing-paused'; this.host.store.tickets.save(ticket); continue }
+        if (!assignment.contract!.inputs.every(input => input.kind !== 'dependency' || this.host.store.tickets.get(input.ticketId)?.assignments.some(item => item.id === input.assignmentId && item.state === 'ended' && item.report?.state === 'ready'))) {
+          assignment.waitingReason = 'dependency'; this.host.store.tickets.save(ticket); continue
+        }
+        try { this.slots.reserve(ticket.id, 'launch') } catch { assignment.waitingReason = 'worker-slot'; this.host.store.tickets.save(ticket); continue }
+        const operation = this.launchProject(ticket.id, assignment.id).finally(() => { this.projectLaunching.delete(ticket.id); this.slots.free(ticket.id) })
+        this.projectLaunching.set(ticket.id, operation)
+      }
+    }
+  }
+  private async launchProject(ticketId: string, assignmentId: string): Promise<void> {
+    const attempts = this.host.attempts!
+    let attempt: Attempt | undefined
+    try {
+      let ticket = this.host.store.tickets.get(ticketId)!, assignment = ticket.assignments.find(item => item.id === assignmentId)!
+      attempt = attempts.prepare(attempts.allocate(ticket, assignment))
+      const agent = await this.host.sessions.ensure(attempt.sessionId, attempt.cwd, `Project worker: ${ticket.title}`, 'worker')
+      attempts.resolve(agent.id)
+      if (this.host.closing() || this.host.paused()) throw new Error('Execution paused before delivery')
+      ticket = this.host.store.tickets.get(ticketId)!; assignment = ticket.assignments.find(item => item.id === assignmentId)!
+      assignment.state = 'running'; assignment.startedAt ??= now(); assignment.waitingReason = 'worker-running'
+      attempt = attempts.bySession(agent.id)!; attempt.status = 'running'
+      this.host.store.atomic(() => { attempts.save(attempt!); this.host.store.tickets.save(ticket) })
+      const requestId = `project-execute:${attempt.id}:${attempt.lease}`
+      if (!await this.host.sessions.holds(agent.id, requestId)) await this.host.sessions.prompt(agent.id, requestId,
+        `Execute exactly the confirmed plan returned by project_worker_context. Create its named file outputs and submit a versioned report.`, 'queue', () => { attempts.resolve(agent.id) })
+      this.projectObserved.add(attempt.id)
+    } catch (error) {
+      if (attempt) { attempt = attempts.bySession(attempt.sessionId) ?? attempt; attempt.status = 'reconcile'; attempt.error = String(error); attempts.save(attempt) }
+      const ticket = this.host.store.tickets.get(ticketId), assignment = ticket?.assignments.find(item => item.id === assignmentId)
+      if (ticket && assignment) { assignment.waitingReason = 'preparation-reconciliation'; assignment.report = { state: 'failed', summary: String(error), at: now() }; this.host.store.tickets.save(ticket) }
+    }
+  }
   private readonly slots: WorkerSlots
   /** Transient failure counts tried so far: keyed by `assignment.id` for worker turns and `launch:<assignment.id>` for launches. */
   private readonly transient = new Map<string, number>()
@@ -226,7 +279,7 @@ export class DshExecutor implements Executor {
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
   constructor(private readonly host: ExecutorHost) {
-    this.slots = new WorkerSlots(() => host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => ticket.id),
+    this.slots = new WorkerSlots(() => [...new Set([...host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => ticket.id), ...host.attempts?.all().filter(item => item.status === 'running' && host.context.agents.get(item.sessionId as SessionId)?.status === 'running').map(item => item.ticketId) ?? []])],
       () => host.store.settings().executor.maxWorkers)
     // Each launch reserves a worker slot so launches run concurrently while slots are free.
     host.effects.handle('launch', payload => this.launchQueued(payload), { limit: () => host.paused() ? 0 : this.slots.launches(),
@@ -392,7 +445,9 @@ export class DshExecutor implements Executor {
    * of the jobs left to a person, which were killed, and cancel a worker turn that started meanwhile, keeping its inbox.
    */
   async shutdown(): Promise<void> {
-    const agents = this.host.store.tickets.list().map(ticket => this.host.context.agents.get(workerSessionId(ticket.id) as SessionId))
+    await Promise.allSettled(this.projectLaunching.values())
+    const ids = [...this.host.store.tickets.list().filter(ticket => !ticket.projectId).map(ticket => workerSessionId(ticket.id)), ...this.host.attempts?.all().map(item => item.sessionId) ?? []]
+    const agents = ids.map(id => this.host.context.agents.get(id as SessionId))
       .filter((agent): agent is Agent => agent !== undefined)
     const stop = async () => {
       await Promise.allSettled(agents.map(agent => stopBackground(this.host.context, agent.id, 'dsh-superagent stopped', true)))
@@ -404,7 +459,7 @@ export class DshExecutor implements Executor {
     await until(stop(), undefined, SHUTDOWN_STOP_MS)
   }
   /** Number of open tickets whose worker holds a worker slot: its turn runs, or its shell jobs or subagents still run after its turn ended. */
-  activeCount(): number { return this.host.store.tickets.open().filter(ticket => this.running(ticket)).length }
+  activeCount(): number { return this.host.store.tickets.open().filter(ticket => this.running(ticket)).length + (this.host.attempts?.all().filter(item => item.status === 'running' && this.host.context.agents.get(item.sessionId as SessionId)?.status === 'running').length ?? 0) }
   /** Whether a ticket's worker holds a worker slot: its turn runs, or its shell jobs or subagents do after its turn ended. */
   private running(ticket: Ticket): boolean {
     if (!runningAssignment(ticket)) return false

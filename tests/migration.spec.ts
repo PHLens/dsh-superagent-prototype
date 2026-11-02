@@ -34,6 +34,43 @@ function schema10(path: string, records: Record<string, unknown>, rows: { ticket
   db.exec('CREATE TABLE inbox (id TEXT PRIMARY KEY, value TEXT NOT NULL)')
   db.close()
 }
+function schema14(path: string): DatabaseSync {
+  new Store(path).close()
+  const db = new DatabaseSync(path)
+  db.exec('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; DROP TABLE execution_attempt; DROP TABLE worker_artifact; DROP TABLE worker_report; DROP TABLE acceptance_decision')
+  db.prepare("UPDATE kv SET value='14' WHERE key='schema'").run()
+  db.prepare('INSERT INTO kv VALUES (?, ?)').run('t4-wal-only', JSON.stringify({ committed: true }))
+  return db
+}
+it('migrates schema 14 to 15 with a consistent WAL-inclusive recovery snapshot and no inferred executions', () => {
+  const path = join(directory, 't4.sqlite'), writer = schema14(path)
+  const store = new Store(path)
+  expect(store.get('schema')).toBe(15)
+  expect(store.get('t4-wal-only')).toEqual({ committed: true })
+  for (const table of ['execution_attempt', 'worker_artifact', 'worker_report', 'acceptance_decision']) expect(store.db.prepare(`SELECT * FROM ${table}`).all()).toEqual([])
+  const snapshots = readdirSync(`${path}.snapshots`)
+  expect(snapshots).toHaveLength(1)
+  const snapshot = new DatabaseSync(join(`${path}.snapshots`, snapshots[0]!), { readOnly: true })
+  expect(snapshot.prepare("SELECT value FROM kv WHERE key='schema'").get()?.value).toBe('14')
+  expect(snapshot.prepare("SELECT value FROM kv WHERE key='t4-wal-only'").get()?.value).toBe('{"committed":true}')
+  expect(snapshot.prepare("SELECT name FROM sqlite_master WHERE name='execution_attempt'").get()).toBeUndefined()
+  snapshot.close(); store.close(); writer.close()
+  const reopened = new Store(path)
+  expect(readdirSync(`${path}.snapshots`)).toEqual(snapshots); reopened.close()
+})
+it('rolls back all T4 tables and retains schema 14 plus its recovery snapshot when version commit fails', () => {
+  const path = join(directory, 't4-rollback.sqlite'), writer = schema14(path)
+  writer.exec("CREATE TRIGGER fail_t4 BEFORE UPDATE ON kv WHEN NEW.key='schema' AND NEW.value='15' BEGIN SELECT RAISE(ABORT, 'injected migration failure'); END")
+  expect(() => new Store(path)).toThrow(/migration/)
+  expect(writer.prepare("SELECT value FROM kv WHERE key='schema'").get()?.value).toBe('14')
+  for (const table of ['execution_attempt', 'worker_artifact', 'worker_report', 'acceptance_decision']) expect(writer.prepare('SELECT name FROM sqlite_master WHERE name=?').get(table)).toBeUndefined()
+  const snapshots = readdirSync(`${path}.snapshots`)
+  expect(snapshots).toHaveLength(1)
+  const snapshot = new DatabaseSync(join(`${path}.snapshots`, snapshots[0]!), { readOnly: true })
+  expect(snapshot.prepare("SELECT value FROM kv WHERE key='schema'").get()?.value).toBe('14')
+  expect(snapshot.prepare("SELECT value FROM kv WHERE key='t4-wal-only'").get()?.value).toBe('{"committed":true}')
+  snapshot.close(); writer.close()
+})
 it('takes a consistent pre-migration snapshot including committed WAL records', () => {
   const path = join(directory, 'db.sqlite')
   new Store(path).close()
@@ -274,7 +311,7 @@ it('changes nothing when one step fails: the database stays at schema 10 as it w
     updatedAt: '2', mandate: mandate({ via: 'listed' }), meta: { sourceTriggerId: 'trig-1', workspace: '/w/fix-1' } }
   // The current settings must validate; an invalid value aborts the migration transaction.
   schema10(path, { settings: { executor: { maxWorkers: 'many' } } }, { ticket: [ticket] })
-  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 14 failed: the settings: /)
+  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 15 failed: the settings: /)
   const db = new DatabaseSync(path)
   expect(db.prepare("SELECT value FROM kv WHERE key='schema'").get()).toEqual({ value: '10' })
   expect(JSON.parse(String(db.prepare("SELECT value FROM ticket WHERE id='t1'").get()!.value))).toMatchObject({ meta: { workspace: '/w/fix-1' } })
@@ -547,7 +584,7 @@ it('names the ticket it stopped at when a ticket does not read, and leaves the d
   const path = join(directory, 'db.sqlite')
   const { inputs: _inputs, ...broken } = ticket10('t9')
   schema10(path, {}, { ticket: [broken] })
-  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 14 failed: ticket t9: /)
+  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 15 failed: ticket t9: /)
   const db = new DatabaseSync(path)
   expect(db.prepare("SELECT value FROM kv WHERE key='schema'").get()).toEqual({ value: '10' })
   expect(JSON.parse(String(db.prepare("SELECT value FROM ticket WHERE id='t9'").get()!.value))).toEqual(broken)

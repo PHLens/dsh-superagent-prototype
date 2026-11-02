@@ -12,9 +12,15 @@ import { ProjectPlans } from './project-plans.ts'
 import type { Store } from './store.ts'
 import type { PlanIntent } from '../core/index.ts'
 import type { Prompts } from './prompts.ts'
+import { ExecutionAttempts } from './execution-attempts.ts'
+import { ArtifactStore } from './artifact-store.ts'
+import { ReportAcceptance } from './report-acceptance.ts'
 
 /** Serializes durable project inputs across independent DSH coordinator Sessions. */
 export class ProjectCoordinator {
+  readonly attempts: ExecutionAttempts
+  readonly artifacts: ArtifactStore
+  readonly reports: ReportAcceptance
   readonly conversations: ConversationStore
   readonly plans: ProjectPlans
   private readonly sessions: ProjectSessions
@@ -23,6 +29,9 @@ export class ProjectCoordinator {
   private stopped = false
   constructor(private readonly ctx: Context, private readonly store: Store, private readonly projects: Projects,
     private readonly root: string, private readonly signal: AbortSignal, private readonly prompts: Prompts, private readonly timeoutMs = 120_000) {
+    this.attempts = new ExecutionAttempts(store, root)
+    this.artifacts = new ArtifactStore(store, this.attempts)
+    this.reports = new ReportAcceptance(store, this.attempts, this.artifacts)
     this.conversations = new ConversationStore(store)
     this.plans = new ProjectPlans(store, projects, this.conversations)
     this.sessions = new ProjectSessions(ctx, store, signal)
@@ -49,8 +58,17 @@ export class ProjectCoordinator {
     const failure = messages.findLast(message => message.status === 'error')
     const error = this.problems.get(projectId) ?? failure?.error
     const tasks = this.plans.tickets(actorId, projectId)
-    return { project, messages, tasks, coordinator: { status: messages.some(message => message.status === 'running') ? 'running' as const : error ? 'error' as const : 'idle' as const,
+    return { project, messages, tasks, artifacts: this.artifacts.view(projectId), reports: tasks.flatMap(task => this.reports.reports(task.id)), decisions: tasks.flatMap(task => this.reports.decisions(task.id)), coordinator: { status: messages.some(message => message.status === 'running') ? 'running' as const : error ? 'error' as const : 'idle' as const,
       ...(error ? { error } : {}) } }
+  }
+  artifact(actorId: string, projectId: string, id: string, version: string) {
+    this.project(actorId, projectId)
+    const item = this.artifacts.read(projectId, id, version)
+    return { id: item.id, name: item.name, contentVersion: item.contentVersion, content: item.content }
+  }
+  decide(actorId: string, projectId: string, input: Parameters<ReportAcceptance['decide']>[2]) {
+    this.project(actorId, projectId)
+    return this.reports.decide(actorId, projectId, input)
   }
   send(actorId: string, projectId: string, input: { requestId: string; text: string; ticketId?: string; planRevision?: number }) {
     this.project(actorId, projectId)

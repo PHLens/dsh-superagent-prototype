@@ -219,6 +219,10 @@ export interface PlanContent {
   readonly environment: string
   readonly cost: string
   readonly completion: string
+  /** Confirmed deterministic file checks, or an explicit independent human semantic gate. */
+  readonly acceptance?: { readonly version: number; readonly mode: 'registered-files' | 'human-review' }
+  /** Exact registered project artifact versions approved with this plan. */
+  readonly artifactInputs?: readonly { readonly artifactId: string; readonly contentVersion: string }[]
 }
 export interface PlanRevision extends PlanContent {
   readonly projectId: string
@@ -295,7 +299,7 @@ export interface Assignment {
   state: AssignmentState
   /** Present for T3 assignments only; these wait for the T4 project executor. */
   contract?: PlanAssignmentContract
-  waitingReason?: 'executor-unavailable'
+  waitingReason?: 'executor-unavailable' | 'worker-slot' | 'preparation-reconciliation' | 'worker-running' | 'worker-idle' | 'semantic-review' | 'missing-artifacts' | 'unresolved-items' | 'changes_required' | 'needs_judgment' | 'failed' | 'blocked' | 'dependency' | 'processing-paused'
   createdAt: string
   startedAt?: string
   endedAt?: string
@@ -415,7 +419,7 @@ export interface Project {
 }
 
 /** Validate durable aggregate ownership, including attempted legacy rebinding and assignment transfer. */
-export function validateTicketOwnership(ticket: Ticket, previous?: Ticket, project?: (id: string) => Project | undefined, others?: Iterable<Ticket>): void {
+export function validateTicketOwnership(ticket: Ticket, previous?: Ticket, project?: (id: string) => Project | undefined, others?: Iterable<Ticket>, artifact?: (projectId: string, id: string, version: string) => boolean): void {
   if (previous && previous.projectId !== ticket.projectId) throw new Error('Ticket project ownership is immutable')
   if (ticket.projectId !== undefined) {
     if (!ticket.projectId || (ticket.projectStage !== 'draft' && ticket.projectStage !== 'awaiting-confirmation' && ticket.projectStage !== 'confirmed') || (project && !project(ticket.projectId))) throw new Error('Unknown or invalid project ownership')
@@ -487,10 +491,13 @@ export function validateTicketOwnership(ticket: Ticket, previous?: Ticket, proje
       if (!unchanged(contract.plan, expected)) throw new Error('Assignment contract does not match plan revision')
       if (!Array.isArray(contract.inputs)) throw new Error('Assignment input ownership does not match')
       for (const input of contract.inputs) {
-        // T3 has no artifact registry: note/trigger inputs cannot stand in for versioned artifacts.
+        if (input?.kind === 'artifact') {
+          if (!artifact?.(ticket.projectId!, input.artifactId, input.contentVersion)) throw new Error('Assignment artifact must reference a registered project content version')
+          continue
+        }
         if (!input || input.kind !== 'dependency' || input.ticketId !== ticket.id || typeof input.assignmentId !== 'string' || !input.assignmentId.trim()
           || input.assignmentId === assignment.id || !ticket.assignments.some(item => item.id === input.assignmentId && item.contract
-            && item.ticketId === ticket.id && item.projectId === ticket.projectId)) throw new Error('Assignment input must reference a registered Assignment on the same ticket; artifacts require T4')
+            && item.ticketId === ticket.id && item.projectId === ticket.projectId)) throw new Error('Assignment dependency must reference a registered Assignment on the same ticket')
       }
     }
   }

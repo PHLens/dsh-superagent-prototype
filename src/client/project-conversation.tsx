@@ -10,6 +10,23 @@ export function ProjectConversation({ id }: { id: string }) {
   const { t, call, navigate } = usePanel()
   const { data, error, reload } = usePoll(() => call('GET projects/:id/conversation', { id }), [call, id], 1000)
   const [text, setText] = useState(''), [busy, setBusy] = useState(false), [failure, setFailure] = useState<string>(), [confirming, setConfirming] = useState<string>()
+  const [artifact, setArtifact] = useState<{ name: string; content: string; contentVersion: string }>()
+  const [reviewEvidence, setReviewEvidence] = useState<Record<string, string>>({})
+  const decisionPending = useRef<{ key: string; operationId: string }>(undefined)
+  const decide = async (ticketId: string, reportId: string, conclusion: 'passed' | 'changes_required' | 'needs_judgment') => {
+    const evidence = reviewEvidence[reportId]?.trim()
+    if (!evidence || confirming) return
+    const key = JSON.stringify([ticketId, reportId, conclusion, evidence])
+    const operationId = decisionPending.current?.key === key ? decisionPending.current.operationId : crypto.randomUUID()
+    decisionPending.current = { key, operationId }; setConfirming(ticketId); setFailure(undefined)
+    try { await call('POST projects/:id/acceptance', { id, body: { ticketId, reportId, operationId, conclusion, evidence } }); decisionPending.current = undefined; await reload() }
+    catch (error) { setFailure(errorText(error)) }
+    finally { setConfirming(undefined) }
+  }
+  const viewArtifact = async (artifactId: string, version: string) => {
+    try { setArtifact(await call('GET projects/:id/artifacts/:artifactId/:version', { id, artifactId, version })) }
+    catch (error) { setFailure(errorText(error)) }
+  }
   const pending = useRef<{ requestId: string; text: string }>(undefined)
   const submitting = useRef(false)
   const retry = useAction(() => call('POST projects/:id/retry', { id }), { reload })
@@ -87,10 +104,11 @@ export function ProjectConversation({ id }: { id: string }) {
               <dt>{t('planGoal')}</dt><dd>{plan.goal}</dd>
               <dt>{t('planScope')}</dt><dd>{plan.scope}</dd>
               <dt>{t('planOutputs')}</dt><dd>{plan.outputs.join('\n')}</dd>
-              <dt>{t('planResources')}</dt><dd>{plan.resources.join('\n') || '—'}</dd>
+              <dt>{t('planResources')}</dt><dd>{[...plan.resources, ...(plan.artifactInputs ?? []).map(item => `${item.artifactId} @ ${item.contentVersion}`)].join('\n') || '—'}</dd>
               <dt>{t('planEnvironment')}</dt><dd>{plan.environment}</dd>
               <dt>{t('planCost')}</dt><dd>{plan.cost}</dd>
               <dt>{t('planCompletion')}</dt><dd>{plan.completion}</dd>
+              <dt>{t('acceptanceMode')}</dt><dd>{t(plan.acceptance?.mode === 'registered-files' ? 'registeredFiles' : 'humanReview')}</dd>
             </dl>
             {authorization ? <p className="dt-hint">{t(authorization.revokedAt ? 'planRevoked' : 'planConfirmed')}</p> : <Button variant="primary" size="sm" disabled={!!confirming}
               onClick={() => { void confirm(task.id, plan.revision) }}>{t('planConfirm')}</Button>}
@@ -98,11 +116,28 @@ export function ProjectConversation({ id }: { id: string }) {
               onClick={() => { void confirm(task.id, plan.revision, 'rerun') }}>{t('planRerun')}</Button>}
             {authorization && !authorization.revokedAt && <Button size="sm" disabled={!!confirming}
               onClick={() => { void revoke(task.id, authorization.id) }}>{t('planRevoke')}</Button>}
-            {assignment?.waitingReason === 'executor-unavailable' && !authorization?.revokedAt && <p className="dt-hint">{t('planWaitingExecutor')}</p>}
+            {assignment?.waitingReason && !authorization?.revokedAt && <p className="dt-hint">{assignment.waitingReason === 'executor-unavailable' ? t('planWaitingExecutor') : t('executionWait', { reason: assignment.waitingReason })}</p>}
+            {assignment?.state === 'ended' && assignment.report?.state === 'ready' && <p>{t('executionDone')}</p>}
+            {assignment?.waitingReason && ['semantic-review', 'changes_required', 'needs_judgment'].includes(assignment.waitingReason) && (() => {
+              const report = data.reports?.findLast(item => item.assignmentId === assignment.id)
+              return report?.state === 'ready' && <div>
+                <p>{report.completed}</p><p>{report.evidence.join('\n')}</p>
+                <label>{t('acceptanceEvidence')}<textarea className="dt-input" aria-label={t('acceptanceEvidence')} value={reviewEvidence[report.id] ?? ''} onChange={event => setReviewEvidence(previous => ({ ...previous, [report.id]: event.target.value }))} /></label>
+                {(['passed', 'changes_required', 'needs_judgment'] as const).map(conclusion => <Button key={conclusion} size="sm" disabled={!!confirming || !reviewEvidence[report.id]?.trim()} onClick={() => { void decide(task.id, report.id, conclusion) }}>{t(conclusion === 'passed' ? 'acceptancePass' : conclusion === 'changes_required' ? 'acceptanceChanges' : 'acceptanceJudgment')}</Button>)}
+              </div>
+            })()}
           </> : <p className="dt-hint">{t('planNoRevision')}</p>}
         </article>
       })}
     </section>
+    {!!data.artifacts?.length && <section aria-label={t('projectArtifacts')}>
+      <h3>{t('projectArtifacts')}</h3>
+      {data.artifacts.map(item => <article key={item.id}><strong>{item.name}</strong> · {item.output} · {item.bytes} bytes
+        <p className="dt-hint">{t('artifactVersion')}: {item.contentVersion.slice(0, 12)}</p>
+        <Button size="sm" onClick={() => { void viewArtifact(item.id, item.contentVersion) }}>{t('artifactRead')}</Button>
+      </article>)}
+      {artifact && <article><strong>{artifact.name}</strong><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{artifact.content}</pre><Button size="sm" onClick={() => setArtifact(undefined)}>{t('close')}</Button></article>}
+    </section>}
     <form className="dt-conversation-compose" onSubmit={event => { void submit(event) }}>
       <label htmlFor="dt-project-message" className="dt-hint">{t('conversationLocalDraft')}</label>
       <textarea id="dt-project-message" className="dt-input" rows={4} required value={text} disabled={busy}
