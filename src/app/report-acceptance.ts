@@ -91,7 +91,7 @@ export class ReportAcceptance {
     const owner = new ConversationStore(this.store).getOwner(attempt.projectId)
     if (owner && report.state !== 'progress') {
       const id = `worker-result:${report.id}:${reason ?? 'accepted'}`
-      const text = `${ticket.title}: ${report.completed}\n${reason ? `等待：${reason}` : '已按登记条件完成。'}\n成果：${report.artifacts.map(ref => ref.id).join(', ')}`
+      const text = `${ticket.title}: ${report.completed}\n${reason ? `等待：${reason}` : '已按登记条件完成。'}\n成果：${report.artifacts.length} 个文件，可在成果区查看。`
       this.store.db.prepare(`INSERT OR IGNORE INTO conversation_message (id,project_id,client_request_key,role,actor_id,text,created_at,status,request_ticket_id) VALUES (?,?,?,'assistant',?,?,?,'saved',?)`)
         .run(id, attempt.projectId, id, owner.actorId, text, ticket.updatedAt, ticket.id)
     }

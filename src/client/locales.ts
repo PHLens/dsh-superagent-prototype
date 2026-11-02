@@ -57,7 +57,7 @@ const TEXT = {
   acceptanceJudgment: ['需要进一步判断', 'Needs judgment'],
   executionWait: ['执行状态：{reason}', 'Execution status: {reason}'],
   executionDone: ['已完成', 'Completed'],
-  planConfirmed: ['已确认，等待执行', 'Confirmed, waiting to run'],
+  planConfirmed: ['方案已确认', 'Plan confirmed'],
   planWaitingExecutor: ['执行能力尚未就绪', 'Execution is not available yet'],
   planNoRevision: ['尚未保存方案。', 'No plan has been saved yet.'],
   close: ['关闭', 'Close'],
