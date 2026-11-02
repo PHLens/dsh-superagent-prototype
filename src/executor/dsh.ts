@@ -217,13 +217,15 @@ export class DshExecutor implements Executor {
   /** Cancellation requests become observations only after the actual native workers drain. */
   private reconcileLifecycle(ticket: Ticket): void {
     const lifecycle = ticket.lifecycle
-    if (!lifecycle || !this.held(ticket) || this.stopping.has(ticket.id) || this.projectLaunching.has(ticket.id)) return
+    if (!lifecycle || !this.held(ticket) || this.projectLaunching.has(ticket.id)) return
     const stopping = lifecycle.stop.intent === 'stop'
     if (stopping ? lifecycle.stop.state === 'exited' : lifecycle.pause.state === 'paused') return
     const attempts = this.host.attempts?.all().filter(item => item.ticketId === ticket.id) ?? []
     for (const attempt of attempts) this.projectObserved.delete(attempt.id)
     const ids = ticket.projectId ? attempts.map(item => item.sessionId) : [workerSessionId(ticket.id)]
     const settle = async () => {
+      const pendingStop = this.stopping.get(ticket.id)
+      if (pendingStop) await pendingStop
       for (const assignment of ticket.assignments.filter(item => item.contract)) {
         const mapped = this.host.attempts?.all().findLast(item => item.assignmentId === assignment.id)
         if (mapped && (mapped.ticketId !== ticket.id || mapped.projectId !== ticket.projectId)) throw new Error('Lifecycle requires reconciliation: foreign execution mapping')
@@ -503,6 +505,7 @@ export class DshExecutor implements Executor {
       // Its shell jobs and subagents stop with it, also those of a worker that ends its own turn.
       this.stopWork(ticket.id, reason)
       this.left.get(ticket.id)?.collect.abort(); this.left.delete(ticket.id); this.personal.delete(ticket.id)
+      this.reconcileLifecycle(this.host.store.tickets.get(ticket.id) ?? ticket)
     })
   }
   /** Follow only the server-owned Assignment mapping; cancellation is not proof the native turn has drained. */
@@ -525,6 +528,7 @@ export class DshExecutor implements Executor {
       const current = attempts.bySession(attempt.sessionId)
       if (current?.id === attempt.id && current.lease === attempt.lease && current.ticketId === ticket.id && current.assignmentId === assignmentId
         && ['preparing', 'prepared', 'running'].includes(current.status)) { current.status = 'ended'; attempts.save(current) }
+      queueMicrotask(() => this.reconcileLifecycle(this.host.store.tickets.get(ticket.id) ?? ticket))
     }))
   }
   /** Stop what a ticket's worker runs in the background (see `stopBackground`). */
