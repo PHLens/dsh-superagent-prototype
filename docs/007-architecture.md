@@ -336,6 +336,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/passes.ts` | Passes, the pass scheduler |
 | `src/app/outbox.ts` | The Outbox: the Engine's `Outbox` port, the receipts and the `reply` effects that send them |
 | `src/app/backup.ts` | WAL-inclusive recovery points, immutable file inventories, and offline read-only restore profiles |
+| `src/app/backup-service.ts` | Scheduled and manual recovery points, retention, health reporting and safe restore delegation |
 | `src/app/notices.ts` | The main Session's notices and relays: `eventNotice`, `reportRelay`, `resultRelay` and `followupRelay` |
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
 | `src/app/project-store.ts` | SQLite project repository with stable ids; project lifecycle stays in the core service |
@@ -478,6 +479,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/lifecycle-boundaries.spec.ts` | Durable shutdown fences, missing/unloaded owner jobs, fresh retry leases, failed resume gates, pause settle coalescing, stale-worker fencing, semantic review reuse and Store reopen receipt boundaries |
 | `tests/reconciliation.spec.ts` | Authenticated owner reconciliation contract, strict operation schema and persisted server-owned evidence |
 | `tests/backup.spec.ts` | WAL-inclusive recovery snapshots, credential exclusions, incomplete capture markers, confined hash-verified restore and inert recovery profile |
+| `tests/backup-service.spec.ts` | Scheduler replacement, concurrent run coalescing, retention configuration and stopped-service behavior |
 | `tests/projects.spec.ts` | Project identity and Ticket/Assignment ownership; unauthorized drafts never execute |
 | `tests/no-github-startup.spec.ts` | Startup and application project APIs without external accounts; resource-specific readiness and safe environment |
 | `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |

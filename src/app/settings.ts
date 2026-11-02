@@ -72,6 +72,8 @@ export interface SettingsHost {
   readonly setup: Pick<Setup, 'configured' | 'checkAccounts' | 'blockCommands' | 'restart'>
   /** Triggers an immediate pass so work newly allowed by a settings save runs right away. */
   requestPass(): void
+  /** Replaces the backup scheduler after a successful backup settings save. */
+  backupChanged?(settings: SettingsValue['backup']): void
 }
 
 /**
@@ -192,6 +194,7 @@ export class Settings {
     if (changed) await this.host.setup.blockCommands(blocked)
     // When restarting, the notice stays pending until after the restart; `setup.restart()` defers until this call returns.
     const delivery = restarting ? 'pending' : await sessions.delivery(`settings:${block}`)
+    if (block === 'backup') this.host.backupChanged?.(settings.backup)
     if (restarting) this.host.setup.restart()
     else this.host.requestPass()
     return { saved: true, revision: store.blockRevision(block), policy_changed: before !== after, restarting, context_delivery: delivery }

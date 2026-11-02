@@ -40,7 +40,7 @@ export interface HttpHost {
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople
-  readonly executor: Pick<DshExecutor, 'activeCount' | 'reconcileTicket'>
+  readonly executor: Pick<DshExecutor, 'activeCount' | 'reconcileTicket' | 'continueAfterAttention'>
   readonly health: Record<string, Health>
   readonly machine: Machine
   readonly masterId: string
@@ -245,7 +245,8 @@ function routes(runtime: HttpHost): Routes {
       writable(); const id = ticket(params.id), input = z.object({ version: z.number().int().positive(), questionId: z.string().min(1).optional(), text: z.string().min(1) }).strict().parse(await body())
       const source = 'web', actor = { source, id: actorId ?? 'panel' }
       const result = runtime.engine.answerAttention(id, input.version, actor, source, input.text, input.questionId)
-      return { resolved: result.resolved, version: input.version }
+      if (result.resolved) await runtime.executor.continueAfterAttention(id, result.answer.id)
+       return { resolved: result.resolved, version: input.version }
     },
     'POST executor/pause': async ({ body }) => runtime.settings.pause(z.object({ paused: z.boolean() }).parse(await body()).paused, 'panel'),
     'PUT settings/:block': async ({ params, body }) => {

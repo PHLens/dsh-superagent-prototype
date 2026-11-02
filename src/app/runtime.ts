@@ -43,6 +43,7 @@ import { feishuSettings } from '../sources/feishu.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
 import { Sessions } from './sessions.ts'
 import { Settings } from './settings.ts'
+import { BackupService } from './backup-service.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
 import { mainTools, type MainToolsHost } from './tools/main.ts'
@@ -68,6 +69,7 @@ export class Runtime extends Service implements SourceHost {
   readonly commands: Commands
   readonly sessions: Sessions
   readonly settings: Settings
+  readonly backup: BackupService
   readonly executor: DshExecutor
   readonly assessor: MasterAssessor
   readonly outbox: Outbox
@@ -132,8 +134,12 @@ export class Runtime extends Service implements SourceHost {
         closing: () => this.closing(), environment,
         tools: (agent, ticket) => attempts.bySession(agent.id) ? projectWorkerTools(attempts, artifacts, reports, agent.id) : ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
+      const databasePath = store.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file
+      if (typeof databasePath !== 'string') throw new Error('Orchestrator database path is unavailable')
+      this.backup = new BackupService({ store, databasePath, destinationRoot: join(machine.stateDir, 'backups'), recovery: {}, health: board.claim('backup'), lifetime: this.lifetime })
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
-        sourceHost: this, setup, requestPass: () => { this.passes.request() } })
+        sourceHost: this, setup, requestPass: () => { this.passes.request() }, backupChanged: value => { this.backup.start(value) } })
+      this.backup.start(store.settings().backup)
       this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, attempts, masterId, health: board.claim('worker'), machine,
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         checkpointFiles: ticket => ticket.projectId ? artifacts.list(ticket.projectId, ticket.id).filter(item => item.status === 'registered').map(item => item.path) : [],

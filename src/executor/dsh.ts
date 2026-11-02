@@ -307,6 +307,27 @@ export class DshExecutor implements Executor {
     }
     this.track(ticket.id, settle())
   }
+  /** Continue an idle project worker exactly once after a resolved Attention answer. */
+  async continueAfterAttention(ticketId: string, answerId: string): Promise<boolean> {
+    if (this.host.closing() || this.host.paused()) return false
+    const ticket = this.host.store.tickets.get(ticketId)
+    if (!ticket || ticket.ended || this.held(ticket) || this.stopping.has(ticketId)) return false
+    const assignment = ticket.assignments.find(item => item.state !== 'ended' && item.contract)
+    const attempt = assignment && this.host.attempts?.all().findLast(item => item.assignmentId === assignment.id)
+    if (!assignment || !attempt || attempt.status !== 'running') return false
+    const agent = this.host.context.agents.get(attempt.sessionId as SessionId)
+    if (!agent) return false
+    const requestId = `attention-continuation:${ticketId}:${answerId}:${attempt.id}:${attempt.lease}`
+    if (await this.host.sessions.holds(agent.id, requestId)) return false
+    try { this.slots.reserve(ticketId, 'wake') } catch { return false }
+    const work = this.host.sessions.prompt(agent.id, requestId,
+      'A person answered the pending Attention question. Continue the confirmed work using that answer and submit the next durable result.',
+      'queue', () => { this.host.attempts!.resolve(agent.id) })
+      .then(() => { this.host.engine.observeTicket(ticketId, 'running', 'attention-answered') })
+      .finally(() => { this.slots.free(ticketId) })
+    this.track(ticketId, work)
+    return true
+  }
   /** Called by the existing pass loop; project workers use the same slots as legacy workers. */
   dispatchProjects(): void {
     if (this.host.closing()) return

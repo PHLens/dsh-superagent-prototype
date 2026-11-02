@@ -255,6 +255,7 @@ describe('settings migration', () => {
       policy: { rules: [], sources: { feishu: { allowed: [{ id: MEMBER, name: 'A' }], admission: {} }, github: { allowed: [{ id: 'a' }], admission: {} } } },
       eval: { mode: 'auto', timeoutSeconds: 90, model: { provider: 'p', model: 'm' } },
       executor: { model: null, maxWorkers: 5, directory: '', prepare: '', blockedCommands: [] },
+       backup: { enabled: false, directory: '', intervalMinutes: 1440, retention: 7 },
     })
     expect(migrateSettings(migrated)).toEqual(migrated)
   })
