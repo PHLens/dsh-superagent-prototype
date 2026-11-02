@@ -80,17 +80,17 @@ def processes(profile):
 
 def state(url):
     """Fetch health and setup status from the management API, or return None if unreachable."""
-    request = urllib.request.Request(url.rstrip('/') + '/orchestrator/api/state',
+    request = urllib.request.Request(url.rstrip('/') + '/orchestrator/health',
                                      headers={'x-orchestrator-request': '1'})
     try:
         with urllib.request.urlopen(request, timeout=2) as response:
             value = json.load(response)
-        # Keys omitted by another version read as empty so the service is not mistaken for unreachable.
-        health, setup = value.get('health') or {}, value.get('setup') or {}
-        entries = {name: entry if isinstance(entry, dict) else {} for name, entry in health.items()}
-        return {'health': {name: entry.get('state') for name, entry in entries.items()},
-                'errors': {name: str(entry.get('detail', '')) for name, entry in entries.items() if entry.get('state') == 'error'},
-                'setup': setup.get('problem'), 'feishu': setup.get('feishuProblem')}
+        # The probe is deliberately tiny: it carries no accounts, paths, settings, or component details.
+        if not isinstance(value, dict) or not isinstance(value.get('runtime'), str):
+            return None
+        return {'health': {'runtime': value['runtime']},
+                'errors': {'component': 'component error'} if value.get('componentError') is True else {},
+                'setup': {'required': True} if value.get('setupRequired') is True else None, 'feishu': None}
     except (OSError, ValueError, AttributeError):
         return None
 
@@ -193,11 +193,7 @@ def start(args):
         if processes(args.profile) and runtime_up(current):
             code = status(args)
             if current['setup']:
-                print('dsh-superagent is waiting for setup: ' + str(current['setup'].get('detail', '')))
-                print('Open the URL DSH printed in the log, then the dsh-superagent overview.')
-            if current['feishu']:
-                print('dsh-superagent runs without Feishu: ' + str(current['feishu'].get('detail', '')))
-                print('Fix it on the Feishu card of the Source settings.')
+                print('dsh-superagent is waiting for setup; open the management panel for details.')
             for name, detail in part_errors(current).items():
                 print(f'{name} reports an error, which a restart does not fix: {detail}')
             return code

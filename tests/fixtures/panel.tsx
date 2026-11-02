@@ -36,6 +36,8 @@ export async function settle() {
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
 }
 export async function mount(dictionary: Record<string, string> = zh) {
+  // Legacy panel specs exercise the operational overview directly; project-panel.spec.tsx opts into the new home route.
+  if (!sessionStorage.getItem('dsh-superagent/route')) sessionStorage.setItem('dsh-superagent/route', JSON.stringify({ route: { page: 'overview' }, stack: [] }))
   container = document.createElement('div'); document.body.append(container)
   root = createRoot(container)
   await act(async () => { root!.render(<Panel t={translator(dictionary)} />) })

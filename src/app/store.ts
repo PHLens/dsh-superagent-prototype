@@ -11,6 +11,7 @@ import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, tooOld } from './migration.
 import { Versions } from './versions.ts'
 import { storeReads } from './store-read.ts'
 import { projectRepository } from './project-store.ts'
+import { CONVERSATION_SCHEMA_SQL } from './conversation-store.ts'
 
 /** A Trigger's position on its thread timeline, ordered by timestamp and then `id` as tie-breaker. */
 export interface TimelinePlace { at: string; id: string }
@@ -99,6 +100,7 @@ export class Store implements Repositories {
             CREATE INDEX IF NOT EXISTS decision_thread ON decision(thread);
             CREATE INDEX IF NOT EXISTS effect_due ON effect(kind, due, seq);
           `)
+          this.db.exec(CONVERSATION_SCHEMA_SQL)
           this.addColumns()
           if (version === 10) migrateTo11(this)
           if (version !== SCHEMA_VERSION) this.set(KV.store.schema, SCHEMA_VERSION)

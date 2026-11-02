@@ -108,7 +108,7 @@ scripts/dsh-superagent status
 
 `stop` and `restart` request graceful shutdown and wait up to five minutes for Executors. They never force-kill the process or touch other tmux sessions.
 
-`status` prints process ids, health and setup problems. For a different profile or port, use `--profile` and `--url`, or set `DSH_SUPERAGENT_PROFILE` and `DSH_SUPERAGENT_URL`.
+`status` prints process ids and the minimal supervision health probe. The probe contains only runtime state and boolean component-error/setup-required flags; it does not expose accounts, paths, settings or other management state. For a different profile or port, use `--profile` and `--url`, or set `DSH_SUPERAGENT_PROFILE` and `DSH_SUPERAGENT_URL`.
 
 `status`, `start` and `restart` exit with one of four codes:
 
@@ -121,7 +121,7 @@ scripts/dsh-superagent status
 
 A Source that is still starting counts as normal operation. So does a Feishu bot that setup could not check.
 
-`status` returns failed parts and their details under `errors`, and setup requirements under `setup`. `start` and `restart` print those problems as lines; they exit 1 if the service never comes up. Only an intentional `stop` pauses automatic recovery.
+`status` returns only whether a non-runtime component has an error and whether setup is required; management details remain available in the panel. `start` and `restart` print the corresponding generic state lines; they exit 1 if the service never comes up. Only an intentional `stop` pauses automatic recovery.
 
 Each profile stores logs and control files under `.artifacts/`:
 
@@ -135,7 +135,7 @@ Open the URL printed in the log, then choose **Superagent** in the sidebar.
 Create the hourly check in the DeepSeek Harness profile you normally use, not in `superagent`. It must keep running when the agent service is down. Ask an agent in that profile to create an hourly schedule using this prompt, with the checkout path filled in:
 
 ```text
-Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` in <checkout>. Exit 0: do nothing and say nothing. Exit 2: do not restart; tell me each part under `errors` with its detail, unless you already told me about the same ones. Exit 3: do not restart; tell me what `setup` says setup needs, unless you already told me. If it reports manually_stopped: true, leave it stopped. Otherwise (exit 1) run `scripts/dsh-superagent --profile superagent --respect-stop restart`, which exits the same way: 0 means it recovered, so say nothing; 2 and 3 are reported as above; if it exits 1 or fails otherwise, read the newest .artifacts/dsh-superagent-superagent-*.log and the Troubleshooting section of docs/006-deployment.md, fix what you can, and tell me what was wrong and what you did.
+Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` in <checkout>. Exit 0: do nothing and say nothing. Exit 2: do not restart; report that a non-runtime component error is present, unless you already reported it. Exit 3: do not restart; report that setup is required, unless you already reported it. If it reports manually_stopped: true, leave it stopped. Otherwise (exit 1) run `scripts/dsh-superagent --profile superagent --respect-stop restart`, which exits the same way: 0 means it recovered, so say nothing; 2 and 3 are reported as above; if it exits 1 or fails otherwise, read the newest .artifacts/dsh-superagent-superagent-*.log and the Troubleshooting section of docs/006-deployment.md, fix what you can, and tell me what was wrong and what you did.
 ```
 
 `--respect-stop` preserves an intentional stop. Only `stop` writes the marker; `start` clears it. `restart` writes no marker, so the check can recover a restart whose shutdown timed out.

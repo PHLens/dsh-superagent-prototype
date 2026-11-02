@@ -25,6 +25,7 @@ import { ticketCard } from './cards.ts'
 import { MasterAssessor } from './assessment.ts'
 import { KV } from '../kv.ts'
 import { Store } from './store.ts'
+import { ProjectCoordinator } from './project-coordinator.ts'
 import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
 import { Effects } from './effects.ts'
@@ -58,6 +59,7 @@ const now = (): string => new Date().toISOString()
  */
 export class Runtime extends Service implements SourceHost {
   readonly projects: Projects
+  readonly projectCoordinator: ProjectCoordinator
   readonly store: Store
   readonly setup: Setup
   readonly prompts: Prompts
@@ -103,6 +105,7 @@ export class Runtime extends Service implements SourceHost {
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
       const feishu = () => setup.configured() && !!setup.deployment.feishu
       const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu)
+      this.projectCoordinator = new ProjectCoordinator(ctx, store, this.projects, machine.stateDir, this.lifetime, prompts)
       const masterId = this.masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
       store.set(KV.runtime.masterId, masterId)
       const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)
@@ -218,6 +221,7 @@ export class Runtime extends Service implements SourceHost {
         await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
         if (this.closing()) return
       }
+      this.projectCoordinator.start()
       this.executor.resume()
       this.passes.start()
       this.effects.start()
@@ -230,7 +234,7 @@ export class Runtime extends Service implements SourceHost {
   private httpHost(): HttpHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
-    return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks,
+    return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, projectCoordinator: this.projectCoordinator,
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem ?? setup.githubProblem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
@@ -246,7 +250,7 @@ export class Runtime extends Service implements SourceHost {
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
       for (const agent of agents) agent.cancel({ kind: 'user' }, { keepInbox: true })
       // Startup may still be unwinding a cancelled probe or write; it must finish before environment restoration and DB/lock release.
-      await Promise.allSettled([this.ready, passes, this.effects.drain(), ...agents.map(agent => agent.whenIdle())])
+      await Promise.allSettled([this.ready, passes, this.effects.drain(), this.projectCoordinator.stop(), ...agents.map(agent => agent.whenIdle())])
       // The workers' jobs and subagents stop too: their ends would start worker turns without the tool limits released below.
       await this.executor.shutdown()
       this.executor.dispose()

@@ -118,6 +118,16 @@
             config:
               fetch: false
               searchTimeoutMs: 60000
+    # Project discussion has no inherited execution tools or global skill catalog.
+    # The application registers only its project-scoped read tool and complete prompt.
+    - id: dsh-superagent-project-preset
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: dsh-superagent-project
+        name: Project Superagent
+        description: Project discussion and limited project reads.
+        order: 92
+        plugins: []
     # The agent preset of the main Session (ROUTER_PRESET in src/app/sessions.ts). The worker's 5-second shell and job waits, so a command or a wait does not hold back the next candidates, and
     # only what the main Session uses: no subagents, web, file search or writes, todo list, questions to a person, presenting,
     # plan mode, plugin manager, scheduling, goals or workflows. No persona: the main Session's prompt is complete, so it has

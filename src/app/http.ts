@@ -17,6 +17,8 @@ import type { DshExecutor } from '../executor/dsh.ts'
 import type { Health } from '../sources/host.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import type { Sessions } from './sessions.ts'
+import type { ProjectCoordinator } from './project-coordinator.ts'
+import { authenticateProjectRequest, ProjectAuthError, type ProjectAuthContext } from './project-auth.ts'
 import type { Store } from './store.ts'
 import type { TextCache } from './cache.ts'
 import type { LinkTarget, ViewHost } from './views/records.ts'
@@ -29,6 +31,7 @@ import { decisionList, search, threadDetail, threadList } from './views/threads.
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 
 export interface HttpHost {
+  readonly projectCoordinator?: ProjectCoordinator
   readonly store: Store
   /** Feishu message links resolved since startup, used by search to match AppLink URLs. */
   readonly sourceLinks: Pick<TextCache, 'entries'>
@@ -79,6 +82,7 @@ export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number):
 }
 /** Maps errors to HTTP status codes and structured payloads that the panel localizes in the interface language. */
 function failure(error: unknown): [number, Record<string, unknown>] {
+  if (error instanceof ProjectAuthError) return [error.status, { error: error.message }]
   if (error instanceof z.ZodError) {
     const issues = error.issues.map(issue => ({ path: issue.path.join('.'), message: issue.message }))
     return [400, { error: `Invalid settings: ${issues.map(issue => issue.path).join(', ')}`, issues }]
@@ -112,6 +116,12 @@ const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources:
 const setupState = (runtime: HttpHost): SetupState => ({ deployment: runtime.configured() ? runtime.deployment : undefined,
   problem: runtime.setupProblem, feishuProblem: runtime.feishuProblem })
 export type StateView = ReturnType<typeof stateView>
+/** Minimal unauthenticated probe used by local process supervision; never includes setup, paths, accounts, or component details. */
+export function healthView(runtime: HttpHost) {
+  const runtimeState = runtime.health.runtime?.state ?? 'unknown'
+  const componentError = Object.entries(runtime.health).some(([name, health]) => name !== 'runtime' && health.state === 'error')
+  return { runtime: runtimeState, componentError, setupRequired: Boolean(runtime.setupProblem) }
+}
 /** Builds a ticket's detail view; `environment` is empty while waiting for setup because it requires the resolved deployment. */
 function ticketPage(runtime: HttpHost, id: string) {
   const detail = ticketDetail(views(runtime), id), ticket = runtime.store.tickets.get(id)
@@ -132,7 +142,7 @@ function promptsView(runtime: HttpHost, revision: number | undefined, offset: nu
 export type PromptsView = ReturnType<typeof promptsView>
 
 interface Input<K extends keyof Api> {
-  params: RouteParams<K>; query: Record<string, string>; body: (maxBytes?: number) => Promise<unknown>
+  params: RouteParams<K>; query: Record<string, string>; body: (maxBytes?: number) => Promise<unknown>; actorId?: string
 }
 type Routes = { [K in keyof Api]: (input: Input<K>) => ApiResponse<K> | Promise<ApiResponse<K>> }
 const offset = z.coerce.number().int().nonnegative().catch(0)
@@ -152,7 +162,25 @@ function routes(runtime: HttpHost): Routes {
   const { store } = runtime
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
+  const projectHost = (actorId: string | undefined) => {
+    if (!actorId) throw new ProjectAuthError(401, 'DSH login required')
+    if (!runtime.projectCoordinator || !runtime.configured()) throw new ProjectAuthError(503, 'Project discussion is unavailable until instance setup completes')
+    return { coordinator: runtime.projectCoordinator, actorId }
+  }
   return {
+    'GET projects': ({ actorId }) => { const host = projectHost(actorId); return { projects: host.coordinator.list(host.actorId) } },
+    'POST projects': async ({ actorId, body }) => {
+      const host = projectHost(actorId)
+      const input = z.object({ name: z.string().trim().min(1).max(200), goal: z.string().trim().min(1).max(2000) }).strict().parse(await body())
+      return { project: host.coordinator.create(host.actorId, input) }
+    },
+    'GET projects/:id/conversation': ({ actorId, params }) => { const host = projectHost(actorId); return host.coordinator.view(host.actorId, params.id) },
+    'POST projects/:id/messages': async ({ actorId, params, body }) => {
+      const host = projectHost(actorId)
+      const input = z.object({ requestId: z.string().min(1).max(200), text: z.string().trim().min(1).max(16000) }).strict().parse(await body())
+      return host.coordinator.send(host.actorId, params.id, input)
+    },
+    'POST projects/:id/retry': ({ actorId, params }) => { const host = projectHost(actorId); return host.coordinator.retry(host.actorId, params.id) },
     'GET state': () => stateView(runtime),
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
       executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
@@ -230,17 +258,30 @@ function match(table: Routes, method: string, segments: string[]) {
 export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
   if (ctx.webServer.host !== '127.0.0.1') throw new Error('Orchestrator management requires a loopback Web server')
   const table = routes(runtime)
+  let authContext: ProjectAuthContext = {}
+  // Keep the connection dependency optional at plugin load time. Older hosts can still mount the
+  // panel, but every management API request fails closed until the native service is available.
+  ctx.inject(['connection'], child => {
+    authContext = { connection: (child as unknown as ProjectAuthContext).connection }
+    child.effect(() => () => { authContext = {} })
+  })
   const disposers = [
     ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
-      if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
       if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
+      if (url.pathname === '/orchestrator/health') {
+        if (req.method !== 'GET') { json(res, 405, { error: 'Health probe is read-only' }); return }
+        json(res, 200, healthView(runtime)); return
+      }
+      if (url.pathname !== '/orchestrator/api' && !url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
       try {
+        // Native admission is the single gate for the entire control plane, including reads.
+        const actorId = authenticateProjectRequest(authContext, req)
         await runtime.ready
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))
         if (!route) throw new RouteError(404, 'Unknown operation')
         const query = Object.fromEntries(url.searchParams)
-        json(res, 200, await route.run({ params: route.params as never, query, body: maxBytes => readBody(req, maxBytes) }))
+        json(res, 200, await route.run({ params: route.params as never, query, actorId, body: maxBytes => readBody(req, maxBytes) }))
       } catch (error) { json(res, ...failure(error)) }
     } })]
   return () => { for (const dispose of disposers) dispose() }
