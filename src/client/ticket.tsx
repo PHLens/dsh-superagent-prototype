@@ -148,11 +148,9 @@ export function TicketPage({ id }: { id: string }) {
     </div>
     {state?.safeRestore && <Hint>{t('recoveryReadOnly')}</Hint>}
     <TaskLifecycle key={id} id={id} lifecycle={data.lifecycle} attention={data.attention} ended={!!data.ended}
-      enabled={data.state === 'open'} readOnly={readOnly} showStop={false} reload={reload} />
+      enabled={data.state === 'open'} readOnly={readOnly} showStop={false} reload={reload}
+      questionActions={channel && <ActionLink href={channel.url} icon="message">{t('answerIn', { source: valueLabel(t, 'source', channel.source) })}</ActionLink>} />
     {ended && <Hint>{ended}</Hint>}
-    {data.attention && channel && <div className="dt-banner-actions">
-        <ActionLink href={channel.url} icon="message">{t('answerIn', { source: valueLabel(t, 'source', channel.source) })}</ActionLink>
-    </div>}
      {/* Ordinary progress stays in the Session/Channels; only a report that halted work (blocked/failed) is shown here. */}
     {data.actions.retry && data.summary && <p className={`dt-banner${failed ? ' dt-danger' : ''}${failedText ? ' dt-mono' : ''}`}>
       <span className="dt-banner-label">{t(failed ? 'failedPrefix' : 'blockedPrefix')}</span>{data.summary}

@@ -1,5 +1,5 @@
 /** Task controls show persisted intent separately from the last host observation. */
-import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import type { Attention, LifecycleState } from '../core/model.ts'
 import { Button, Icon } from './controls.tsx'
 import { usePanel } from './provider.tsx'
@@ -11,6 +11,7 @@ interface Props {
   id: string
   lifecycle?: Lifecycle
   attention?: Pick<Attention, 'id' | 'question' | 'version'>
+  questionActions?: ReactNode
   ended: boolean
   enabled?: boolean
   retryable?: boolean
@@ -19,7 +20,7 @@ interface Props {
   reload(): Promise<unknown>
 }
 
-export function TaskLifecycle({ id, lifecycle, attention, ended, enabled = true, retryable = false, readOnly = false, showStop = true, reload }: Props) {
+export function TaskLifecycle({ id, lifecycle, attention, questionActions, ended, enabled = true, retryable = false, readOnly = false, showStop = true, reload }: Props) {
   const { t, call } = usePanel()
   const [busy, setBusy] = useState(false), [failure, setFailure] = useState<string>(), [notice, setNotice] = useState<string>()
   const [answer, setAnswer] = useState('')
@@ -129,6 +130,7 @@ export function TaskLifecycle({ id, lifecycle, attention, ended, enabled = true,
     {attention && !ended && <form className="dt-banner" onSubmit={event => { void submitAnswer(event) }}>
       <strong>{t('taskQuestionVersion', { version: attention.version ?? 1 })}</strong>
       <MarkdownLite text={attention.question} />
+      {!readOnly && questionActions && <div className="dt-banner-actions">{questionActions}</div>}
       <label htmlFor={inputId}>{t('taskAnswer')}</label>
       <textarea id={inputId} className="dt-input" rows={3} value={answer} disabled={busy || readOnly}
         onChange={event => setAnswer(event.target.value)} />
