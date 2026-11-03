@@ -6,7 +6,7 @@ import type { T } from './text.ts'
 
 export const TABS = ['projects', 'overview', 'source', 'trigger', 'eval', 'execution', 'settings'] as const
 export type Tab = typeof TABS[number]
-export const SETTINGS_GROUPS = ['source', 'eval', 'execution', 'prompts', 'deployment'] as const
+export const SETTINGS_GROUPS = ['source', 'eval', 'execution', 'backup', 'prompts', 'deployment'] as const
 export type SettingsGroup = typeof SETTINGS_GROUPS[number]
 export type Route = { page: 'projects'; id?: string; query?: undefined }
   | { page: 'overview' | 'source'; id?: undefined; query?: undefined }

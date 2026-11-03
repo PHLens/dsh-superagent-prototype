@@ -7,7 +7,7 @@ import { key, threadKey, validateTicketOwnership, type ChannelRef, type Decision
   type ThreadFacts, type Ticket, type Trigger, type TriggerDisposition } from '../core/index.ts'
 import { KV, type Family, type Key } from '../kv.ts'
 import { SettingsSchema, type Settings, type SettingsOrigin, type SettingsSave } from '../policy.ts'
-import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, tooOld } from './migration.ts'
+import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, migrateTo16, tooOld } from './migration.ts'
 import { Versions } from './versions.ts'
 import { storeReads } from './store-read.ts'
 import { projectRepository } from './project-store.ts'
@@ -19,7 +19,7 @@ export interface TimelinePlace { at: string; id: string }
 /** Why a message was dropped: its conversation can never receive it (`channelGone`), or its Source no longer listens to it (`channelIgnored`). */
 export type DropReason = 'channelGone' | 'channelIgnored'
 /** Outbound message receipt tracked in the outbox from the moment it is queued (`pending`, `sent`, or `dropped`); delivery attempt counts live on its `reply` effect. */
-export interface Receipt extends OutboundMessage { status: ReplyStatus; dropped?: { at: string; reason: DropReason } }
+export interface Receipt extends OutboundMessage { status: ReplyStatus; dropped?: { at: string; reason: DropReason }; reconciliation?: { state: 'unknown'; at: string; error?: string } }
 /** A dropped outbound message receipt, with the timestamp and reason it was dropped. */
 export type Dropped = Receipt & { dropped: { at: string; reason: DropReason } }
 /** Saved settings snapshot with the policy version and ticket notifications it produced (`internal` saves have no origin). */
@@ -105,6 +105,7 @@ export class Store implements Repositories {
           this.db.exec(EXECUTION_SCHEMA_SQL)
           this.addColumns()
           if (version === 10) migrateTo11(this)
+          if (version !== undefined && version < 16) migrateTo16(this)
           if (version !== SCHEMA_VERSION) this.set(KV.store.schema, SCHEMA_VERSION)
         })
       } catch (error) {
@@ -286,7 +287,7 @@ export class Store implements Repositories {
   readonly receipts = {
     get: (id: string): Receipt | undefined => this.values<Receipt>('SELECT value FROM outbox WHERE id = ?', id)[0],
     /** Pending message receipts, oldest first. */
-    waiting: (): Receipt[] => this.values("SELECT value FROM outbox WHERE value ->> '$.status' = 'pending' ORDER BY rowid"),
+    waiting: (): Receipt[] => this.values("SELECT value FROM outbox WHERE value ->> '$.status' = 'pending' AND json_type(value, '$.reconciliation') IS NULL ORDER BY rowid"),
     /** True if an earlier message for the same ticket and conversation is still pending with fewer than `failures` consecutive failed `reply` effect attempts. */
     behind: (id: string, failures: number): boolean => !!this.db.prepare(`SELECT 1 FROM outbox earlier
       JOIN outbox message ON message.id = ? LEFT JOIN effect ON effect.kind = 'reply' AND effect.key = earlier.id
@@ -303,10 +304,19 @@ export class Store implements Repositories {
      * Marks a pending receipt as sent or dropped (with drop reason and timestamp), recreating the receipt if the message
      * was withdrawn while being sent so its ID cannot be queued again.
      */
-    settle: (message: OutboundMessage, outcome: 'sent' | DropReason): void => {
+    beginUnknown: (message: OutboundMessage): void => {
+       this.db.prepare("UPDATE outbox SET value = json_patch(value, ?) WHERE id = ? AND value ->> '$.status' = 'pending'")
+         .run(JSON.stringify({ reconciliation: { state: 'unknown', phase: 'send-started', at: new Date().toISOString() } }), message.id)
+     },
+     unknown: (message: OutboundMessage, error?: unknown): void => {
+       const reconciliation = { state: 'unknown', at: new Date().toISOString(), ...(error ? { error: String(error) } : {}) }
+       this.db.prepare("UPDATE outbox SET value = json_patch(value, ?) WHERE id = ? AND value ->> '$.status' = 'pending'")
+         .run(JSON.stringify({ reconciliation }), message.id)
+     },
+     settle: (message: OutboundMessage, outcome: 'sent' | DropReason): void => {
       const settled = outcome === 'sent' ? { status: 'sent' } : { status: 'dropped', dropped: { at: new Date().toISOString(), reason: outcome } }
       const { id, channel, text, kind, ticketId } = message
-      const updated = this.db.prepare("UPDATE outbox SET value = json_patch(value, ?) WHERE id = ? AND value ->> '$.status' = 'pending'")
+      const updated = this.db.prepare("UPDATE outbox SET value = json_remove(json_patch(value, ?), '$.reconciliation') WHERE id = ? AND value ->> '$.status' = 'pending'")
         .run(JSON.stringify(settled), id)
       if (!Number(updated.changes)) this.db.prepare('INSERT OR IGNORE INTO outbox (id, value) VALUES (?, ?)')
         .run(id, JSON.stringify({ id, channel, text, kind, ...ticketId ? { ticketId } : {}, ...settled }))

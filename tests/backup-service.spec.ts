@@ -1,0 +1,81 @@
+import { afterEach, expect, it, vi } from 'vitest'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { BackupService } from '../src/app/backup-service.ts'
+import { startRuntime, type Host } from './fixtures/host.ts'
+
+let h: Host | undefined
+let root: string | undefined
+afterEach(async () => { await h?.stop(); h = undefined; if (root) rmSync(root, { recursive: true, force: true }); root = undefined })
+
+it('deduplicates manual and scheduled recovery point creation and applies retention', async () => {
+  h = await startRuntime()
+  root = mkdtempSync(join(tmpdir(), 'dsh-backup-service-'))
+  const db = h.runtime.store.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file as string
+  const service = new BackupService({ store: h.runtime.store, databasePath: db, destinationRoot: root, recovery: {}, health: (h.runtime as any).board.claim('backup-test'), lifetime: h.runtime.lifetime })
+  service.start({ enabled: true, directory: root, intervalMinutes: 5, retention: 1 })
+  const first = service.run('manual')
+  expect(await service.run('schedule')).toBe(await first)
+  expect((await first).database.walIncluded).toBe(true)
+  service.stop()
+})
+
+it('uses the runtime backup root when settings leave the directory empty', async () => {
+  h = await startRuntime()
+  root = mkdtempSync(join(tmpdir(), 'dsh-backup-default-'))
+  const service = new BackupService({ store: h.runtime.store, databasePath: h.runtime.store.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file as string,
+    destinationRoot: root, recovery: {}, health: (h.runtime as any).board.claim('backup-test'), lifetime: h.runtime.lifetime })
+  service.start({ enabled: true, directory: '', intervalMinutes: 5, retention: 1 })
+  await service.run('manual')
+  expect(readdirSync(root)).toHaveLength(1)
+})
+
+it('keeps incomplete points out of health and retention', async () => {
+  h = await startRuntime()
+  root = mkdtempSync(join(tmpdir(), 'dsh-backup-incomplete-'))
+  const missing = join(root, 'missing-workspace')
+  const service = new BackupService({ store: h.runtime.store, databasePath: h.runtime.store.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file as string,
+    destinationRoot: root, recovery: {}, recoveryRoots: () => ({ workspaces: [missing] }), health: (h.runtime as any).board.claim('backup-test'), lifetime: h.runtime.lifetime })
+  service.start({ enabled: true, directory: root, intervalMinutes: 5, retention: 1 })
+  await expect(service.run('manual')).rejects.toThrow('incomplete')
+  expect(readdirSync(root)).toHaveLength(1)
+})
+
+it('retains unrelated directories while applying recovery retention', async () => {
+  h = await startRuntime()
+  root = mkdtempSync(join(tmpdir(), 'dsh-backup-retention-'))
+  const unrelated = join(root, 'keep-me'); mkdirSync(unrelated)
+  let timestamp = 0
+  const service = new BackupService({ store: h.runtime.store, databasePath: h.runtime.store.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file as string,
+    destinationRoot: root, recovery: {}, health: (h.runtime as any).board.claim('backup-test'), lifetime: h.runtime.lifetime,
+    now: () => new Date(1_700_000_000_000 + timestamp++) })
+  service.start({ enabled: true, directory: root, intervalMinutes: 5, retention: 1 })
+  await service.run('manual'); await service.run('manual')
+  expect(readdirSync(root)).toContain('keep-me')
+  expect(readdirSync(root).filter(name => name !== 'keep-me')).toHaveLength(1)
+})
+
+it('does not create a recovery point after an immediate stop race', async () => {
+  h = await startRuntime()
+  root = mkdtempSync(join(tmpdir(), 'dsh-backup-stop-race-'))
+  const service = new BackupService({ store: h.runtime.store, databasePath: h.runtime.store.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file as string,
+    destinationRoot: root, recovery: {}, health: (h.runtime as any).board.claim('backup-test'), lifetime: h.runtime.lifetime })
+  service.start({ enabled: true, directory: root, intervalMinutes: 5, retention: 1 })
+  const run = service.run('manual'); service.stop()
+  await expect(run).rejects.toThrow('stopped')
+  expect(readdirSync(root)).toEqual([])
+})
+
+it('replaces the scheduler and refuses work after stop', async () => {
+  h = await startRuntime()
+  root = mkdtempSync(join(tmpdir(), 'dsh-backup-service-'))
+  const service = new BackupService({ store: h.runtime.store, databasePath: h.runtime.store.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file as string,
+    destinationRoot: root, recovery: {}, health: (h.runtime as any).board.claim('backup-test'), lifetime: h.runtime.lifetime })
+  vi.useFakeTimers()
+  service.start({ enabled: true, directory: root, intervalMinutes: 5, retention: 1 })
+  service.start({ enabled: false, directory: root, intervalMinutes: 5, retention: 1 })
+  service.stop()
+  await expect(service.run('manual')).rejects.toThrow('stopped')
+  vi.useRealTimers()
+})

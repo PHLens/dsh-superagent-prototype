@@ -10,7 +10,7 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-subprocess'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
 import { Engine, Projects, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
@@ -43,6 +43,7 @@ import { feishuSettings } from '../sources/feishu.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
 import { Sessions } from './sessions.ts'
 import { Settings } from './settings.ts'
+import { BackupService } from './backup-service.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
 import { mainTools, type MainToolsHost } from './tools/main.ts'
@@ -68,6 +69,7 @@ export class Runtime extends Service implements SourceHost {
   readonly commands: Commands
   readonly sessions: Sessions
   readonly settings: Settings
+  readonly backup: BackupService
   readonly executor: DshExecutor
   readonly assessor: MasterAssessor
   readonly outbox: Outbox
@@ -77,6 +79,8 @@ export class Runtime extends Service implements SourceHost {
   private readonly board = new HealthBoard()
   private readonly runtimeHealth = this.board.claim('runtime', { state: 'starting', detail: '' })
   readonly masterId: string
+  /** Restore profiles are read-only by construction; this is checked before native sessions/effects start. */
+  readonly safeRestore: boolean
   private readonly sourceLinks = new TextCache(200_000)
   private readonly stopped = new AbortController()
   private readonly disposers: (() => void)[] = []
@@ -90,6 +94,7 @@ export class Runtime extends Service implements SourceHost {
   constructor(ctx: Context, readonly machine: Machine, restart: () => void) {
     super(ctx, 'orchestrator')
     const runtime = this
+    this.safeRestore = existsSync(join(machine.stateDir, 'restore-profile.json'))
     // Lock the state directory before opening the database so another process cannot migrate or write concurrently.
     mkdirSync(machine.stateDir, { recursive: true, mode: 0o700 })
     const compromised = (error: Error) => { this.runtimeHealth.set({ state: 'error', detail: error.message }); this.stopped.abort() }
@@ -113,7 +118,7 @@ export class Runtime extends Service implements SourceHost {
       const effects = this.effects = new Effects(store, board)
       const sources = this.sources = new SourceRegistry(() => store.settings(), board, kind => {
         // Sync source member lists once startup completes when a source plugin loads dynamically.
-        if (kind.policy?.sync) void this.ready?.then(() => this.settings.syncable().includes(kind.kind) ? this.settings.sync(kind.kind) : undefined)
+        if (kind.policy?.sync && !this.safeRestore) void this.ready?.then(() => this.settings.syncable().includes(kind.kind) ? this.settings.sync(kind.kind) : undefined)
           .catch(() => { /* sync() records its failure in health. */ })
         return () => {}
       })
@@ -127,12 +132,30 @@ export class Runtime extends Service implements SourceHost {
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId, attempts,
         lifetime: this.lifetime,
         closing: () => this.closing(), environment,
-        tools: (agent, ticket) => attempts.bySession(agent.id) ? projectWorkerTools(attempts, artifacts, reports, agent.id) : ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
+        tools: (agent, ticket) => attempts.bySession(agent.id) ? projectWorkerTools(attempts, artifacts, reports, engine, agent.id) : ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
+      const databasePath = store.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file
+      if (typeof databasePath !== 'string') throw new Error('Orchestrator database path is unavailable')
+      this.backup = new BackupService({ store, databasePath, destinationRoot: join(machine.stateDir, 'backups'), recovery: {},
+        recoveryRoots: () => {
+           const projects = join(machine.stateDir, 'projects')
+           const workspaces = store.tickets.list().flatMap(ticket => ticket.execution?.directory && existsSync(ticket.execution.directory) ? [ticket.execution.directory] : [])
+           return { workspaces: [...new Set([projects, ...workspaces].filter(existsSync))], nativeState: existsSync(projects) ? [projects] : [] }
+         },
+        health: board.claim('backup'), lifetime: this.lifetime })
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
-        sourceHost: this, setup, requestPass: () => { this.passes.request() } })
-      this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, attempts, health: board.claim('worker'), machine,
+        sourceHost: this, setup, requestPass: () => { this.passes.request() }, backupChanged: value => { if (!this.safeRestore) this.backup.start(value) } })
+      if (!this.safeRestore) this.backup.start(store.settings().backup)
+      this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, attempts, masterId, health: board.claim('worker'), machine,
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
+        checkpointFiles: ticket => ticket.projectId ? artifacts.list(ticket.projectId, ticket.id).filter(item => item.status === 'registered').map(item => item.path) : [],
+        reportReady: (ticket, assignment, attempt) => reports.reports(ticket.id).some(report => report.attemptId === attempt.id && report.lease === attempt.lease && report.assignmentId === assignment.id && report.state === 'ready'),
+        evidenceReady: (ticket, assignment, attempt) => {
+          const related = reports.reports(ticket.id).filter(report => report.attemptId === attempt.id && report.lease === attempt.lease && report.assignmentId === assignment.id)
+          if (related.some(report => report.artifacts.some(ref => { try { artifacts.read(attempt.projectId, ref.id, ref.contentVersion); return false } catch { return true } }))) return false
+          return !artifacts.list(attempt.projectId, ticket.id).some(item => item.attemptId === attempt.id && item.lease === attempt.lease && item.status === 'writing')
+        },
+        outboundUnknown: ticket => store.db.prepare("SELECT 1 FROM outbox WHERE json_extract(value, '$.ticketId') = ? AND json_extract(value, '$.reconciliation.state') = 'unknown' LIMIT 1").get(ticket.id) !== undefined,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
@@ -197,17 +220,21 @@ export class Runtime extends Service implements SourceHost {
     return ticketEnvironment({ deployment, sources, settings: this.store.settings(), ticket, ...trigger ? { trigger } : {} })
   }
   checkSetup(): void { this.setup.check() }
-  receive(trigger: Trigger): ReceiveResult { return this.passes.receive(trigger) }
+  receive(trigger: Trigger): ReceiveResult { return this.safeRestore ? 'filtered' : this.passes.receive(trigger) }
   idle(): Promise<void> { return this.passes.idle() }
-  pump(): Promise<void> { return this.passes.pump() }
-  sendReplies(): Promise<void> { return this.outbox.sent() }
+  pump(): Promise<void> { return this.safeRestore ? Promise.resolve() : this.passes.pump() }
+  sendReplies(): Promise<void> { return this.safeRestore ? Promise.resolve() : this.outbox.sent() }
   private closing(): boolean { return this.closingFlag }
   /** Hold evaluation, dispatch, and outbound delivery while paused or awaiting setup; sources still record incoming triggers. */
-  private paused(): boolean { return !this.setup.configured() || this.store.settings().paused }
+  private paused(): boolean { return this.safeRestore || !this.setup.configured() || this.store.settings().paused }
   private async initialize(): Promise<void> {
     // Register management HTTP routes before setup completes so operators can fix setup problems in the UI.
     this.disposers.push(registerHttp(this.ctx, this.httpHost()))
     try {
+      if (this.safeRestore) {
+        this.runtimeHealth.set({ state: 'ready', detail: 'Offline read-only recovery profile; execution, model, and outbound sends are prohibited', at: now() })
+        return
+      }
       const configured = await this.setup.run(this.store.settings())
       if (this.closing()) return
       if (!configured) {
@@ -234,8 +261,8 @@ export class Runtime extends Service implements SourceHost {
   }
   private httpHost(): HttpHost {
     const runtime = this
-    const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, setup, passes } = this
-    return { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, ready, sourceLinks, projectCoordinator: this.projectCoordinator,
+    const { store, sources, prompts, sessions, settings, engine, executor, backup, health, machine, masterId, ready, sourceLinks, setup, passes } = this
+    return { store, sources, prompts, sessions, settings, engine, executor, backup, health, machine, masterId, ready, sourceLinks, safeRestore: this.safeRestore, projectCoordinator: this.projectCoordinator,
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem ?? setup.githubProblem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
@@ -245,22 +272,28 @@ export class Runtime extends Service implements SourceHost {
   stop(): Promise<void> { return this.stopping ??= this.shutdown() }
   private async shutdown(): Promise<void> {
     this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
+    let canRelease = false
     try {
       this.assessor.stop()
-      const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
+      const ids = [this.masterId, ...this.store.tickets.list().filter(ticket => !ticket.projectId).map(ticket => workerSessionId(ticket.id)),
+        ...this.projectCoordinator.attempts.all().map(attempt => attempt.sessionId)]
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
       for (const agent of agents) agent.cancel({ kind: 'user' }, { keepInbox: true })
       // Startup may still be unwinding a cancelled probe or write; it must finish before environment restoration and DB/lock release.
-      await Promise.allSettled([this.ready, passes, this.effects.drain(), this.projectCoordinator.stop(), ...agents.map(agent => agent.whenIdle())])
+      await Promise.allSettled([this.ready, passes, this.effects.drain(), this.projectCoordinator.stop()])
       // The workers' jobs and subagents stop too: their ends would start worker turns without the tool limits released below.
-      await this.executor.shutdown()
+      // A timeout is an unknown boundary. Keep the sessions, executor and Store fenced and open until native work is known idle.
+      const drained = await this.executor.shutdown()
+      if (!drained) return
       this.executor.dispose()
       this.sessions.dispose()
       for (const dispose of this.disposers.reverse()) dispose()
       await this.ctx.sessionPersistence.flush()
+      canRelease = true
     } finally {
-      // Close the database before releasing the directory lock so another process cannot open the database mid-write; a compromised lock may already be released.
       this.setup.restore()
+      if (!canRelease) return
+      // Close the database before releasing the directory lock so another process cannot open the database mid-write; a compromised lock may already be released.
       try { this.store.close() } finally {
         const unreleased = (error: unknown) => { this.ctx.logger.warn('dsh-superagent could not release its state directory lock: %s',
           String(error)) }

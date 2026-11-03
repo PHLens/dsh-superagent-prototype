@@ -17,12 +17,20 @@ import type { SettingsVersion, Store } from './store.ts'
 import { Versions } from './versions.ts'
 import { KV, type Key } from '../kv.ts'
 
-export const SCHEMA_VERSION = 15
+export const SCHEMA_VERSION = 16
 /** The oldest database schema version this build can open and migrate directly. */
 export const OLDEST_SCHEMA = 10
 /** Returns an error message explaining why `version` cannot be opened: older schemas need a new state directory. */
 export const tooOld = (version: number): string =>
   `Orchestrator database schema ${version} predates schema ${OLDEST_SCHEMA}, which this version cannot migrate; start with a new state directory`
+/** T5 is a business-schema boundary even though its lifecycle fields remain in Ticket JSON/KV. */
+export function migrateTo16(store: Store): void {
+  for (const row of store.db.prepare('SELECT id, value FROM ticket').all()) {
+    const value = JSON.parse(String(row.value)) as Record<string, unknown>
+    if (!value.lifecycle) value.lifecycle = { pause: { intent: 'none', state: 'running', at: String(value.updatedAt ?? new Date().toISOString()) }, stop: { intent: 'none', state: 'running', at: String(value.updatedAt ?? new Date().toISOString()) }, observed: { state: 'unknown', at: String(value.updatedAt ?? new Date().toISOString()) } }
+    store.db.prepare('UPDATE ticket SET value=? WHERE id=?').run(JSON.stringify(value), String(row.id))
+  }
+}
 
 type Stored = Record<string, unknown>
 const isObject = (value: unknown): value is Stored => !!value && typeof value === 'object' && !Array.isArray(value)

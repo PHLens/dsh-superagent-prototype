@@ -60,7 +60,7 @@ declare module '@deepseek-ai/cordis' {
 }
 /** Increment when the managed file-tool contract changes incompatibly; absent versions are the original T4 v1. */
 const PROJECT_WORKER_TOOL_VERSION = 1
-const PROJECT_WORKER_TOOLS = ['project_worker_context', 'project_read_input', 'project_write_artifact', 'project_worker_report']
+const PROJECT_WORKER_TOOLS = ['project_worker_context', 'project_read_input', 'project_write_artifact', 'project_worker_report', 'project_worker_request_question']
 /**
  * The DSH tools an Executor Session works with: files, search, the shell and its jobs, the web, skills, its todo list and
  * subagents. It gets no other tool the profile has, whenever it was registered: none that asks or shows a person something,
@@ -270,7 +270,7 @@ export class Sessions {
         managed.context = { toolContractVersion: PROJECT_WORKER_TOOL_VERSION, promptRevision: host.prompts.current().revision,
           roleRules: PROJECT_WORKER_RULES, projectConventions: 'No additional project conventions registered',
           model: agent.session.requestHeader()?.config ?? host.store.settings().executor.model ?? 'Inherited native default; effective request config pending',
-          tools: [...inherited, ...PROJECT_WORKER_TOOLS], resources: [...assignment.contract!.plan.resources], skills: [] }
+          tools: [...inherited, ...tools.map(item => item.name)], resources: [...assignment.contract!.plan.resources], skills: [] }
         host.attempts!.save(managed)
       }
       const pinned = managed.context
@@ -284,7 +284,7 @@ export class Sessions {
       if (!isDeepStrictEqual(pinned.resources, assignment.contract!.plan.resources)) reconcile('resource range differs from the Assignment contract')
       binding.disposers.push(agent.ctx.tools.restrict({ allow: inherited.filter(name => pinned.tools.includes(name)) }), agent.ctx.tools.guard(execution => {
         // Receipt-capable services distinguish exact historical replay from strictly authorized new writes.
-        try { this.host.attempts!.resolve(agent.id, execution.name === 'project_worker_report' || execution.name === 'project_write_artifact') } catch (error) { return String(error) }
+        try { this.host.attempts!.resolve(agent.id, execution.name === 'project_worker_report' || execution.name === 'project_write_artifact' || execution.name === 'project_worker_request_question') } catch (error) { return String(error) }
         if (!pinned.tools.includes(execution.name)) return 'Tool has no registered project worker contract'
         return undefined
       }), agent.ctx.systemPrompt.section({ name: 'project-worker', order: 9999, interpolate: false, complete: true,
@@ -356,7 +356,10 @@ export class Sessions {
     const allow = WORK_TOOLS.filter(name => agent.ctx.tools.get(name, parent))
     return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(() => {
       const current = store.tickets.get(ticketId)
-      return !current || !liveTicket(current) ? 'Ticket ended; new work needs a new authorized ticket' : undefined
+      if (!current || !liveTicket(current)) return 'Ticket ended; new work needs a new authorized ticket'
+       if (current.lifecycle?.stop.intent === 'stop') return 'Ticket ended; new work needs a new authorized ticket'
+       if (current.lifecycle?.pause.intent === 'pause') return 'Ticket is paused; new work is fenced until explicit resume'
+       return undefined
     })]
   }
   /**

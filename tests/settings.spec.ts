@@ -99,3 +99,15 @@ it('records nothing for a pause that changes nothing, refuses a sync while setup
   vi.mocked(Setup.prototype.configured).mockRestore()
   expect(() => settings.block('source:x')).toThrow(new UserError('unknownBlock', { block: 'source:x' }))
 })
+
+it('exposes versioned backup settings and rejects stale backup saves', async () => {
+  h = await startRuntime()
+  const { settings, store } = h.runtime
+  expect(store.settings().backup).toEqual({ enabled: false, directory: '', intervalMinutes: 1440, retention: 7 })
+  expect(settings.view().backup).toMatchObject({ revision: 0, value: store.settings().backup })
+  const revision = store.blockRevision('backup')
+  await settings.save('backup', { enabled: true, directory: '/tmp/dsh-backups', intervalMinutes: 60, retention: 3 }, revision, 'panel')
+  expect(settings.block('backup')).toMatchObject({ block: 'backup', value: { enabled: true, directory: '/tmp/dsh-backups', intervalMinutes: 60, retention: 3 } })
+  await expect(settings.save('backup', { enabled: false, directory: '', intervalMinutes: 1440, retention: 7 }, revision, 'panel')).rejects.toThrow(SettingsConflict)
+  await expect(settings.save('backup', { enabled: true, directory: 'relative', intervalMinutes: 60, retention: 3 }, store.blockRevision('backup'), 'panel')).rejects.toThrow()
+})

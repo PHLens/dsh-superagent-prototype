@@ -14,6 +14,7 @@ import { SetupError, type SetupProblem } from '../setup.ts'
 import { UserError, type EngineForPeople, type Ticket } from '../core/index.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import type { DshExecutor } from '../executor/dsh.ts'
+import type { BackupService } from './backup-service.ts'
 import type { Health } from '../sources/host.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import type { Sessions } from './sessions.ts'
@@ -40,10 +41,12 @@ export interface HttpHost {
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople
-  readonly executor: Pick<DshExecutor, 'activeCount'>
+  readonly executor: Pick<DshExecutor, 'activeCount' | 'reconcileTicket' | 'continueAfterAttention'>
+  readonly backup: Pick<BackupService, 'run' | 'status' | 'list' | 'restore'>
   readonly health: Record<string, Health>
   readonly machine: Machine
   readonly masterId: string
+  readonly safeRestore?: boolean
   /** Resolves once startup finishes or setup determines what is still missing. */
   readonly ready: Promise<void>
   /** Resolved deployment; throws if read while waiting for setup (`!configured()`). */
@@ -110,7 +113,7 @@ export function stateView(runtime: HttpHost) {
   const settings = runtime.store.settings()
   return { setup: setupView(runtime), load: { ...executorLoad(runtime.store, runtime.executor.activeCount()),
     maxWorkers: settings.executor.maxWorkers },
-    masterId: runtime.masterId, paused: settings.paused, health: runtime.health }
+    masterId: runtime.masterId, paused: settings.paused, health: runtime.health, ...(runtime.safeRestore ? { safeRestore: true } : {}) }
 }
 const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources: runtime.sources, links: runtime.links() })
 const setupState = (runtime: HttpHost): SetupState => ({ deployment: runtime.configured() ? runtime.deployment : undefined,
@@ -155,12 +158,13 @@ const DecisionsQuery = z.object({ kind: z.string().default(''), window: z.litera
 const count = z.coerce.number().int().nonnegative()
 const PromptsQuery = z.object({ revision: count.optional(), offset: count.default(0) })
 const SourceBlock = z.templateLiteral(['source:', z.string().regex(/^[a-z][a-z0-9-]*$/)])
-const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor']), SourceBlock])
+const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor', 'backup']), SourceBlock])
 const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().nonnegative() })
 
 function routes(runtime: HttpHost): Routes {
   const { store } = runtime
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
+  const writable = () => { if (runtime.safeRestore) throw new RouteError(400, 'Recovery profile is offline read-only') }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   const projectHost = (actorId: string | undefined) => {
     if (!actorId) throw new ProjectAuthError(401, 'DSH login required')
@@ -203,6 +207,14 @@ function routes(runtime: HttpHost): Routes {
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
     'GET sources': () => sourcesStatus(views(runtime), runtime.health, setupState(runtime)),
     'GET settings': () => settingsView(store, runtime.sources, runtime.health, setupState(runtime), runtime.machine.stateDir),
+     'GET backup/status': () => runtime.backup.status(),
+     'GET backup/points': () => ({ points: runtime.backup.list() }),
+     'POST backup/create': async () => { writable(); return { manifest: await runtime.backup.run('manual') } },
+     'POST backup/restore': async ({ body }) => {
+       writable()
+       const input = z.object({ source: z.string().min(1), destination: z.string().min(1) }).strict().parse(await body())
+       return { manifest: runtime.backup.restore(input.source, input.destination) }
+     },
     'POST sources/:id/labels': ({ params }) => runtime.settings.refreshLabels(params.id),
     'GET threads': ({ query }) => {
       const { filter, offset, limit } = ThreadsQuery.parse(query)
@@ -234,8 +246,18 @@ function routes(runtime: HttpHost): Routes {
       return ticketList(views(runtime), state, offset, limit)
     },
     'GET tickets/:id': ({ params }) => ticketPage(runtime, params.id),
-    'POST tickets/:id/retry': ({ params }) => { const id = ticket(params.id); runtime.engine.retryTicket(id); return { retried: true } },
-    'POST tickets/:id/stop': ({ params }) => { const id = ticket(params.id); runtime.engine.stopTicket(id); return { stopped: true } },
+    'POST tickets/:id/retry': ({ params }) => { writable(); const id = ticket(params.id); runtime.engine.retryTicket(id); return { retried: true } },
+     'POST tickets/:id/reconcile': async ({ params, body }) => { writable(); const id = ticket(params.id); const input = z.object({ operationId: z.string().min(1) }).strict().parse(await body()); return runtime.executor.reconcileTicket(id, input.operationId) },
+    'POST tickets/:id/stop': ({ params }) => { writable(); const id = ticket(params.id); runtime.engine.stopTicket(id); return { stopped: true, stopping: true } },
+    'POST tickets/:id/pause': ({ params }) => { writable(); const id = ticket(params.id); runtime.engine.pauseTicket(id); return { paused: true } },
+    'POST tickets/:id/resume': ({ params }) => { writable(); const id = ticket(params.id); runtime.engine.resumeTicket(id); return { resumed: true } },
+     'POST tickets/:id/attention': async ({ params, actorId, body }) => {
+      writable(); const id = ticket(params.id), input = z.object({ version: z.number().int().positive(), questionId: z.string().min(1), text: z.string().min(1) }).strict().parse(await body())
+      const source = 'web', actor = { source, id: actorId ?? 'panel' }
+      const result = runtime.engine.answerAttention(id, input.version, actor, source, input.text, input.questionId)
+      if (result.resolved) await runtime.executor.continueAfterAttention(id, result.answer.id, result.answer.text)
+       return { resolved: result.resolved, version: input.version }
+    },
     'POST executor/pause': async ({ body }) => runtime.settings.pause(z.object({ paused: z.boolean() }).parse(await body()).paused, 'panel'),
     'PUT settings/:block': async ({ params, body }) => {
       const block = SettingsBlockSchema.parse(params.block)
@@ -296,6 +318,7 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
         await runtime.ready
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))
         if (!route) throw new RouteError(404, 'Unknown operation')
+        if (runtime.safeRestore && req.method !== 'GET') throw new RouteError(400, 'Recovery profile is offline read-only')
         const query = Object.fromEntries(url.searchParams)
         json(res, 200, await route.run({ params: route.params as never, query, actorId, body: maxBytes => readBody(req, maxBytes) }))
       } catch (error) { json(res, ...failure(error)) }

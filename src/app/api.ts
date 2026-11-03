@@ -11,6 +11,7 @@ import type { SourceStatusView } from './views/sources.ts'
 import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } from './views/threads.ts'
 import type { TicketListView } from './views/tickets.ts'
 import type { Assignment, PlanAuthorization, PlanExecutionTarget, Project as ProjectModel, Ticket } from '../core/model.ts'
+import type { ProjectProgress } from './project-progress.ts'
 
 export type Project = ProjectModel
 export type ConversationRole = 'user' | 'assistant'
@@ -25,6 +26,7 @@ export interface ConversationMessage {
   error?: string
 }
 export interface ProjectTaskView extends Ticket {
+  progress?: ProjectProgress
   planRevisions?: Ticket['planRevisions']
   authorizations?: Ticket['authorizations']
   executionTargets?: Ticket['executionTargets']
@@ -61,6 +63,10 @@ export interface Api {
   'GET search': { query: { q: string }; response: SearchView }
   'GET sources': { response: SourceStatusView[] }
   'GET settings': { response: SettingsView }
+  'GET backup/status': { response: ReturnType<import('./backup-service.ts').BackupService['status']> }
+  'GET backup/points': { response: { points: ReturnType<import('./backup-service.ts').BackupService['list']> } }
+  'POST backup/create': { response: { manifest: import('./backup.ts').RecoveryManifest } }
+  'POST backup/restore': { body: { source: string; destination: string }; response: { manifest: import('./backup.ts').RecoveryManifest } }
   'POST sources/:id/labels': { response: { added: string[] } }
   'GET threads': { query?: Paged & { filter?: ThreadFilter }; response: ThreadListView }
   'GET threads/:key': { query?: { limit?: number; before?: string; around?: string }; response: ThreadDetailView }
@@ -71,7 +77,11 @@ export interface Api {
   'GET tickets': { query?: Paged & { state?: TicketFilter }; response: TicketListView }
   'GET tickets/:id': { response: TicketPageView }
   'POST tickets/:id/retry': { response: { retried: true } }
-  'POST tickets/:id/stop': { response: { stopped: true } }
+  'POST tickets/:id/reconcile': { body: { operationId: string }; response: { state: 'checking' | 'clear' | 'unknown'; operationId: string } }
+  'POST tickets/:id/stop': { response: { stopped: boolean; stopping?: boolean } }
+  'POST tickets/:id/pause': { response: { paused: true } }
+  'POST tickets/:id/resume': { response: { resumed: true } }
+  'POST tickets/:id/attention': { body: { version: number; questionId?: string; text: string }; response: { resolved: boolean; version: number } }
   'POST executor/pause': { body: { paused: boolean }; response: { paused: boolean } }
   'PUT settings/:block': { body: { value: unknown; revision: number }; response: { revision: number; restarting: boolean } }
   'GET policy/history': { response: HistoryView }

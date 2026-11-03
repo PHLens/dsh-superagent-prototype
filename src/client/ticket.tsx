@@ -3,7 +3,8 @@ import { useState, type ReactNode } from 'react'
 import { ApiError, usePoll, type TicketPageView } from './api.ts'
 import { DisclosureRow, Dot, Icon, Tag, type IconName } from './controls.tsx'
 import { decisionMark, reportDot, ticketMark } from './marks.ts'
-import { usePanel } from './provider.tsx'
+import { usePanel, usePanelData } from './provider.tsx'
+import { TaskLifecycle } from './task-lifecycle.tsx'
 import { settingsRoute } from './route.ts'
 import { Earlier, ThreadLine, automatedRuns } from './rows.tsx'
 import { actorName, localized, readableMarkers, reasonLabel, valueLabel, when } from './text.ts'
@@ -107,11 +108,14 @@ function MandateDetails({ ticket, actor }: { ticket: TicketPageView; actor: stri
 
 export function TicketPage({ id }: { id: string }) {
   const { t, call } = usePanel()
+  const { state } = usePanelData()
+  const readOnly = !state || !!state.safeRestore
   const { data, error, reload } = usePoll(() => call('GET tickets/:id', { id }), [id])
   const after = async (request: Promise<unknown>) => { await request; await reload() }
   if (!data) return <><PageHead
     title={t('term.ticket')} />{error instanceof ApiError && error.missing ? <Hint>{t('ticketNotFound')}</Hint> : <LoadState
       error={error} loading />}</>
+  if (data.id !== id) return <LoadState loading />
   const status = ticketMark(t, data)
   const actor = actorName(t, data.mandate.actor)
   const { legacy } = data.basis
@@ -128,10 +132,12 @@ export function TicketPage({ id }: { id: string }) {
   return <>
     <PageHead title={data.title}>
       {opening?.url && <ActionLink href={opening.url}>{t('openThread', { source: valueLabel(t, 'source', opening.source) })}</ActionLink>}
-      {data.actions.retry && <ConfirmButton variant="outline" icon="refresh" label={t('retry')} title={t('retryTitle')}
+      {data.actions.retry && !readOnly && data.lifecycle?.pause.intent !== 'pause' && data.lifecycle?.stop.intent !== 'stop'
+        && data.lifecycle?.reconciliation?.state !== 'checking' && data.lifecycle?.reconciliation?.state !== 'unknown'
+        && <ConfirmButton variant="outline" icon="refresh" label={t('retry')} title={t('retryTitle')}
         message={t('retryConfirm', { title: data.title })}
         onConfirm={() => after(call('POST tickets/:id/retry', { id }))} />}
-      {data.sessionId && <SessionButton variant="outline" sessionId={data.sessionId} />}
+      {data.sessionId && !readOnly && <SessionButton variant="outline" sessionId={data.sessionId} />}
     </PageHead>
     {error && <LoadState error={error} loading={false} />}
     <div className="dt-row-meta dt-status-line">
@@ -140,13 +146,12 @@ export function TicketPage({ id }: { id: string }) {
       <LabelValue label={t('ticketActorLabel')} value={`${valueLabel(t, 'source', data.mandate.actor.source)} · ${actor}`} />
       <LabelValue label={t('ticketUpdatedLabel')} value={when(data.updatedAt, t('lang'))} />
     </div>
+    {state?.safeRestore && <Hint>{t('recoveryReadOnly')}</Hint>}
+    <TaskLifecycle key={id} id={id} lifecycle={data.lifecycle} attention={data.attention} ended={!!data.ended}
+      enabled={data.state === 'open'} readOnly={readOnly} showStop={false} reload={reload}
+      questionActions={channel && <ActionLink href={channel.url} icon="message">{t('answerIn', { source: valueLabel(t, 'source', channel.source) })}</ActionLink>} />
     {ended && <Hint>{ended}</Hint>}
-    {data.attention && <div className="dt-banner"><span className="dt-banner-label">{t('attentionPrefix')}</span><MarkdownLite
-      text={data.attention.question} />
-      {channel && <div className="dt-banner-actions">
-        <ActionLink href={channel.url} icon="message">{t('answerIn', { source: valueLabel(t, 'source', channel.source) })}</ActionLink>
-      </div>}</div>}
-    {/* Ordinary progress stays in the Session/Channels; only a report that halted work (blocked/failed) is shown here. */}
+     {/* Ordinary progress stays in the Session/Channels; only a report that halted work (blocked/failed) is shown here. */}
     {data.actions.retry && data.summary && <p className={`dt-banner${failed ? ' dt-danger' : ''}${failedText ? ' dt-mono' : ''}`}>
       <span className="dt-banner-label">{t(failed ? 'failedPrefix' : 'blockedPrefix')}</span>{data.summary}
     </p>}
@@ -189,7 +194,7 @@ export function TicketPage({ id }: { id: string }) {
             className="dt-mono dt-clamp">{data.mandate.scope}</span>] as [string, ReactNode]] : []]} />
       </Details>
     </div>
-    {data.actions.stop && <div className="dt-danger-zone">
+    {data.actions.stop && !readOnly && data.lifecycle?.stop.intent !== 'stop' && <div className="dt-danger-zone">
       <span className="dt-hint">{t('stopHint')}</span>
       <ConfirmButton variant="outline" label={t('stop')} title={t('stopConfirmTitle')} message={t('stopConfirm', { title: data.title })}
         onConfirm={() => after(call('POST tickets/:id/stop', { id }))} />

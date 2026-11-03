@@ -13,7 +13,7 @@ import type { DroppedReply, HistoryView, Problem, PromptsView, SetupView, Source
   TicketRow, TicketStage,
   TriggerRow } from '../../src/client/api.ts'
 import { SETUP_FIELDS } from '../../src/deployment.ts'
-import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema } from '../../src/policy.ts'
+import { BackupConfigSchema, EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema } from '../../src/policy.ts'
 import { SetupError, type SetupCode } from '../../src/setup.ts'
 import { feishuChannel } from '../../src/sources/feishu-trigger.ts'
 import { githubChannel } from '../../src/sources/github-trigger.ts'
@@ -37,7 +37,7 @@ export function actor(source: string, id: string, human = true): Actor {
 type TicketFields = Omit<TicketRow, 'stage' | 'action'>
 const TICKET = {
   id: 't1', title: '修复回归', state: 'open', actions: { retry: false, stop: true }, strength: 'explicit', ended: undefined,
-  attention: undefined, assignments: 1, inputs: 2, undelivered: 0, deliveryError: undefined, sessionId: 'worker-t1', directory: '/w/t1',
+  attention: undefined, lifecycle: undefined, assignments: 1, inputs: 2, undelivered: 0, deliveryError: undefined, sessionId: 'worker-t1', directory: '/w/t1',
   summary: 'working on it', createdAt: '2026-09-22T00:00:00Z', updatedAt: '2026-09-23T00:00:00Z',
   threads: [{ key: 'github:42', source: 'github', title: '#42 Fix login', url: 'https://github.com/acme/widgets/pull/42',
     facts: { number: { value: '#42' }, ci: { label: { zh: 'CI 失败', en: 'CI failed' }, value: '1', problem: true } } }],
@@ -169,7 +169,8 @@ const settingsView = (): ApiResponse<'GET settings'> => ({
   policyVersion: 'abcdef1234567890',
   blocks: { policy: { value: server.settings.policy, revision: server.revisions.policy ?? 0 },
     eval: { value: server.settings.eval, revision: server.revisions.eval ?? 0 },
-    executor: { value: server.settings.executor, revision: server.revisions.executor ?? 0 } },
+    executor: { value: server.settings.executor, revision: server.revisions.executor ?? 0 },
+    backup: { value: server.settings.backup, revision: server.revisions.backup ?? 0 } },
   sources: sourceSettings(),
   environment: { root: '/srv/dsh-superagent/work', variables: [
     { owner: 'executor', enabled: true, variables: [{ key: 'DSH_SUPERAGENT_DIR', description: { zh: '工单的执行目录',
@@ -337,6 +338,10 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   } },
   'GET sources': { answer: sourceStatuses },
   'GET settings': { answer: settingsView },
+  'GET backup/status': { answer: () => ({ configured: true, running: false, health: { state: 'ready', detail: 'Fixture backup ready' } }) },
+  'GET backup/points': { answer: () => ({ points: [] }) },
+  'POST backup/create': { answer: () => ({ manifest: {} as never }) },
+  'POST backup/restore': { body: true, answer: () => ({ manifest: {} as never }) },
   'POST sources/:id/labels': { answer: () => {
     // Label refresh failures come from the bot CLI and are returned verbatim.
     if (server.joinError) return refuse(500, server.joinError)
@@ -370,11 +375,15 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     return ticket.actions.retry ? { retried: true } : refuse(400, 'Only an open ticket can be retried, and only when its worker last reported failed or blocked and no person has sent a message since, or when delivering an Input to its worker failed',
       { code: 'notRetryable', values: {} })
   } },
+  'POST tickets/:id/reconcile': { body: true, answer: ({ params, body }) => ticketOf(params.id) ? { state: 'unknown', operationId: body.operationId } : refuse(404, 'Ticket not found') },
   'POST tickets/:id/stop': { answer: ({ params }) => {
     if (!ticketOf(params.id)) return refuse(404, 'Ticket not found')
     server.tickets.open = []; server.person = server.person.filter(ticket => ticket.id !== params.id)
     return { stopped: true }
   } },
+  'POST tickets/:id/pause': { answer: ({ params }) => ticketOf(params.id) ? { paused: true } : refuse(404, 'Ticket not found') },
+  'POST tickets/:id/resume': { answer: ({ params }) => ticketOf(params.id) ? { resumed: true } : refuse(404, 'Ticket not found') },
+  'POST tickets/:id/attention': { body: true, answer: ({ params, body }) => ticketOf(params.id) ? { resolved: true, version: body.version } : refuse(404, 'Ticket not found') },
   'POST executor/pause': { body: true, answer: ({ body }) => {
     server.settings = { ...server.settings, paused: body.paused }
     server.revisions.pause = (server.revisions.pause ?? 0) + 1
@@ -382,13 +391,14 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   } },
   'PUT settings/:block': { body: true, answer: ({ params: { block }, body }) => {
     const source = block.startsWith('source:') ? KINDS.find(kind => `source:${kind.kind}` === block) : undefined
-    if (!['policy', 'eval', 'executor'].includes(block) && !source) return block.startsWith('source:') ? refuse(404, 'Source not found')
+    if (!['policy', 'eval', 'executor', 'backup'].includes(block) && !source) return block.startsWith('source:') ? refuse(404, 'Source not found')
       : refuse(400, 'Invalid settings: block')
     if (body.revision !== (server.revisions[block] ?? 0)) return refuse(409, 'Settings changed. Reload before saving.')
     let restarting = false
     if (block === 'policy') server.settings = { ...server.settings, policy: PolicyConfigSchema.parse(body.value) }
     else if (block === 'executor') server.settings = { ...server.settings, executor: ExecutorConfigSchema.parse(body.value) }
     else if (block === 'eval') server.settings = { ...server.settings, eval: EvalConfigSchema.parse(body.value) }
+    else if (block === 'backup') server.settings = { ...server.settings, backup: BackupConfigSchema.parse(body.value) }
     else if (source) {
       const { enabled, config: value } = SourceSave.parse(body.value)
       const config = source.schema.parse(value)

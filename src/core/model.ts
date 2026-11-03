@@ -82,7 +82,7 @@ export function followupOwners(trigger: Pick<Trigger, 'id' | 'human' | 'threads'
   if (!reached.length || records.threads.get(threadKey(trigger.threads[0]!))?.evaluating?.triggerIds.includes(trigger.id)) return []
   return reached.filter(id => {
     const ticket = records.tickets.get(id)
-    return !!ticket && (liveTicket(ticket) || (ticket.ended?.by !== 'human'
+    return !!ticket && ticket.lifecycle?.stop.intent !== 'stop' && (liveTicket(ticket) || (ticket.ended?.by !== 'human'
       && ticket.inputs.some(input => input.kind === 'trigger' && input.triggerId === trigger.id && ticket.undelivered.includes(input.id))))
   })
 }
@@ -354,7 +354,25 @@ export type TicketEndBy = 'executor' | 'human'
 /** How a ticket ended: with its result, with its pull request merged or closed unmerged, with nothing to do, or stopped by a person. */
 export type TicketOutcome = 'completed' | 'merged' | 'closed' | 'dropped' | 'stopped'
 /** A question for a person; `triggerId` is the human message that raised it, whose conversation it goes back to. */
-export interface Attention { id: string; question: string; triggerId?: string }
+export type PauseIntent = 'none' | 'pause' | 'resume'
+export type StopIntent = 'none' | 'stop'
+export type ObservedHostState = 'unknown' | 'ready' | 'running' | 'idle' | 'exited'
+export interface LifecycleState {
+  pause: { intent: PauseIntent; state: 'running' | 'pausing' | 'paused'; at: string; observedAt?: string }
+  stop: { intent: StopIntent; state: 'running' | 'stopping' | 'exited'; at: string; observedAt?: string }
+  observed: { state: ObservedHostState; at: string; reason?: string }
+  checkpoint?: { id: string; at: string; assignmentId?: string; attemptId?: string; files: readonly string[] }
+  reconciliation?: { state: 'checking' | 'clear' | 'unknown'; operationId?: string; startedAt: string; observedAt?: string; assignmentId?: string; attemptId?: string; lease?: string; sessionId?: string; reason?: string; ownerIds?: string[]; attemptLeases?: string[]; pauseIntent?: PauseIntent; stopIntent?: StopIntent }
+  reconciliationHistory?: { state: 'clear' | 'unknown'; operationId: string; startedAt: string; observedAt: string; assignmentId?: string; attemptId?: string; lease?: string; sessionId?: string; reason?: string; ownerIds?: string[]; attemptLeases?: string[]; pauseIntent?: PauseIntent; stopIntent?: StopIntent }[]
+  attentionContinuation?: { answerId: string; answerText: string; questionId?: string; version?: number; assignmentId?: string; attemptId?: string; lease?: string; sessionId?: string; deliveredAt?: string }
+}
+/** Immutable question version; answers are append-only and only the first valid one is consumed. */
+export interface AttentionAnswer { id: string; questionId: string; version: number; actor: ActorRef; source: string; text: string; at: string; consumed?: true; conflict?: true }
+export interface AttentionBinding { assignmentId: string; attemptId: string; lease: string; sessionId: string }
+export interface Attention { id: string; /** Defaults to 1 for records created before versioned attention. */ version?: number; question: string; triggerId?: string; binding?: AttentionBinding; answers?: AttentionAnswer[]; resolvedAt?: string }
+/** Immutable question receipts, scoped to a server-owned execution attempt. */
+export interface AttentionQuestionOperation { operationId: string; binding: AttentionBinding; question: Attention }
+export interface AttentionHistoryEntry extends Attention { resolvedAt: string; answers: AttentionAnswer[] }
 /** Project stages remain inert to the legacy executor, including after T3 confirmation. */
 export type ProjectTicketStage = 'draft' | 'awaiting-confirmation' | 'confirmed'
 
@@ -377,8 +395,13 @@ export interface Ticket {
   channels: ChannelRef[]
   /** When, by whom, and how the ticket ended, with a person's or the host's reason beyond the outcome; an open ticket has none. */
   ended?: { at: string; by: TicketEndBy; outcome: TicketOutcome; reason?: string }
-  /** Open question for a person; cleared by the executor or when the ticket ends. */
+  /** Open question for a person; notification delivery never resolves it. */
   attention?: Attention
+  attentionHistory?: AttentionHistoryEntry[]
+  attentionQuestionOperations?: AttentionQuestionOperation[]
+  attentionSequence?: number
+  /** Persisted pause/stop intent and the last host observation. */
+  lifecycle?: LifecycleState
   assignments: Assignment[]
   inputs: TicketInput[]
   /** Inputs not yet handed to a running assignment. */

@@ -335,11 +335,14 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/setup.ts` | Setup, and `setupChanged`, whether a save changes a field setup reads |
 | `src/app/passes.ts` | Passes, the pass scheduler |
 | `src/app/outbox.ts` | The Outbox: the Engine's `Outbox` port, the receipts and the `reply` effects that send them |
+| `src/app/backup.ts` | WAL-inclusive recovery points, immutable file inventories, and offline read-only restore profiles |
+| `src/app/backup-service.ts` | Scheduled and manual recovery points, retention, health reporting and safe restore delegation |
 | `src/app/notices.ts` | The main Session's notices and relays: `eventNotice`, `reportRelay`, `resultRelay` and `followupRelay` |
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
 | `src/app/project-store.ts` | SQLite project repository with stable ids; project lifecycle stays in the core service |
 | `src/app/conversation-store.ts` | Durable owned business conversation, input idempotency, per-project leases, mapping generations and prompt checkpoints |
 | `src/app/project-coordinator.ts` | Independent project discussion lanes, restart reconciliation, retry and coordinator lifecycle |
+| `src/app/project-progress.ts` | Root-owned project task progress projection helpers |
 | `src/app/project-plans.ts` | Authenticated project-plan adapter: persisted confirmation evidence, plan version anchoring, authorization and Assignment projection |
 | `src/app/execution-attempts.ts` | Server-owned Assignment execution identity, preparation evidence, filesystem boundaries and lease validation |
 | `src/app/artifact-store.ts` | Managed write intents, immutable SHA256 file versions, exact-version reads and interrupted-operation reconciliation |
@@ -411,7 +414,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/overview.tsx` | The overview |
 | `src/client/source.tsx`, `trigger.tsx`, `eval.tsx`, `execution.tsx` | One file per stage: its status, and its settings where it has some |
 | `src/client/thread.tsx`, `ticket.tsx` | The record pages: a Thread with its timeline, and a Ticket with its authorization, Inputs and Assignments |
+| `src/client/task-lifecycle.tsx` | Pause, resume, stop, retry, reconciliation status and versioned Attention actions shared by project and ticket pages |
 | `src/client/settings.tsx` | The Settings tab: the group navigation and the group on screen |
+| `src/client/backup.tsx` | Backup settings, recovery status, and the read-only recovery view |
 | `src/client/settings-kit.tsx` | The building blocks of settings blocks: the settings the stage groups share, `useBlockDraft`, the fields, among them a Source kind's, and the history of saves |
 | `src/client/prompts.tsx` | The Prompts settings: the page owns the view it read and its editor the draft, and the Edit, Full prompt and History tabs render from them; a built-in part's editor shows a changed default and keeps or drops the override |
 | `src/client/prompt-config.ts` | The prompt configuration by section, by the team sections, skill names, built-in parts (`part/<key>`, with `withOverride`) and part headings the prompt views give, and the line diff of the full prompt, as pure functions |
@@ -467,12 +472,20 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/project-conversation.spec.ts` | Business input/reply persistence, idempotency, ownership and project lane isolation |
 | `tests/coordinator-recovery.spec.ts` | Mapping replacement, prompt restart persistence and stale-generation/state rejection |
 | `tests/project-coordinator.spec.ts` | Project lane concurrency, durable dispatch, retry races and restart recovery |
+| `tests/project-progress.spec.ts` | Read-only project progress projection, exact attempt/report/artifact gates and lifecycle phases |
 | `tests/project-session.spec.ts` | Completed durable turn projection, interrupted draft exclusion and Session message references |
 | `tests/project-auth.spec.ts` | Host admission, stable owner identity, authentication rejection and unavailable-host denial |
 | `tests/project-panel.spec.tsx` | Project creation, navigation, durable discussion, immutable artifact content and explicit semantic review |
 | `tests/project-execution.spec.ts` | Authorized worker context, file acceptance, independent owner decisions, terminal receipt replay and stale execution rejection |
 | `tests/artifact-recovery.spec.ts` | Interrupted write intent/effect reconciliation, fixed input versions, corruption/isolation rejection and durable returns after reopen |
 | `tests/project-worker-runtime.spec.ts` | Registered native tools with Session guards, shared worker slots and completed confirmation replay/explicit rerun through the coordinator |
+| `tests/lifecycle-boundaries.spec.ts` | Durable shutdown fences, missing/unloaded owner jobs, fresh retry leases, failed resume gates, pause settle coalescing, stale-worker fencing, semantic review reuse and Store reopen receipt boundaries |
+| `tests/reconciliation.spec.ts` | Authenticated owner reconciliation contract, strict operation schema and persisted server-owned evidence |
+| `tests/t5-reconcile-boundaries.spec.ts` | Permanent reconciliation boundaries for post-await jobs, intent and lease CAS, attempt repair, artifact journals, outbound receipts and failure recovery |
+| `tests/backup.spec.ts` | WAL-inclusive recovery snapshots, credential exclusions, incomplete capture markers, confined hash-verified restore and inert recovery profile |
+| `tests/backup-service.spec.ts` | Scheduler replacement, concurrent run coalescing, retention configuration and stopped-service behavior |
+| `tests/t5-backup-attention-runtime-review.spec.ts` | Runtime backup material restore, safe-restore fencing and exactly-once Attention continuation review boundaries |
+| `tests/t5-attention-continuation.spec.ts` | Bound Question operation receipts, authoritative answers, serialized continuation delivery and restart recovery |
 | `tests/projects.spec.ts` | Project identity and Ticket/Assignment ownership; unauthorized drafts never execute |
 | `tests/no-github-startup.spec.ts` | Startup and application project APIs without external accounts; resource-specific readiness and safe environment |
 | `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |
@@ -482,8 +495,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry |
 | `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
+| `tests/task-lifecycle-panel.spec.tsx` | Lifecycle actions, reconciliation status, versioned Attention answers and safe-restore write fencing in the shared task panel |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
-| `tests/panel-settings.spec.tsx`, `panel-prompts.spec.tsx`, `panel-deployment.spec.tsx`, `panel-panel.spec.tsx` | The settings groups, drafts and history, the prompts, the Deployment page, and the panel's search, glossary and route memory |
+| `tests/panel-settings.spec.tsx`, `panel-prompts.spec.tsx`, `panel-deployment.spec.tsx`, `panel-panel.spec.tsx`, `panel-backup.spec.tsx` | The settings groups, drafts and history, the prompts, the Deployment page, the backup page, and the panel's search, glossary and route memory |
 | `tests/draft.spec.ts`, `tests/prompt-config.spec.ts`, `tests/markdown.spec.ts`, `tests/marks.spec.ts` | Draft states, merges and the save bar's line; the prompt configuration by section and the line diff; the Markdown subset and its links; the mark of every state the views classify |
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |

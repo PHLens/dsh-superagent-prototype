@@ -70,6 +70,13 @@ it('reads a prompt file whatever its line ends and blank lines, and names a miss
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+it('describes current project worker facts instead of the obsolete executor placeholder', () => {
+  const prompt = promptFile('project')
+  expect(prompt).not.toContain('executor-unavailable until the T4 executor exists')
+  expect(prompt).toContain('a confirmation receipt or placeholder target alone never proves execution or completion')
+  expect(prompt).toContain('GitHub and Feishu are optional resources')
+})
+
 it('leaves the UI before-and-after evidence to the delivery requirements, which a team can change', () => {
   const config = { ...defaultPrompts(), delivery: 'Only capture the finished screen.' }
   for (const role of ['orchestrator', 'worker'] as const) expect(composePrompt(config, role)).not.toContain('Before and After visual evidence')

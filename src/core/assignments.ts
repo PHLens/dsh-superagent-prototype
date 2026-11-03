@@ -114,7 +114,11 @@ export class Assignments extends EnginePart {
     if (assignment.state === 'ended') throw new UserError('assignmentEnded')
     const at = this.now()
     const previous = ticket.attention
-    const ask = (question: string) => ({ id: key('attention', ticketId, question, at), question, ...(report.askedBy ? { triggerId: report.askedBy } : {}) })
+    const ask = (question: string) => {
+      const version = (ticket.attentionSequence ?? previous?.version ?? 0) + 1
+      ticket.attentionSequence = version
+      return { id: key('attention', ticketId, String(version)), version, question, ...(report.askedBy ? { triggerId: report.askedBy } : {}) }
+    }
     const asked = report.question && report.question !== previous?.question ? ask(report.question) : previous
     const attention = report.question === null || report.state === 'ready' ? undefined : asked
     if (attention) ticket.attention = attention

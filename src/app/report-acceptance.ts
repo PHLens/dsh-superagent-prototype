@@ -63,11 +63,11 @@ export class ReportAcceptance {
         targetVersion: this.target(report), conditionsVersion: assignment.contract!.plan.acceptance?.version ?? assignment.contract!.planRevision,
         judge: { actorId, source: 'authenticated-web', generation: attempt.lease }, conclusion: input.conclusion, evidence: input.evidence, at: new Date().toISOString() }
       this.store.db.prepare('INSERT INTO acceptance_decision VALUES (?,?,?,?)').run(decision.id, ticket.id, input.operationId, JSON.stringify(decision))
-      this.aggregate(ticket, assignment, attempt, report)
+      this.aggregate(ticket, assignment, attempt, report, decision.at)
       return decision
     })
   }
-  private aggregate(ticket: Ticket, assignment: Assignment, attempt: Attempt, report: AcceptedReport): void {
+  private aggregate(ticket: Ticket, assignment: Assignment, attempt: Attempt, report: AcceptedReport, completionAt = report.at): void {
     let reason: string | undefined
     if (report.state !== 'ready') reason = report.state === 'progress' ? undefined : report.state
     else {
@@ -80,9 +80,9 @@ export class ReportAcceptance {
         if (decision?.conclusion !== 'passed') reason = decision?.conclusion ?? 'semantic-review'
       }
       if (!reason) {
-        assignment.state = 'ended'; assignment.endedAt = report.at; assignment.endedReason = 'accepted'; assignment.report = { state: 'ready', summary: report.completed, at: report.at }
+        assignment.state = 'ended'; assignment.endedAt = completionAt; assignment.endedReason = 'accepted'; assignment.report = { state: 'ready', summary: report.completed, at: report.at }
         attempt.status = 'ended'; this.attempts.save(attempt)
-        if (ticket.assignments.filter(item => item.contract).every(item => item.state === 'ended' && item.endedReason === 'accepted')) ticket.ended = { at: report.at, by: 'executor', outcome: 'completed' }
+        if (ticket.assignments.filter(item => item.contract).every(item => item.state === 'ended' && item.endedReason === 'accepted')) ticket.ended = { at: completionAt, by: 'executor', outcome: 'completed' }
       }
     }
     assignment.waitingReason = reason as Assignment['waitingReason']

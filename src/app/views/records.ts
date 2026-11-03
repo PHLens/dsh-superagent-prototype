@@ -127,7 +127,7 @@ export function ticketSummary(ticket: Ticket) {
     deliveryError: attribute(ticket.delivery?.error), sessionId: ticket.assignments.some(item => item.startedAt)
       ? workerSessionId(ticket.id) : '',
     directory: attribute(ticket.execution?.directory), summary: latestReport(ticket)?.summary ?? '', createdAt: ticket.createdAt,
-    updatedAt: ticket.updatedAt }
+    updatedAt: ticket.updatedAt, lifecycle: ticket.lifecycle }
 }
 export type TicketSummaryView = ReturnType<typeof ticketSummary>
 function threadUrl(store: Store, thread: Thread): string | undefined {

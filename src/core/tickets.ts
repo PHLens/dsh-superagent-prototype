@@ -2,8 +2,8 @@
 import { key } from './ids.ts'
 import { UserError } from './errors.ts'
 import { executableTicket, latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, threadKey, waitsForPerson } from './model.ts'
-import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome,
-  Trigger, TriggerDisposition } from './model.ts'
+import type { Assignment, AttentionAnswer, ChannelRef, Evaluation, Follow, LifecycleState, Mandate, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome,
+  Trigger, TriggerDisposition, ActorRef } from './model.ts'
 import type { AssessmentOutcome } from './ports.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Replies } from './replies.ts'
@@ -159,8 +159,85 @@ export class Tickets extends EnginePart {
    * @throws UserError when the ticket is unknown.
    */
   stop(ticketId: string, reason?: string): Ticket {
-    this.end(ticketId, 'human', 'stopped', this.now(), reason)
+    const ticket = this.require(ticketId)
+    const at = this.now()
+    ticket.lifecycle = this.lifecycle(ticket)
+    ticket.lifecycle.stop = { intent: 'stop', state: 'stopping', at }
+    const until = readUntil(ticket)
+    const waiting = this.triggersOf(ticket, ticket.undelivered)
+    const left = this.untaken(ticket, ticket.inputs.flatMap(input => input.kind === 'trigger'
+      && (!readBefore(input, until) || ticket.undelivered.includes(input.id)) ? [input.id] : []))
+    ticket.undelivered = []
+    ticket.updatedAt = at
+    this.repo.tickets.save(ticket)
+    this.letGo(ticket.id, waiting, left)
+    for (const assignment of ticket.assignments.filter(item => item.state !== 'ended')) this.options.executor.stop(ticket, assignment, reason ?? 'stopped')
     return this.require(ticketId)
+  }
+  /** Records a durable pause request; only an explicit resume changes the intent. */
+  pause(ticketId: string): Ticket {
+    const ticket = this.require(ticketId), at = this.now(), lifecycle = this.lifecycle(ticket)
+    lifecycle.pause = { intent: 'pause', state: 'pausing', at }
+    lifecycle.observed = { state: 'unknown', at, reason: 'pause-requested' }
+    ticket.lifecycle = lifecycle; ticket.updatedAt = at; this.repo.tickets.save(ticket)
+    return ticket
+  }
+  resume(ticketId: string): Ticket {
+    const ticket = this.require(ticketId), at = this.now(), lifecycle = this.lifecycle(ticket)
+    lifecycle.pause = { intent: 'resume', state: 'running', at, observedAt: at }
+    lifecycle.observed = { state: 'unknown', at, reason: 'resume-requested' }
+    ticket.lifecycle = lifecycle; ticket.updatedAt = at; this.repo.tickets.save(ticket)
+    if (!ticket.projectId && liveTicket(ticket) && !waitsForPerson(ticket)) this.wake(ticketId)
+    return ticket
+  }
+  /** Confirms an external stop only after the host reports that execution exited. */
+  observe(ticketId: string, state: LifecycleState['observed']['state'], reason?: string): Ticket {
+    const ticket = this.require(ticketId), at = this.now(), lifecycle = this.lifecycle(ticket)
+    lifecycle.observed = { state, at, ...(reason ? { reason } : {}) }
+    lifecycle.pause = { ...lifecycle.pause, observedAt: at,
+      ...(lifecycle.pause.intent === 'pause' && state === 'idle' ? { state: 'paused' as const } : {}) }
+    lifecycle.stop = { ...lifecycle.stop, observedAt: at,
+      ...(lifecycle.stop.intent === 'stop' && state === 'exited' ? { state: 'exited' as const } : {}) }
+    ticket.lifecycle = lifecycle; ticket.updatedAt = at; this.repo.tickets.save(ticket)
+    if (lifecycle.stop.state === 'exited' && !ticket.ended) this.end(ticketId, 'human', 'stopped', at, reason)
+    return this.require(ticketId)
+  }
+  checkpoint(ticketId: string, files: readonly string[], assignmentId?: string, attemptId?: string): Ticket {
+    const ticket = this.require(ticketId), at = this.now(), lifecycle = this.lifecycle(ticket)
+    lifecycle.checkpoint = { id: key('checkpoint', ticketId, at), at, files: [...files], ...(assignmentId ? { assignmentId } : {}), ...(attemptId ? { attemptId } : {}) }
+    ticket.lifecycle = lifecycle; ticket.updatedAt = at; this.repo.tickets.save(ticket); return ticket
+  }
+  /** Saves an answer against an exact question version before any continuation is requested. */
+  answerAttention(ticketId: string, version: number, actor: ActorRef, source: string, text: string, questionId: string): { answer: AttentionAnswer; resolved: boolean } {
+    const ticket = this.require(ticketId), attention = ticket.attention
+    const history = ticket.attentionHistory?.find(item => item.version === version && item.id === questionId)
+    if (history || !attention) {
+      const prior = history?.answers.find(item => !item.conflict)
+      if (prior && prior.actor.id === actor.id && prior.actor.source === actor.source && prior.text === text) return { answer: prior, resolved: true }
+      if (prior && history) {
+        const conflict: AttentionAnswer = { id: key('attention-answer', questionId, String(version), actor.source, actor.id, text), questionId, version, actor, source, text, at: this.now(), conflict: true }
+        const existing = history.answers.find(item => item.id === conflict.id)
+        if (existing) return { answer: existing, resolved: false }
+        history.answers = [...history.answers, conflict]; ticket.updatedAt = conflict.at; this.repo.tickets.save(ticket); return { answer: conflict, resolved: false }
+      }
+      throw new UserError('unknownTicket')
+    }
+    const questionVersion = attention.version ?? 1
+    if (questionVersion !== version || attention.id !== questionId || attention.resolvedAt) throw new UserError('unknownTicket')
+    const at = this.now(), answer: AttentionAnswer = { id: key('attention-answer', attention.id, String(version), actor.source, actor.id, text), questionId: attention.id, version, actor, source, text, at }
+    const prior = attention.answers?.find(item => item.version === version && !item.conflict)
+    attention.answers = [...attention.answers ?? [], prior ? { ...answer, conflict: true } : answer]
+    if (prior) { ticket.updatedAt = at; this.repo.tickets.save(ticket); return { answer, resolved: false } }
+    attention.resolvedAt = at; attention.answers = [answer]; ticket.answers = [...ticket.answers ?? [], answer.id]
+    ticket.attentionHistory = [...ticket.attentionHistory ?? [], { ...attention, version, answers: [...attention.answers], resolvedAt: at }]
+    delete ticket.attention
+     const lifecycle = this.lifecycle(ticket)
+     lifecycle.attentionContinuation = { answerId: answer.id, answerText: answer.text, questionId: attention.id, version, ...attention.binding }
+     ticket.lifecycle = lifecycle; ticket.updatedAt = at
+    this.repo.tickets.save(ticket); return { answer, resolved: true }
+  }
+  private lifecycle(ticket: Ticket): LifecycleState {
+    return ticket.lifecycle ?? { pause: { intent: 'none', state: 'running', at: ticket.createdAt }, stop: { intent: 'none', state: 'running', at: ticket.createdAt }, observed: { state: 'unknown', at: ticket.updatedAt } }
   }
   /**
    * Ends the stalled assignment of a retryable open ticket (`failed`, `blocked`, or failed input delivery) and starts a new one.
@@ -168,9 +245,14 @@ export class Tickets extends EnginePart {
    */
   retry(ticketId: string): Ticket {
     const ticket = this.require(ticketId)
-    if (!executableTicket(ticket)) throw new UserError('projectNotRunnable')
     const latest = latestAssignment(ticket)
     if (!canRetry(ticket) || !latest) throw new UserError('notRetryable')
+    if (ticket.projectId && latest.contract) {
+      latest.state = 'pending'; delete latest.report; delete latest.waitingReason; delete latest.startedAt; delete latest.endedAt; delete latest.endedReason
+      this.requeueUntaken(ticket, latest); ticket.updatedAt = this.now(); this.repo.tickets.save(ticket)
+      this.options.executor.stop(ticket, latest, 'retried'); this.options.executor.start(ticket, latest); return ticket
+    }
+    if (!executableTicket(ticket)) throw new UserError('projectNotRunnable')
     this.endAssignment(ticket, latest, 'retried')
     this.requeueUntaken(ticket, latest)
     const assignment = this.newAssignment(ticket)
@@ -255,6 +337,7 @@ export class Tickets extends EnginePart {
   wake(ticketId: string): void {
     const ticket = this.repo.tickets.get(ticketId)
     if (!ticket || liveTicket(ticket) || ticket.ended?.by === 'human' || !ticket.undelivered.length) return
+    if (ticket.lifecycle?.pause.intent === 'pause' || ticket.lifecycle?.stop.intent === 'stop') return
     if (!executableTicket(ticket)) return
     const policy = this.policy()
     if (policy.paused) return

@@ -15,6 +15,7 @@ export interface Attempt {
   id: string; projectId: string; ticketId: string; assignmentId: string; lease: string; sessionId: string
   workspaceId?: string; cwd: string; root: string; status: 'preparing' | 'prepared' | 'running' | 'ended' | 'reconcile'
   prepare?: { realpath: string; at: string; method: 'managed-empty-directory-v1' }
+  fenced?: true
   context?: { toolContractVersion?: number; promptRevision: number; roleRules: string; projectConventions: string; model: unknown; tools: string[]; resources: readonly string[]; skills: { name: string; version: string }[] }
   createdAt: string; error?: string
 }
@@ -48,8 +49,9 @@ export class ExecutionAttempts {
     const assignment = ticket?.assignments.find(item => item.id === attempt?.assignmentId)
     const auth = assignment?.contract && ticket?.authorizations?.find(item => item.id === assignment.contract!.authorizationId)
     const newest = this.all().findLast(item => item.assignmentId === attempt?.assignmentId)
-    if (!attempt || !ticket || !assignment?.contract || (!receipt && ticket.ended) || ticket.projectId !== attempt.projectId || assignment.projectId !== attempt.projectId
-      || assignment.ticketId !== ticket.id || (!receipt && assignment.state === 'ended') || !auth || auth.revokedAt || newest?.lease !== attempt.lease
+    const lifecycleBlocked = ticket?.lifecycle && (ticket.lifecycle.pause.intent === 'pause' || ticket.lifecycle.stop.intent === 'stop')
+    if (!attempt || !ticket || !assignment?.contract || (!receipt && (ticket.ended || lifecycleBlocked)) || ticket.projectId !== attempt.projectId || assignment.projectId !== attempt.projectId
+      || assignment.ticketId !== ticket.id || (!receipt && assignment.state === 'ended') || !auth || auth.revokedAt || attempt.fenced || newest?.lease !== attempt.lease
       || !(receipt ? ['prepared', 'running', 'ended'] : ['prepared', 'running']).includes(attempt.status)) throw new Error('Stale or unauthorized worker execution')
     this.validateDirectory(attempt)
     return { attempt, ticket, assignment }
@@ -58,11 +60,11 @@ export class ExecutionAttempts {
     if (!attempt.prepare || realpathSync(attempt.cwd) !== attempt.prepare.realpath || realpathSync(attempt.root) !== attempt.root
       || !contained(attempt.root, attempt.prepare.realpath) || !statSync(attempt.cwd).isDirectory()) throw new Error('Execution preparation evidence or realpath does not match')
   }
-  allocate(ticket: Ticket, assignment: Assignment): Attempt {
+  allocate(ticket: Ticket, assignment: Assignment, options: { fresh?: boolean } = {}): Attempt {
     const auth = ticket.authorizations?.find(item => item.id === assignment.contract?.authorizationId)
     if (!ticket.projectId || !assignment.contract || !auth || auth.revokedAt || ticket.ended || assignment.state === 'ended') throw new Error('Assignment is not authorized')
     const previous = this.all().findLast(item => item.assignmentId === assignment.id)
-    if (previous) return previous
+    if (previous && !options.fresh) return previous
     const projectRoot = join(this.stateDir, 'projects', ticket.projectId)
     managedDirectory(this.stateDir, projectRoot)
     const root = realpathSync(projectRoot)
