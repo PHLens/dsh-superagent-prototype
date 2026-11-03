@@ -118,6 +118,25 @@ it('cold prepared recovery delivers the saved answer as the only new execution i
   expect(h!.runtime.projectCoordinator.attempts.bySession(f.attempt.sessionId)!.status).toBe('running')
 })
 
+it('permits one later explicit pause/resume after an answer was already delivered', async () => {
+  const f = await setup(), q = await f.ask(), a = f.answer(q.question)
+  expect(await h!.runtime.executor.continueAfterAttention(f.plan.ticketId, a.answer.id, a.answer.text)).toBe(true)
+  f.agent.status = 'idle'; f.agent.inbox.nextTurn.length = 0; f.agent.inbox.nextStep.length = 0
+  h!.runtime.engine.pauseTicket(f.plan.ticketId)
+  h!.runtime.executor.dispatchProjects()
+  await waitUntil(() => h!.runtime.store.tickets.get(f.plan.ticketId)?.lifecycle?.pause.state === 'paused')
+  const before = h!.deliveries.mock.calls.length
+  h!.runtime.engine.resumeTicket(f.plan.ticketId)
+  h!.runtime.executor.dispatchProjects()
+  await waitUntil(() => h!.deliveries.mock.calls.length > before)
+  for (let i = 0; i < 5; i++) { h!.runtime.executor.dispatchProjects(); await new Promise<void>(resolve => setImmediate(resolve)) }
+  const fresh = h!.deliveries.mock.calls.slice(before).filter(([d]) => d.sessionId === f.attempt.sessionId).map(([d]) => d.text)
+  expect(fresh).toHaveLength(1)
+  expect(fresh[0]).toContain('Continue the confirmed project execution')
+  expect(fresh[0]).not.toContain('answered the pending Attention')
+  expect(fresh[0]).not.toContain('Execute exactly the confirmed plan')
+})
+
 it('rechecks pause and exact lease after lookup and never transfers an old answer to a replacement attempt', async () => {
   const f = await setup(), q = await f.ask(), a = f.answer(q.question)
   const gate = Promise.withResolvers<boolean>()

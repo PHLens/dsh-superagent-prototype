@@ -447,7 +447,10 @@ export class DshExecutor implements Executor {
         const continuation = ticket.lifecycle?.attentionContinuation
         if (continuation && !continuation.deliveredAt && existing && !existing.fenced && ['prepared', 'running', 'reconcile'].includes(existing.status)
           && continuation.assignmentId === assignment.id && continuation.attemptId === existing.id && continuation.lease === existing.lease && continuation.sessionId === existing.sessionId) continue
-        const resumeAgent = existing && ticket.lifecycle?.pause.intent === 'resume' ? this.host.context.agents.get(existing.sessionId as SessionId) : undefined
+        // A delivered answer already covers the current wake. A later explicit
+        // pause/resume sets a new resume-requested observation and may wake again.
+        const resumeAgent = existing && ticket.lifecycle?.pause.intent === 'resume' && ticket.lifecycle.observed.reason === 'resume-requested'
+          ? this.host.context.agents.get(existing.sessionId as SessionId) : undefined
         if (existing && resumeAgent?.status === 'idle' && ['worker-idle', 'worker-running'].includes(assignment.waitingReason ?? '') && !this.host.reportReady?.(ticket, assignment, existing)) {
           try { this.slots.reserve(ticket.id, 'wake') } catch { continue }
           const requestId = `project-execute:${existing.id}:${existing.lease}:resume:${ticket.lifecycle!.pause.at}`
