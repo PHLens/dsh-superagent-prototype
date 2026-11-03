@@ -6,6 +6,7 @@
 /** Independent intended behavior; copied to review-artifacts for fixed-HEAD runs. */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
@@ -136,4 +137,54 @@ it('publishes and restores a complete empty application when no native Session h
   expect.soft(manifest.nativeSessions).toEqual([])
   expect.soft(h.runtime.backup.list().map(row => row.path)).toContain(point)
   expect.soft(() => h!.runtime.backup.restore(point, join(base, 'empty-restored'))).not.toThrow()
+})
+
+async function discussionGenerations() {
+  h = await startRuntime()
+  const c = h.runtime.projectCoordinator, p = c.create('owner', { name: 'Discussion generations', goal: 'Discussion without tasks' })
+  const mappings = []
+  for (const generation of [1, 2]) {
+    const cwd = join(h.directory, 'projects', p.id, `coordinator-${generation}`)
+    mkdirSync(cwd, { recursive: true })
+    writeFileSync(join(cwd, 'discussion-input.md'), `Synthetic research material for generation ${generation}\n`)
+    const workspace = await h.ctx.workspaceRegistry.create(realpathSync(cwd))
+    const mapping = c.conversations.saveMapping(p.id, 'owner', { sessionId: `discussion-generation-${generation}`, workspaceId: workspace.id, cwd: realpathSync(cwd),
+      ...(generation === 2 ? { expectedGeneration: 1, reconciled: true, reason: 'Replace read-only discussion generation' } : {}) })
+    await h.controller.create({ sessionId: mapping.sessionId, workspaceId: workspace.id })
+    mappings.push(mapping)
+  }
+  expect(c.attempts.all()).toHaveLength(0)
+  expect(h.runtime.store.tickets.list()).toHaveLength(0)
+  nativeStore()
+  return { p, mappings }
+}
+
+it('restores distinct current and retired discussion workspace file hashes without the source', async () => {
+  const { p, mappings } = await discussionGenerations()
+  const hash = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex')
+  const hashes = new Map(mappings.map(mapping => [mapping.sessionId, hash(join(mapping.cwd, 'discussion-input.md'))]))
+  const copies = startBackup(), manifest = await h!.runtime.backup.run('manual'), point = pointPath(copies)
+  await h!.runtime.stop()
+  renameSync(h!.directory, join(base, 'hidden-generation-source'))
+  const target = join(base, 'restored-generations'), restoredManifest = h!.runtime.backup.restore(point, target)
+  const store = new Store(join(target, 'orchestrator.sqlite'))
+  try {
+    const restored = new ConversationStore(store).listMappings(p.id)
+    expect(restored.map(mapping => mapping.status)).toEqual(['retired', 'active'])
+    for (const mapping of restored) {
+      expect(mapping.cwd.startsWith(realpathSync(target))).toBe(true)
+      expect(hash(join(mapping.cwd, 'discussion-input.md'))).toBe(hashes.get(mapping.sessionId))
+      expect(readNativeBodies(target, restoredManifest).find(row => row.id === mapping.sessionId)!.value.header.cwd).toBe(mapping.cwd)
+    }
+    expect(manifest.consistency).toBe('declared-files-quiesced')
+  } finally { store.close() }
+})
+
+it('rejects a missing required retired discussion cwd instead of publishing an empty replacement', async () => {
+  const { mappings } = await discussionGenerations()
+  renameSync(mappings[0]!.cwd, join(base, 'unavailable-retired-cwd'))
+  startBackup()
+  await expect(h!.runtime.backup.run('manual')).rejects.toThrow('Required recovery material is missing')
+  expect(h!.runtime.backup.list()).toEqual([])
+  expect(h!.runtime.health.backup?.state).toBe('error')
 })
