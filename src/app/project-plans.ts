@@ -64,14 +64,17 @@ export class ProjectPlans {
     const page = tickets.slice(offset, offset + limit).map(ticket => ({
       ticketId: ticket.id,
       title: ticket.title.slice(0, 200),
-      latestRevision: ticket.planRevisions?.at(-1)?.revision,
+      ...(ticket.planRevisions?.length ? { latestRevision: ticket.planRevisions.at(-1)!.revision } : {}),
       revisionCount: ticket.planRevisions?.length ?? 0,
-      goal: ticket.planRevisions?.at(-1)?.goal.slice(0, 300),
+      ...(ticket.planRevisions?.length ? { goal: ticket.planRevisions.at(-1)!.goal.slice(0, 300) } : {}),
       authorizationCount: ticket.authorizations?.length ?? 0,
       assignmentCount: ticket.assignments?.length ?? 0,
-      currentGraph: currentAssignmentGraph(ticket) ? { id: currentAssignmentGraph(ticket)!.id, version: currentAssignmentGraph(ticket)!.version } : undefined,
+      ...(currentAssignmentGraph(ticket) ? { currentGraph: { id: currentAssignmentGraph(ticket)!.id, version: currentAssignmentGraph(ticket)!.version } } : {}),
       activeAssignmentCount: activePlanAssignments(ticket).filter(item => item.state !== 'ended').length,
-      assignments: activePlanAssignments(ticket).filter(item => item.state !== 'ended').slice(0, 8).map(item => ({ id: item.id, assignmentKey: item.contract?.assignmentKey, title: item.contract?.plan.goal.slice(0, 160), state: item.state, waitingReason: item.waitingReason })),
+      assignments: activePlanAssignments(ticket).filter(item => item.state !== 'ended').slice(0, 8).map(item => ({ id: item.id,
+        ...(item.contract?.assignmentKey !== undefined ? { assignmentKey: item.contract.assignmentKey } : {}),
+        ...(item.contract ? { title: item.contract.plan.goal.slice(0, 160) } : {}), state: item.state,
+        ...(item.waitingReason !== undefined ? { waitingReason: item.waitingReason } : {}) })),
     }))
     return { items: page, offset, limit, total: tickets.length, hasMore: offset + page.length < tickets.length }
   }

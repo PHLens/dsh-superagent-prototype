@@ -20,15 +20,18 @@ export function assignmentFacts(store: Store, ticket: Ticket, input: { assignmen
     const attempt = store.db.prepare('SELECT value FROM execution_attempt ORDER BY rowid').all().map(row => JSON.parse(String(row.value)) as Attempt).findLast(item => item.projectId === ticket.projectId && item.ticketId === ticket.id && item.assignmentId === a.id)
     const report = attempt && reports.findLast(r => r.assignmentId === a.id && r.attemptId === attempt.id && r.lease === attempt.lease)
     const decision = decisions.findLast(d => d.assignmentId === a.id && d.reportId === report?.id)
-    return { assignmentId: a.id, key: a.contract?.assignmentKey, state: a.state, waitingReason: a.waitingReason,
+    return { assignmentId: a.id, ...(a.contract?.assignmentKey !== undefined ? { key: a.contract.assignmentKey } : {}), state: a.state,
+      ...(a.waitingReason !== undefined ? { waitingReason: a.waitingReason } : {}),
       goal: preview(a.contract?.proposal?.goal ?? a.contract?.plan.goal ?? ''),
-      conditions: { assignmentId: a.id, planRevision: a.contract?.planRevision, conditionsVersion: a.contract?.plan.acceptance?.version ?? a.contract?.planRevision, completion: preview(a.contract?.plan.completion ?? ''), acceptance: a.contract?.plan.acceptance },
-      report: report ? { id: report.id, attemptId: report.attemptId, state: report.state, completed: preview(report.completed), evidence: report.evidence.slice(0, 4).map(s => preview(s, 300)), evidenceCount: report.evidence.length,
-        unresolved: report.unresolved.slice(0, 4).map(s => preview(s, 300)), unresolvedCount: report.unresolved.length, artifacts: report.artifacts.slice(0, 8), artifactCount: report.artifacts.length } : undefined,
-      decision: decision ? { id: decision.id, reportId: decision.reportId, conclusion: decision.conclusion, evidence: preview(decision.evidence), targetVersion: decision.targetVersion, conditionsVersion: decision.conditionsVersion } : undefined,
-      unresolvedChoice: a.waitingReason === 'needs_judgment' ? 'Judge the current evidence against these conditions; coordinator reads do not pass this gate.' : a.waitingReason === 'blocked' ? 'Resolve the reported blockers within authorization or explain the required human choice.' : undefined }
+      conditions: { assignmentId: a.id, ...(a.contract ? { planRevision: a.contract.planRevision, conditionsVersion: a.contract.plan.acceptance?.version ?? a.contract.planRevision } : {}),
+        completion: preview(a.contract?.plan.completion ?? ''), ...(a.contract?.plan.acceptance ? { acceptance: a.contract.plan.acceptance } : {}) },
+      ...(report ? { report: { id: report.id, attemptId: report.attemptId, state: report.state, completed: preview(report.completed), evidence: report.evidence.slice(0, 4).map(s => preview(s, 300)), evidenceCount: report.evidence.length,
+        unresolved: report.unresolved.slice(0, 4).map(s => preview(s, 300)), unresolvedCount: report.unresolved.length, artifacts: report.artifacts.slice(0, 8), artifactCount: report.artifacts.length } } : {}),
+      ...(decision ? { decision: { id: decision.id, reportId: decision.reportId, conclusion: decision.conclusion, evidence: preview(decision.evidence), targetVersion: decision.targetVersion, conditionsVersion: decision.conditionsVersion } } : {}),
+      ...(a.waitingReason === 'needs_judgment' ? { unresolvedChoice: 'Judge the current evidence against these conditions; coordinator reads do not pass this gate.' }
+        : a.waitingReason === 'blocked' ? { unresolvedChoice: 'Resolve the reported blockers within authorization or explain the required human choice.' } : {}) }
   })
-  return { ticketId: ticket.id, currentGraph: graph ? { id: graph.id, version: graph.version } : undefined, offset, total: all.length, next_offset: offset + assignments.length < all.length ? offset + assignments.length : null,
+  return { ticketId: ticket.id, ...(graph ? { currentGraph: { id: graph.id, version: graph.version } } : {}), offset, total: all.length, next_offset: offset + assignments.length < all.length ? offset + assignments.length : null,
     assignments, readMore: { tool: 'project_read_assignment_facts', ticket_id: ticket.id }, readExact: { tool: 'project_read_fact', ticket_id: ticket.id, kinds: ['report', 'decision', 'assignment', 'artifact'], note: 'Use exact ids above; artifact requires content_version. Assignment pages return contentVersion; pass it as content_version on later pages and restart at offset 0 if stale. Text previews and arrays may be truncated. Page full records with offset/next_offset.' } }
 }
 export function readFact(store: Store, ticket: Ticket, input: { kind: 'report' | 'decision' | 'assignment' | 'artifact'; id: string; contentVersion?: string; offset?: number; limit?: number }) {
@@ -50,5 +53,5 @@ export function readFact(store: Store, ticket: Ticket, input: { kind: 'report' |
   const contentVersion = input.kind === 'assignment' ? digest(text) : input.contentVersion
   if (input.kind === 'assignment' && ((offset > 0 && !input.contentVersion) || (input.contentVersion && input.contentVersion !== contentVersion))) throw new Error('Stale assignment content version; restart from offset 0')
   const content = text.slice(offset, offset + limit)
-  return { ticketId: ticket.id, kind: input.kind, id: input.id, contentVersion, encoding: 'json', offset, totalChars: text.length, content, truncated: offset + content.length < text.length, next_offset: offset + content.length < text.length ? offset + content.length : null }
+  return { ticketId: ticket.id, kind: input.kind, id: input.id, ...(contentVersion !== undefined ? { contentVersion } : {}), encoding: 'json', offset, totalChars: text.length, content, truncated: offset + content.length < text.length, next_offset: offset + content.length < text.length ? offset + content.length : null }
 }

@@ -53,7 +53,11 @@ export function projectWorkerTools(attempts: ExecutionAttempts, artifacts: Artif
     tool({ name: 'project_worker_context', description: 'Read the immutable authorized plan, saved originalMessage for the original request language, pinned inputs and registered artifacts. Identity and originalMessage come only from this native Session Assignment authorization, never conversation history.', schema: z.object({}).strict(), execute: async () => {
       const { attempt, assignment, ticket } = attempts.resolve(sessionId)
       const authorization = ticket.authorizations?.find(item => item.id === assignment.contract!.authorizationId)
-      return { plan: assignment.contract!.plan, originalMessage: authorization?.originalMessage, inputs: assignment.contract!.inputs, pinnedInputs: attempt.inputs ?? [], reviewTarget: attempt.reviewTarget, outputs: artifacts.view(attempt.projectId).filter(item => item.ticketId === attempt.ticketId), context: attempt.context }
+      return { plan: assignment.contract!.plan, inputs: assignment.contract!.inputs, pinnedInputs: attempt.inputs ?? [],
+        ...(authorization?.originalMessage ? { originalMessage: authorization.originalMessage } : {}),
+        ...(attempt.reviewTarget ? { reviewTarget: attempt.reviewTarget } : {}),
+        outputs: artifacts.view(attempt.projectId).filter(item => item.ticketId === attempt.ticketId),
+        ...(attempt.context ? { context: attempt.context } : {}) }
     } }),
     tool({ name: 'project_read_input', description: 'Read only an exact artifact content version pinned in this Assignment input contract.', schema: z.object({ id: z.string(), contentVersion: z.string() }).strict(), execute: async args => {
       const { attempt, assignment } = attempts.resolve(sessionId)

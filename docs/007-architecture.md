@@ -442,6 +442,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 Project coordinator operations use a finite 300-second default, including model turns, feedback and recovery waits. Actual planning required 155.6 seconds to save a valid draft after two rejected calls, and its final reply exceeded the previous 180-second bound. Tool calls do not reset the timer. Timeout still cancels the Session, revokes its input lease and rejects late writes; it does not authorize replay of a committed plan.
 
+Project context and fact tools omit absent optional properties from their returned objects. The native tool runtime validates canonical JSON before rendering text; `JSON.stringify` in a renderer cannot repair an `undefined` property rejected at that earlier boundary. This projection preserves registered review targets, artifact versions and ownership checks without changing native validation.
+
 | Test | Covers |
 | --- | --- |
 | `tests/plans.spec.ts` | Immutable plan revision service and save-operation conflicts |
@@ -480,6 +482,7 @@ Project coordinator operations use a finite 300-second default, including model 
 | `tests/coordinator-recovery.spec.ts` | Mapping replacement, prompt restart persistence and stale-generation/state rejection |
 | `tests/project-coordinator.spec.ts` | Project lane concurrency, durable dispatch, retry races, restart recovery, 300s bounded multi-step planning and late authorization fencing |
 | `tests/t6-actual-planning.spec.ts` | Actual rejected four-node tool payload, atomic structural rejection, repaired draft replay/conflict, one-confirmation graph and serialized missing-field feedback |
+| `tests/project-tool-json.spec.ts` | Actual rc.5 tool output validation of ordinary/reviewer context, absent/current facts, report pages, draft listings and ownership rejection |
 | `tests/project-progress.spec.ts` | Read-only project progress projection, exact attempt/report/artifact gates and lifecycle phases |
 | `tests/project-session.spec.ts` | Completed durable turn projection, interrupted draft exclusion and Session message references |
 | `tests/project-auth.spec.ts` | Host admission, stable owner identity, authentication rejection and unavailable-host denial |
