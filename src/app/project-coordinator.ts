@@ -280,6 +280,8 @@ export class ProjectCoordinator {
       this.signal.removeEventListener('abort', abort)
     })
   }
+  /** Waits for coordinator work already admitted before a recovery material boundary. */
+  async idle(): Promise<void> { await Promise.allSettled(this.running.values()) }
   async stop(): Promise<void> {
     this.stopped = true
     this.sessions.dispose()

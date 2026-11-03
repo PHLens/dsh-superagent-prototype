@@ -485,6 +485,14 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/backup.spec.ts` | WAL-inclusive recovery snapshots, credential exclusions, incomplete capture markers, confined hash-verified restore and inert recovery profile |
 | `tests/backup-service.spec.ts` | Scheduler replacement, concurrent run coalescing, retention configuration and stopped-service behavior |
 | `tests/t5-backup-attention-runtime-review.spec.ts` | Runtime backup material restore, safe-restore fencing and exactly-once Attention continuation review boundaries |
+| `tests/t5-capture-contract-review.spec.ts` | Frozen capture contract: required materials, optional master evidence, partial coverage, overlapping roots, detached native/checkpoint paths and active writer refusal |
+| `tests/t5-writer-epoch.spec.ts` | Transient registered writer rejection during native capture, unrelated job isolation and subscription release on success/failure |
+| `tests/t5-writer-rc5-contract.spec.ts` | Optional RC5 LocalJobRegistry and agent status compatibility; skips unless `DSH_RC5_RUNTIME` is configured |
+| `tests/t5-empty-discussion-contract.spec.ts` | Discussion-only coordinator cwd/file recovery and complete empty application coverage |
+| `tests/t5-draft-resource-authority.spec.ts` | Unconfirmed and missing plan resource references remain inventory data without filesystem backup authority |
+| `tests/t5-recovery-completeness.spec.ts` | Detached two-project native and file recovery, cross-file capture rejection and tmp aliases |
+| `tests/t5-question-completion-gate.spec.ts` | Unanswered worker Attention blocks server completion despite ready self-report |
+| `tests/t5-cold-attention-single-wake.spec.ts` | Cold reconcile/resume preserves native execution history and sends exactly one saved-answer continuation input |
 | `tests/t5-attention-continuation.spec.ts` | Bound Question operation receipts, authoritative answers, serialized continuation delivery and restart recovery |
 | `tests/projects.spec.ts` | Project identity and Ticket/Assignment ownership; unauthorized drafts never execute |
 | `tests/no-github-startup.spec.ts` | Startup and application project APIs without external accounts; resource-specific readiness and safe environment |
@@ -673,7 +681,7 @@ A settings save that changes a Source field setup reads, such as an account's CL
 
 ## Reviewing a change against real data
 
-Point `DSH_HOME` at a temporary directory and create a new profile there. Copy the database from a backup, disable every Source, pause processing and remove the main Session id. Give the GitHub and Feishu CLIs read-only stand-ins.
+Point `DSH_HOME` at a temporary directory and create a new profile there. Copy the database from a backup, disable every Source, pause processing and remove the main Session id. Give the GitHub and Feishu CLIs read-only stand-ins. The optional installed-host writer contract resolves public package entries from `DSH_RC5_RUNTIME` (for example, `DSH_RC5_RUNTIME=/path/to/runtime pnpm vitest run tests/t5-writer-rc5-contract.spec.ts`) and checks the exact RC5 package versions; without that variable the portable baseline reports the four host cases as skipped.
 
 ## Open questions
 

@@ -124,6 +124,19 @@ it('holds missing artifacts and unresolved matters instead of treating model rea
   expect(f.store.tickets.get(f.plan.ticketId)?.ended).toBeUndefined()
 })
 
+it('does not let a ready report complete an assignment with an unanswered Attention question', () => {
+  f = workerFixture(directory, { version: 1, mode: 'registered-files' }); f.prepare()
+  const ticket = f.store.tickets.get(f.plan.ticketId)!
+  ticket.attention = { id: 'question-1', version: 1, question: 'Which source should be used?', binding: { assignmentId: f.attempt.assignmentId, attemptId: f.attempt.id, lease: f.attempt.lease, sessionId: f.attempt.sessionId }, answers: [] }
+  f.store.tickets.save(ticket)
+  const artifact = f.write()
+  const report = f.reports.submit(f.attempt.sessionId, f.report([{ id: artifact.id, contentVersion: artifact.contentVersion }]))
+  expect(report.state).toBe('ready')
+  expect(f.store.tickets.get(f.plan.ticketId)?.assignments[0]?.waitingReason).toBe('unresolved-question')
+  expect(f.store.tickets.get(f.plan.ticketId)?.ended).toBeUndefined()
+  expect(f.attempts.bySession(f.attempt.sessionId)?.status).toBe('prepared')
+})
+
 it('persists independent semantic decisions against the exact report, artifact and condition versions', () => {
   f = workerFixture(directory, { version: 3, mode: 'human-review' }); f.prepare()
   const artifact = f.write(), input = f.report([{ id: artifact.id, contentVersion: artifact.contentVersion }])

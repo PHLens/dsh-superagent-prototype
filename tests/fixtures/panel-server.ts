@@ -85,6 +85,7 @@ export const MACHINE = { stateDir: '/srv/dsh-superagent', promptMaxChars: 100000
 
 type Settings = ReturnType<typeof SettingsSchema.parse>
 export interface PanelServer {
+  backupPoints: ApiResponse<'GET backup/points'>['points']
   projects: ApiResponse<'GET projects'>['projects']
   conversations: Record<string, ApiResponse<'GET projects/:id/conversation'>>
   joined?: Record<string, string>; joining?: Record<string, string>
@@ -250,6 +251,7 @@ function initial(): PanelServer {
     en: 'Feishu message' } }
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
+    backupPoints: [],
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
     projects: [{ id: 'p1', name: 'Demo project', goal: 'A durable goal', createdAt: '2026-09-23T00:00:00Z', updatedAt: '2026-09-23T00:00:00Z' }],
     conversations: { p1: { project: { id: 'p1', name: 'Demo project', goal: 'A durable goal', createdAt: '2026-09-23T00:00:00Z', updatedAt: '2026-09-23T00:00:00Z' }, messages: [], tasks: [] } },
@@ -339,9 +341,15 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET sources': { answer: sourceStatuses },
   'GET settings': { answer: settingsView },
   'GET backup/status': { answer: () => ({ configured: true, running: false, health: { state: 'ready', detail: 'Fixture backup ready' } }) },
-  'GET backup/points': { answer: () => ({ points: [] }) },
-  'POST backup/create': { answer: () => ({ manifest: {} as never }) },
-  'POST backup/restore': { body: true, answer: () => ({ manifest: {} as never }) },
+  'GET backup/points': { answer: () => ({ points: server.backupPoints }) },
+  'POST backup/create': { answer: () => {
+    const createdAt = '2026-11-03T00:00:00Z'
+    server.backupPoints = [{ path: '/srv/dsh-superagent/backups/point-1', createdAt, bytes: 1234, complete: true, consistency: 'declared-files-quiesced' }]
+    return { manifest: { createdAt } as ApiResponse<'POST backup/create'>['manifest'] }
+  } },
+  'POST backup/restore': { body: true, answer: ({ body }) => ({ manifest: {
+    restoredProfile: { isolatedRoot: body.destination, execution: 'prohibited', model: 'prohibited', outbound: 'prohibited' },
+  } as ApiResponse<'POST backup/restore'>['manifest'] }) },
   'POST sources/:id/labels': { answer: () => {
     // Label refresh failures come from the bot CLI and are returned verbatim.
     if (server.joinError) return refuse(500, server.joinError)

@@ -372,10 +372,10 @@ export class DshExecutor implements Executor {
         || current?.answerId !== answerId || current.questionId !== initial.questionId || current.version !== initial.version
         || current.assignmentId !== initial.assignmentId || current.attemptId !== initial.attemptId || current.lease !== initial.lease || current.sessionId !== sessionId
         || assignment.id !== initial.assignmentId || ticket.assignments.findLast(item => item.contract && item.state !== 'ended')?.id !== assignment.id
-        || attempt.id !== initial.attemptId || attempt.lease !== initial.lease || attempt.status !== 'running'
+        || attempt.id !== initial.attemptId || attempt.lease !== initial.lease || !['prepared', 'running'].includes(attempt.status)
         || binding?.assignmentId !== assignment.id || binding.attemptId !== attempt.id || binding.lease !== attempt.lease || binding.sessionId !== sessionId
         || !answer || answer.text !== current.answerText || ticket.lifecycle?.reconciliation?.state === 'checking' || ticket.lifecycle?.reconciliation?.state === 'unknown') throw new Later('Attention continuation binding or lifecycle changed')
-      return { ticket, current, answer }
+      return { ticket, assignment, attempt, current, answer }
     }
     let reserved = false
     try {
@@ -400,7 +400,10 @@ export class DshExecutor implements Executor {
       // A held native message also completes a crash-interrupted application receipt.
       const latest = validate()
       latest.current.deliveredAt = now()
-      this.host.store.tickets.save(latest.ticket)
+      latest.attempt.status = 'running'
+      latest.assignment.state = 'running'; latest.assignment.startedAt ??= now(); latest.assignment.waitingReason = 'worker-running'
+      this.host.store.atomic(() => { this.host.attempts!.save(latest.attempt); this.host.store.tickets.save(latest.ticket) })
+      this.projectObserved.add(latest.attempt.id)
       this.host.engine.observeTicket(ticketId, 'running', 'attention-answered')
       return true
     } catch {
@@ -441,7 +444,13 @@ export class DshExecutor implements Executor {
       if (this.held(ticket) || this.stopping.has(ticket.id)) continue
       for (const assignment of ticket.assignments.filter(item => item.contract && item.state !== 'ended')) {
         const existing = attempts.all().findLast(item => item.assignmentId === assignment.id)
-        const resumeAgent = existing && ticket.lifecycle?.pause.intent === 'resume' ? this.host.context.agents.get(existing.sessionId as SessionId) : undefined
+        const continuation = ticket.lifecycle?.attentionContinuation
+        if (continuation && !continuation.deliveredAt && existing && !existing.fenced && ['prepared', 'running', 'reconcile'].includes(existing.status)
+          && continuation.assignmentId === assignment.id && continuation.attemptId === existing.id && continuation.lease === existing.lease && continuation.sessionId === existing.sessionId) continue
+        // A delivered answer already covers the current wake. A later explicit
+        // pause/resume sets a new resume-requested observation and may wake again.
+        const resumeAgent = existing && ticket.lifecycle?.pause.intent === 'resume' && ticket.lifecycle.observed.reason === 'resume-requested'
+          ? this.host.context.agents.get(existing.sessionId as SessionId) : undefined
         if (existing && resumeAgent?.status === 'idle' && ['worker-idle', 'worker-running'].includes(assignment.waitingReason ?? '') && !this.host.reportReady?.(ticket, assignment, existing)) {
           try { this.slots.reserve(ticket.id, 'wake') } catch { continue }
           const requestId = `project-execute:${existing.id}:${existing.lease}:resume:${ticket.lifecycle!.pause.at}`

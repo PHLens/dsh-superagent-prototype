@@ -42,6 +42,7 @@ it('retains a backup draft after a revision conflict instead of silently replaci
 })
 
 it('shows archived backup settings in read-only recovery and never submits a retained local draft', async () => {
+  server.backupPoints = [{ path: '/archived/point', createdAt: '2026-11-03T00:00:00Z', bytes: 123, complete: true, consistency: 'declared-files-quiesced' }]
   at({ page: 'settings', query: { group: 'backup' } })
   await mount(zh)
   await type(field<HTMLInputElement>(zh.backupDirectory), '/unsaved-live-instance-path')
@@ -61,7 +62,47 @@ it('shows archived backup settings in read-only recovery and never submits a ret
   expect(field<HTMLInputElement>(zh.backupDirectory).value).toBe('')
   expect(field<HTMLInputElement>(zh.backupDirectory).matches(':disabled')).toBe(true)
   expect(all('button').some(button => button.textContent === zh.save)).toBe(false)
+  expect(all('button').some(button => [zh.backupCreate, zh.backupChooseRestore, zh.backupRestore].includes(button.textContent ?? ''))).toBe(false)
   await act(async () => { document.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })) })
   await settle()
   expect(writes).toEqual([])
+})
+
+it('creates a recovery point with saved settings and restores the selected point only after a destination is supplied', async () => {
+  at({ page: 'settings', query: { group: 'backup' } })
+  await mount(en)
+  expect(text()).toContain(en.backupPointsEmpty)
+  await type(field<HTMLInputElement>(en.backupDirectory), '/unsaved-backup-draft')
+  await click(en.backupCreate)
+  expect(server.requests.find(request => request.path === 'backup/create')).toMatchObject({ method: 'POST' })
+  expect(server.requests.some(request => request.path === 'settings/backup')).toBe(false)
+  expect(text()).toContain('/srv/dsh-superagent/backups/point-1')
+  await click(en.backupChooseRestore)
+  expect(server.requests.some(request => request.path === 'backup/restore')).toBe(false)
+  await type(field<HTMLInputElement>(en.backupRestoreDirectory), '/recovery/preview-1')
+  await click(en.backupRestore)
+  expect(server.requests.find(request => request.path === 'backup/restore')?.body).toEqual({
+    source: '/srv/dsh-superagent/backups/point-1', destination: '/recovery/preview-1',
+  })
+  expect(text()).toContain(en.backupRestored.replace('{directory}', '/recovery/preview-1'))
+})
+
+it('preserves the selected recovery point and destination after a restore failure', async () => {
+  server.backupPoints = [{ path: '/backups/point-1', createdAt: '2026-11-03T00:00:00Z', bytes: 123, complete: true, consistency: 'declared-files-quiesced' }]
+  const actual = globalThis.fetch
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).endsWith('/backup/restore')) return new Response(JSON.stringify({ error: 'Restore destination already exists' }), {
+      status: 400, headers: { 'content-type': 'application/json' },
+    })
+    return actual(input, init)
+  })
+  at({ page: 'settings', query: { group: 'backup' } })
+  await mount(en)
+  await click(en.backupChooseRestore)
+  await type(field<HTMLInputElement>(en.backupRestoreDirectory), '/existing-directory')
+  await click(en.backupRestore)
+  expect(text()).toContain('Restore destination already exists')
+  expect(field<HTMLInputElement>(en.backupRestoreDirectory).value).toBe('/existing-directory')
+  expect(text()).toContain('/backups/point-1')
+  expect(text()).not.toContain(en.backupRestored.split('{directory}')[0]!)
 })
