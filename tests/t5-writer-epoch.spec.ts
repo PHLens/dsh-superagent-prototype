@@ -81,6 +81,35 @@ it('permits unrelated registered jobs and releases capture subscriptions after s
   h.jobs.end(running)
 })
 
+it.each([
+  ['related', 'output'], ['related', 'lifecycle'],
+  ['unrelated', 'output'], ['unrelated', 'lifecycle'],
+  ['unowned', 'output'], ['unowned', 'lifecycle'],
+] as const)('filters %s %s events delivered through an owner subscription', async (scope, kind) => {
+  const listeners = new Set<(event: { type: string }) => void>()
+  // RC5 owner subscriptions also deliver unowned events; deliberately deliver
+  // every event here so the runtime must inspect the payload owner itself.
+  vi.spyOn(h.jobs.service.events, 'subscribe').mockImplementation((_filter, listener) => {
+    listeners.add(listener)
+    return () => { listeners.delete(listener) }
+  })
+  const read = holdNativeRead(), capture = h.runtime.backup.run('manual')
+  await read.entered
+  expect(listeners.size).toBeGreaterThan(0)
+  const owner = scope === 'related' ? h.runtime.masterId : scope === 'unrelated' ? 'ordinary-chat' : undefined
+  const event = kind === 'output' ? { type: 'output', output: { owner } } : { type: 'settled', job: { owner, status: 'completed' } }
+  for (const listener of listeners) listener(event)
+  read.resume()
+  if (scope === 'related') {
+    await expect(capture).rejects.toThrow(/writer activity changed/i)
+    expect(h.runtime.backup.list()).toEqual([])
+  } else {
+    await expect(capture).resolves.toHaveProperty('consistency', 'declared-files-quiesced')
+    expect(h.runtime.backup.list()).toHaveLength(1)
+  }
+  expect(listeners.size).toBe(0)
+})
+
 it('releases capture subscriptions if reading native persistence fails', async () => {
   const subscriptions = observeSubscriptions()
   h.ctx.sessionPersistence.open = vi.fn(async () => { throw new Error('synthetic native read failure') })

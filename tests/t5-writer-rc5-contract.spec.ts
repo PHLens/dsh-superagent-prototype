@@ -4,7 +4,9 @@
  * Integration copies belong under tests/ so fixture/source imports resolve.
  */
 /** Independent intended behavior; copied to review-artifacts for fixed-HEAD runs. */
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import fs from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
@@ -102,17 +104,19 @@ function readNativeBodies(point: string, manifest: RecoveryManifest) {
 }
 
 
-// Host-version compatibility harness: imports only the installed rc.5 implementation;
-// creates a fresh in-memory Cordis context, never attaches to a running DSH process.
-// RC5 host modules are runtime-only JavaScript artifacts without declarations.
-// @ts-expect-error RC5 runtime module has no declaration file.
-import { Context as RcContext } from '/Users/phlens/.local/share/dsh-cli/runtime/node_modules/@deepseek-ai/cordis/lib/index.js'
-// @ts-expect-error RC5 runtime module has no declaration file.
-import { LocalJobRegistry } from '/Users/phlens/.local/share/dsh-cli/runtime/node_modules/@deepseek-ai/dsh-jobs-local/lib/index.js'
-// @ts-expect-error RC5 runtime module has no declaration file.
-import { agentEvents as rcAgentEvents } from '/Users/phlens/.local/share/dsh-cli/runtime/node_modules/@deepseek-ai/dsh-agent/lib/index.js'
+// Explicit optional integration: no host modules are resolved unless configured.
+const rc5Root = process.env.DSH_RC5_RUNTIME
+const rc5Suite = rc5Root ? describe : describe.skip
 
-function realRcJobs() {
+async function realRcJobs() {
+  const runtimeRequire = createRequire(join(rc5Root!, 'package.json'))
+  for (const name of ['@deepseek-ai/dsh-jobs-local', '@deepseek-ai/dsh-agent']) {
+    const version = runtimeRequire(`${name}/package.json`).version
+    if (version !== '0.2.1-rc.5') throw new Error(`Expected ${name}@0.2.1-rc.5, got ${version}`)
+  }
+  const { Context: RcContext } = await import(pathToFileURL(runtimeRequire.resolve('@deepseek-ai/cordis')).href)
+  const { LocalJobRegistry } = await import(pathToFileURL(runtimeRequire.resolve('@deepseek-ai/dsh-jobs-local')).href)
+  const { agentEvents } = await import(pathToFileURL(runtimeRequire.resolve('@deepseek-ai/dsh-agent')).href)
   const ctx = new RcContext()
   ctx.reflect.provide('agents', h!.agents)
   const registry = new LocalJobRegistry(ctx, { maxConcurrentJobsPerOwner: 10, retainBytes: 262144, settledRetainBytes: 16384, pumpPollMs: 150 })
@@ -120,19 +124,20 @@ function realRcJobs() {
   const facade = (h!.runtime as any).ctx.get('jobs')
   vi.spyOn(facade, 'list').mockImplementation((id: any) => registry.list(id))
   vi.spyOn(facade.events, 'subscribe').mockImplementation((filter: any, fn: any) => registry.events.subscribe(filter, fn))
-  return { registry, cleanup: async () => { await (registry as any).disposeAll(); detachController() } }
+  return { registry, agentEvents, cleanup: async () => { await (registry as any).disposeAll(); detachController() } }
 }
 
+rc5Suite('RC5 host integration (skipped unless DSH_RC5_RUNTIME is configured)', () => {
 it.each(['owned-related-job', 'related-agent-status', 'owned-unrelated-job', 'unowned-unrelated-job'] as const)('honors actual rc.5 %s events without accepting related writer ABA or blocking unrelated activity', async kind => {
   h = await startRuntime()
   if (kind === 'owned-unrelated-job') await h.controller.create({sessionId:'ordinary-unrelated-owner'})
-  const native = nativeStore(), actual = realRcJobs()
+  const native = nativeStore(), actual = await realRcJobs()
   try {
     native.setReadFault(async () => {
       if (kind === 'related-agent-status') {
         const agent = h!.agents.get(h!.runtime.masterId)!
-        agent.status = 'running'; rcAgentEvents(h!.ctx as any, agent as any).emit('agent/status', { status: 'running' })
-        agent.status = 'idle'; rcAgentEvents(h!.ctx as any, agent as any).emit('agent/status', { status: 'idle' })
+        agent.status = 'running'; actual.agentEvents(h!.ctx as any, agent as any).emit('agent/status', { status: 'running' })
+        agent.status = 'idle'; actual.agentEvents(h!.ctx as any, agent as any).emit('agent/status', { status: 'idle' })
         return
       }
       const owner = kind === 'owned-related-job' ? h!.runtime.masterId : kind === 'owned-unrelated-job' ? 'ordinary-unrelated-owner' : undefined
@@ -143,4 +148,6 @@ it.each(['owned-related-job', 'related-agent-status', 'owned-unrelated-job', 'un
     console.log('ACTUAL RC5 event observation', {kind,error:'error' in result ? String(result.error) : undefined})
     expect('error' in result).toBe(['owned-related-job','related-agent-status'].includes(kind))
   } finally { await actual.cleanup() }
+})
+
 })
