@@ -489,6 +489,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/t5-writer-epoch.spec.ts` | Transient registered writer rejection during native capture, unrelated job isolation and subscription release on success/failure |
 | `tests/t5-writer-rc5-contract.spec.ts` | Optional RC5 LocalJobRegistry and agent status compatibility; skips unless `DSH_RC5_RUNTIME` is configured |
 | `tests/t5-empty-discussion-contract.spec.ts` | Discussion-only coordinator cwd/file recovery and complete empty application coverage |
+| `tests/t5-draft-resource-authority.spec.ts` | Unconfirmed and missing plan resource references remain inventory data without filesystem backup authority |
 | `tests/t5-recovery-completeness.spec.ts` | Detached two-project native and file recovery, cross-file capture rejection and tmp aliases |
 | `tests/t5-question-completion-gate.spec.ts` | Unanswered worker Attention blocks server completion despite ready self-report |
 | `tests/t5-attention-continuation.spec.ts` | Bound Question operation receipts, authoritative answers, serialized continuation delivery and restart recovery |

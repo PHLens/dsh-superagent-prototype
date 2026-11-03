@@ -315,6 +315,8 @@ export class Runtime extends Service implements SourceHost {
     for (const project of this.store.projects.list()) if (project.directory) workspaces.add(project.directory)
     for (const ticket of this.store.tickets.list()) {
       if (ticket.execution?.directory) workspaces.add(ticket.execution.directory)
+      // Plan resources are declarative data until a separate authorization/registration
+      // contract grants backup authority; never read draft paths during capture.
       for (const revision of ticket.planRevisions ?? []) for (const resource of revision.resources) if (resource.startsWith('/')) externalResources.add(resource)
       if (ticket.projectId) for (const artifact of this.projectCoordinator.artifacts.list(ticket.projectId, ticket.id)) attachments.add(artifact.path)
     }
@@ -322,10 +324,10 @@ export class Runtime extends Service implements SourceHost {
       for (const path of [attempt.root, attempt.cwd]) workspaces.add(path)
     }
     for (const mapping of this.projectCoordinator.conversations.listMappings()) workspaces.add(mapping.cwd)
-    for (const path of [...workspaces, ...attachments, ...externalResources]) if (!existsSync(path)) throw new Error(`Required recovery material is missing: ${path}`)
+    for (const path of [...workspaces, ...attachments]) if (!existsSync(path)) throw new Error(`Required recovery material is missing: ${path}`)
     const roots = { workspaces: [...workspaces], attachments: [...attachments], nativeState: [], externalResources: [...externalResources] }
     const capturedDb = this.recoveryDbToken()
-    const capturedFiles = this.recoveryFilesToken([...roots.workspaces, ...roots.attachments, ...roots.externalResources])
+    const capturedFiles = this.recoveryFilesToken([...roots.workspaces, ...roots.attachments])
     const capturedAttempts = JSON.stringify(this.projectCoordinator.attempts.all())
     const revisions = new Map(nativeSessions.map(session => [session.id, session.revision]))
     return {
@@ -338,7 +340,7 @@ export class Runtime extends Service implements SourceHost {
         if (this.executor.activeCount() > 0) throw new Error('Application writer jobs started during recovery capture')
         if (this.recoveryDbToken() !== capturedDb) throw new Error('Database changed during recovery capture')
         if (JSON.stringify(this.projectCoordinator.attempts.all()) !== capturedAttempts) throw new Error('Managed worker changed during recovery capture')
-        if (this.recoveryFilesToken([...roots.workspaces, ...roots.attachments, ...roots.externalResources]) !== capturedFiles) throw new Error('Recovery files changed during capture')
+        if (this.recoveryFilesToken([...roots.workspaces, ...roots.attachments]) !== capturedFiles) throw new Error('Recovery files changed during capture')
         const currentIds = this.managedBackupSessionIds()
         if (unusedMaster && !this.ctx.agents.get(this.masterId as SessionId) && !await this.ctx.sessionPersistence.stat(this.masterId as SessionId)) currentIds.delete(this.masterId)
         for (const id of currentIds) {

@@ -63,7 +63,7 @@ function freshRoot(path: string): void {
 export function createRecoveryPoint(store: Store, options: RecoveryOptions): RecoveryManifest {
   const destination = canonicalDestination(options.destination), database = join(destination, RECOVERY_DATABASE)
   const roots = options.roots ?? {}
-  const declared = [...new Set([...roots.workspaces ?? [], ...roots.attachments ?? [], ...roots.nativeState ?? [], ...roots.externalResources ?? []].map(root => resolve(root)))].sort((a, b) => a.length - b.length || a.localeCompare(b)).filter((root, _, all) => !all.some(parent => parent !== root && root.startsWith(`${parent}${sep}`) && statSafe(parent)?.isDirectory()))
+  const declared = [...new Set([...roots.workspaces ?? [], ...roots.attachments ?? [], ...roots.nativeState ?? []].map(root => resolve(root)))].sort((a, b) => a.length - b.length || a.localeCompare(b)).filter((root, _, all) => !all.some(parent => parent !== root && root.startsWith(`${parent}${sep}`) && statSafe(parent)?.isDirectory()))
   const databasePath = resolve(options.databasePath)
   const openedPath = store.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file
   if (typeof openedPath !== 'string' || realpathSync(databasePath) !== realpathSync(openedPath)) throw new Error('Recovery databasePath must identify the open Store database')
