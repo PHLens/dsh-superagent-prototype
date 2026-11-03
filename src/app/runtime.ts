@@ -259,7 +259,7 @@ export class Runtime extends Service implements SourceHost {
     // Registered writer activity is an epoch, not a content hash: even a writer
     // that restores its bytes before verification invalidates this capture.
     const ids = this.managedBackupSessionIds()
-    const jobs = this.ctx.get('jobs') as { list(id: string): readonly { owner?: string; status: string }[]; events: { subscribe(filter: { owner: string }, listener: () => void): () => void } } | undefined
+    const jobs = this.ctx.get('jobs') as { list(id: string): readonly { owner?: string; status: string }[]; events: { subscribe(filter: { owner: string }, listener: (event: unknown) => void): () => void } } | undefined
     const related = (agent: Agent): boolean => ids.has(agent.id)
     const quiet = () => {
       for (const id of ids) {
@@ -272,7 +272,11 @@ export class Runtime extends Service implements SourceHost {
     const releases: Array<() => void> = []
     const release = () => { for (const dispose of releases.splice(0)) dispose() }
     releases.push(this.ctx.on('agent/status', ({ agent }) => { if (related(agent)) changed = true }))
-    for (const id of ids) if (jobs) releases.push(jobs.events.subscribe({ owner: id }, () => { changed = true }))
+    for (const id of ids) if (jobs) releases.push(jobs.events.subscribe({ owner: id }, (event) => {
+      const value = event as { owner?: unknown; output?: { owner?: unknown }; job?: { owner?: unknown }; lifecycle?: { job?: { owner?: unknown } } } | undefined
+      const owner = value?.output?.owner ?? value?.lifecycle?.job?.owner ?? value?.job?.owner ?? value?.owner
+      if (typeof owner === 'string' && ids.has(owner)) changed = true
+    }))
     try {
       const materials = await this.readBackupMaterials()
       const verify = materials.verify
@@ -317,6 +321,7 @@ export class Runtime extends Service implements SourceHost {
     for (const attempt of this.projectCoordinator.attempts.all()) {
       for (const path of [attempt.root, attempt.cwd]) workspaces.add(path)
     }
+    for (const mapping of this.projectCoordinator.conversations.listMappings()) workspaces.add(mapping.cwd)
     for (const path of [...workspaces, ...attachments, ...externalResources]) if (!existsSync(path)) throw new Error(`Required recovery material is missing: ${path}`)
     const roots = { workspaces: [...workspaces], attachments: [...attachments], nativeState: [], externalResources: [...externalResources] }
     const capturedDb = this.recoveryDbToken()

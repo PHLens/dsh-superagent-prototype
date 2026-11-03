@@ -33,7 +33,7 @@ function completeApplicationPoint(manifest: RecoveryManifest, applicationFull = 
   const ids = manifest.coverage?.nativeSessionIds ?? []
   if (manifest.consistency !== 'declared-files-quiesced' || manifest.missing.length || manifest.incomplete.length) return false
   if (!manifest.coverage) return false
-  return manifest.coverage.kind === 'application-full' && ids.length > 0 && new Set(ids).size === ids.length
+  return manifest.coverage.kind === 'application-full' && new Set(ids).size === ids.length
     && ids.length === manifest.nativeSessions?.length && ids.every(id => manifest.nativeSessions.some(session => session.id === id))
     && !!manifest.relocations?.some(mapping => mapping.path === '.')
 }
@@ -74,7 +74,7 @@ export class BackupService {
       materials = this.options.prepareMaterials ? await this.options.prepareMaterials() : undefined
       if (this.cancelled()) throw new Error('Backup service stopped while preparing recovery materials')
       const manifest = createRecoveryPoint(this.options.store, { ...this.options.recovery, roots: materials?.roots ?? this.options.recoveryRoots?.() ?? this.options.recovery.roots,
-        nativeSessions: materials?.nativeSessions, relocations: materials?.relocations, coverage: materials?.expectedNativeSessionIds?.length ? { kind: 'application-full', nativeSessionIds: materials.expectedNativeSessionIds } : undefined, consistency: materials?.consistency, complete: false, databasePath: this.options.databasePath, destination })
+        nativeSessions: materials?.nativeSessions, relocations: materials?.relocations, coverage: materials?.expectedNativeSessionIds !== undefined ? { kind: 'application-full', nativeSessionIds: materials.expectedNativeSessionIds } : undefined, consistency: materials?.consistency, complete: false, databasePath: this.options.databasePath, destination })
       if (this.cancelled()) throw new Error('Backup service stopped during recovery point creation')
       await materials?.verify?.()
       if (this.cancelled()) throw new Error('Backup service stopped during final material verification')
