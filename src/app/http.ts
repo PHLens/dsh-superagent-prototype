@@ -14,6 +14,7 @@ import { SetupError, type SetupProblem } from '../setup.ts'
 import { UserError, type EngineForPeople, type Ticket } from '../core/index.ts'
 import type { Deployment, Machine } from '../deployment.ts'
 import type { DshExecutor } from '../executor/dsh.ts'
+import type { BackupService } from './backup-service.ts'
 import type { Health } from '../sources/host.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import type { Sessions } from './sessions.ts'
@@ -41,6 +42,7 @@ export interface HttpHost {
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople
   readonly executor: Pick<DshExecutor, 'activeCount' | 'reconcileTicket' | 'continueAfterAttention'>
+  readonly backup: Pick<BackupService, 'run' | 'status' | 'list' | 'restore'>
   readonly health: Record<string, Health>
   readonly machine: Machine
   readonly masterId: string
@@ -205,6 +207,14 @@ function routes(runtime: HttpHost): Routes {
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
     'GET sources': () => sourcesStatus(views(runtime), runtime.health, setupState(runtime)),
     'GET settings': () => settingsView(store, runtime.sources, runtime.health, setupState(runtime), runtime.machine.stateDir),
+     'GET backup/status': () => runtime.backup.status(),
+     'GET backup/points': () => ({ points: runtime.backup.list() }),
+     'POST backup/create': async () => { writable(); return { manifest: await runtime.backup.run('manual') } },
+     'POST backup/restore': async ({ body }) => {
+       writable()
+       const input = z.object({ source: z.string().min(1), destination: z.string().min(1) }).strict().parse(await body())
+       return { manifest: runtime.backup.restore(input.source, input.destination) }
+     },
     'POST sources/:id/labels': ({ params }) => runtime.settings.refreshLabels(params.id),
     'GET threads': ({ query }) => {
       const { filter, offset, limit } = ThreadsQuery.parse(query)
@@ -245,7 +255,7 @@ function routes(runtime: HttpHost): Routes {
       writable(); const id = ticket(params.id), input = z.object({ version: z.number().int().positive(), questionId: z.string().min(1), text: z.string().min(1) }).strict().parse(await body())
       const source = 'web', actor = { source, id: actorId ?? 'panel' }
       const result = runtime.engine.answerAttention(id, input.version, actor, source, input.text, input.questionId)
-      if (result.resolved) await runtime.executor.continueAfterAttention(id, result.answer.id)
+      if (result.resolved) await runtime.executor.continueAfterAttention(id, result.answer.id, result.answer.text)
        return { resolved: result.resolved, version: input.version }
     },
     'POST executor/pause': async ({ body }) => runtime.settings.pause(z.object({ paused: z.boolean() }).parse(await body()).paused, 'panel'),

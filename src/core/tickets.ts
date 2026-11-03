@@ -210,9 +210,16 @@ export class Tickets extends EnginePart {
   /** Saves an answer against an exact question version before any continuation is requested. */
   answerAttention(ticketId: string, version: number, actor: ActorRef, source: string, text: string, questionId: string): { answer: AttentionAnswer; resolved: boolean } {
     const ticket = this.require(ticketId), attention = ticket.attention
-    if (!attention) {
-      const prior = ticket.attentionHistory?.find(item => item.version === version && item.id === questionId)?.answers.find(item => !item.conflict)
-      if (prior) return { answer: { ...prior, conflict: true }, resolved: false }
+    const history = ticket.attentionHistory?.find(item => item.version === version && item.id === questionId)
+    if (history || !attention) {
+      const prior = history?.answers.find(item => !item.conflict)
+      if (prior && prior.actor.id === actor.id && prior.actor.source === actor.source && prior.text === text) return { answer: prior, resolved: true }
+      if (prior && history) {
+        const conflict: AttentionAnswer = { id: key('attention-answer', questionId, String(version), actor.source, actor.id, text), questionId, version, actor, source, text, at: this.now(), conflict: true }
+        const existing = history.answers.find(item => item.id === conflict.id)
+        if (existing) return { answer: existing, resolved: false }
+        history.answers = [...history.answers, conflict]; ticket.updatedAt = conflict.at; this.repo.tickets.save(ticket); return { answer: conflict, resolved: false }
+      }
       throw new UserError('unknownTicket')
     }
     const questionVersion = attention.version ?? 1
@@ -223,7 +230,10 @@ export class Tickets extends EnginePart {
     if (prior) { ticket.updatedAt = at; this.repo.tickets.save(ticket); return { answer, resolved: false } }
     attention.resolvedAt = at; attention.answers = [answer]; ticket.answers = [...ticket.answers ?? [], answer.id]
     ticket.attentionHistory = [...ticket.attentionHistory ?? [], { ...attention, version, answers: [...attention.answers], resolvedAt: at }]
-    delete ticket.attention; ticket.updatedAt = at
+    delete ticket.attention
+     const lifecycle = this.lifecycle(ticket)
+     lifecycle.attentionContinuation = { answerId: answer.id, answerText: answer.text, questionId: attention.id, version, ...attention.binding }
+     ticket.lifecycle = lifecycle; ticket.updatedAt = at
     this.repo.tickets.save(ticket); return { answer, resolved: true }
   }
   private lifecycle(ticket: Ticket): LifecycleState {

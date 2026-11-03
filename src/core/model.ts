@@ -364,10 +364,14 @@ export interface LifecycleState {
   checkpoint?: { id: string; at: string; assignmentId?: string; attemptId?: string; files: readonly string[] }
   reconciliation?: { state: 'checking' | 'clear' | 'unknown'; operationId?: string; startedAt: string; observedAt?: string; assignmentId?: string; attemptId?: string; lease?: string; sessionId?: string; reason?: string; ownerIds?: string[]; attemptLeases?: string[]; pauseIntent?: PauseIntent; stopIntent?: StopIntent }
   reconciliationHistory?: { state: 'clear' | 'unknown'; operationId: string; startedAt: string; observedAt: string; assignmentId?: string; attemptId?: string; lease?: string; sessionId?: string; reason?: string; ownerIds?: string[]; attemptLeases?: string[]; pauseIntent?: PauseIntent; stopIntent?: StopIntent }[]
+  attentionContinuation?: { answerId: string; answerText: string; questionId?: string; version?: number; assignmentId?: string; attemptId?: string; lease?: string; sessionId?: string; deliveredAt?: string }
 }
 /** Immutable question version; answers are append-only and only the first valid one is consumed. */
 export interface AttentionAnswer { id: string; questionId: string; version: number; actor: ActorRef; source: string; text: string; at: string; consumed?: true; conflict?: true }
-export interface Attention { id: string; /** Defaults to 1 for records created before versioned attention. */ version?: number; question: string; triggerId?: string; answers?: AttentionAnswer[]; resolvedAt?: string }
+export interface AttentionBinding { assignmentId: string; attemptId: string; lease: string; sessionId: string }
+export interface Attention { id: string; /** Defaults to 1 for records created before versioned attention. */ version?: number; question: string; triggerId?: string; binding?: AttentionBinding; answers?: AttentionAnswer[]; resolvedAt?: string }
+/** Immutable question receipts, scoped to a server-owned execution attempt. */
+export interface AttentionQuestionOperation { operationId: string; binding: AttentionBinding; question: Attention }
 export interface AttentionHistoryEntry extends Attention { resolvedAt: string; answers: AttentionAnswer[] }
 /** Project stages remain inert to the legacy executor, including after T3 confirmation. */
 export type ProjectTicketStage = 'draft' | 'awaiting-confirmation' | 'confirmed'
@@ -394,6 +398,7 @@ export interface Ticket {
   /** Open question for a person; notification delivery never resolves it. */
   attention?: Attention
   attentionHistory?: AttentionHistoryEntry[]
+  attentionQuestionOperations?: AttentionQuestionOperation[]
   attentionSequence?: number
   /** Persisted pause/stop intent and the last host observation. */
   lifecycle?: LifecycleState

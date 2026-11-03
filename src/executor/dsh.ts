@@ -218,6 +218,7 @@ export class DshExecutor implements Executor {
   private readonly projectLaunching = new Map<string, Promise<void>>()
   private readonly projectObserved = new Set<string>()
   private readonly reconciling = new Set<string>()
+  private readonly pendingAttention = new Map<string, Promise<boolean>>()
   private held(ticket: Ticket): boolean {
     return ticket.lifecycle?.pause.intent === 'pause' || ticket.lifecycle?.stop.intent === 'stop'
   }
@@ -349,31 +350,71 @@ export class DshExecutor implements Executor {
     }
     this.track(ticket.id, settle())
   }
-  /** Continue an idle project worker exactly once after a resolved Attention answer. */
-  async continueAfterAttention(ticketId: string, answerId: string): Promise<boolean> {
-    if (this.host.closing() || this.host.paused()) return false
-    const ticket = this.host.store.tickets.get(ticketId)
-    if (!ticket || ticket.ended || this.held(ticket) || this.stopping.has(ticketId)) return false
-    const reconciliation = ticket.lifecycle?.reconciliation
-    if (reconciliation?.state === 'checking' || reconciliation?.state === 'unknown') return false
-    const assignment = ticket.assignments.find(item => item.state !== 'ended' && item.contract)
-    const attempt = assignment && this.host.attempts?.all().findLast(item => item.assignmentId === assignment.id)
-    if (!assignment || !attempt || attempt.status !== 'running') return false
-    const agent = this.host.context.agents.get(attempt.sessionId as SessionId)
-    if (!agent) return false
-    const requestId = `attention-continuation:${ticketId}:${answerId}:${attempt.id}:${attempt.lease}`
-    if (await this.host.sessions.holds(agent.id, requestId)) return false
-    try { this.slots.reserve(ticketId, 'wake') } catch { return false }
-    const work = this.host.sessions.prompt(agent.id, requestId,
-      'A person answered the pending Attention question. Continue the confirmed work using that answer and submit the next durable result.',
-      'queue', () => { this.host.attempts!.resolve(agent.id) })
-      .then(() => { this.host.engine.observeTicket(ticketId, 'running', 'attention-answered') })
-      .finally(() => { this.slots.free(ticketId) })
-    this.track(ticketId, work)
-    return true
+  /** Only the persisted answer may continue its exact question's execution. Serialize before any await. */
+  async continueAfterAttention(ticketId: string, answerId: string, _answerText: string): Promise<boolean> {
+    const pending = this.pendingAttention.get(ticketId)
+    if (pending) { await pending; return this.host.store.tickets.get(ticketId)?.lifecycle?.attentionContinuation?.answerId === answerId && !!this.host.store.tickets.get(ticketId)?.lifecycle?.attentionContinuation?.deliveredAt }
+    const work = Promise.resolve().then(() => this.deliverAttention(ticketId, answerId))
+    this.pendingAttention.set(ticketId, work)
+    try { return await work } finally { if (this.pendingAttention.get(ticketId) === work) this.pendingAttention.delete(ticketId) }
+  }
+  private async deliverAttention(ticketId: string, answerId: string): Promise<boolean> {
+    const initial = this.host.store.tickets.get(ticketId)?.lifecycle?.attentionContinuation
+    if (!initial || initial.answerId !== answerId || !initial.assignmentId || !initial.attemptId || !initial.lease || !initial.sessionId) return false
+    const sessionId = initial.sessionId
+    const validate = () => {
+      const { ticket, assignment, attempt } = this.host.attempts!.resolve(sessionId)
+      const current = ticket.lifecycle?.attentionContinuation
+      const history = ticket.attentionHistory?.find(item => item.id === initial.questionId && item.version === initial.version)
+      const answer = history?.answers.find(item => item.id === answerId && !item.conflict)
+      const binding = history?.binding
+      if (this.host.closing() || this.host.paused() || this.stopping.has(ticketId) || ticket.id !== ticketId || ticket.attention
+        || current?.answerId !== answerId || current.questionId !== initial.questionId || current.version !== initial.version
+        || current.assignmentId !== initial.assignmentId || current.attemptId !== initial.attemptId || current.lease !== initial.lease || current.sessionId !== sessionId
+        || assignment.id !== initial.assignmentId || ticket.assignments.findLast(item => item.contract && item.state !== 'ended')?.id !== assignment.id
+        || attempt.id !== initial.attemptId || attempt.lease !== initial.lease || attempt.status !== 'running'
+        || binding?.assignmentId !== assignment.id || binding.attemptId !== attempt.id || binding.lease !== attempt.lease || binding.sessionId !== sessionId
+        || !answer || answer.text !== current.answerText || ticket.lifecycle?.reconciliation?.state === 'checking' || ticket.lifecycle?.reconciliation?.state === 'unknown') throw new Later('Attention continuation binding or lifecycle changed')
+      return { ticket, current, answer }
+    }
+    let reserved = false
+    try {
+      const state = validate()
+      if (state.current.deliveredAt) return true
+      let agent = this.host.context.agents.get(sessionId as SessionId)
+      if (!agent) {
+        const attempt = this.host.attempts!.bySession(sessionId)!
+        agent = await this.host.sessions.ensure(sessionId, attempt.cwd, `Project worker: ${state.ticket.title}`, 'worker')
+        validate()
+      }
+      if (agent.id !== sessionId || agent.session.header.cwd !== this.host.attempts!.bySession(sessionId)?.cwd) return false
+      const requestId = `attention-continuation:${ticketId}:${answerId}:${initial.attemptId}:${initial.lease}`
+      const held = await this.host.sessions.holds(sessionId, requestId)
+      validate()
+      if (!held) {
+        this.slots.reserve(ticketId, 'wake'); reserved = true
+        await this.host.sessions.prompt(sessionId, requestId,
+          `A person answered the pending Attention question with: ${state.answer.text}. Continue the confirmed work using that answer and submit the next durable result.`,
+          'queue', () => { validate() })
+      }
+      // A held native message also completes a crash-interrupted application receipt.
+      const latest = validate()
+      latest.current.deliveredAt = now()
+      this.host.store.tickets.save(latest.ticket)
+      this.host.engine.observeTicket(ticketId, 'running', 'attention-answered')
+      return true
+    } catch {
+      // Keep the durable answer pending. The next pass retries the same native request id.
+      return false
+    } finally { if (reserved) this.slots.free(ticketId) }
   }
   /** Called by the existing pass loop; project workers use the same slots as legacy workers. */
   dispatchProjects(): void {
+     if (this.host.closing()) return
+     for (const ticket of this.host.store.tickets.list()) {
+       const continuation = ticket.lifecycle?.attentionContinuation
+       if (continuation && !continuation.deliveredAt) void this.continueAfterAttention(ticket.id, continuation.answerId, continuation.answerText)
+     }
     if (this.host.closing()) return
     for (const ticket of this.host.store.tickets.list()) {
       if (ticket.ended) continue

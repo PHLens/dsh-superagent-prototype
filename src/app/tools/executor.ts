@@ -3,7 +3,7 @@ import { z } from 'zod'
 import type { ExecutionAttempts } from '../execution-attempts.ts'
 import type { ArtifactStore } from '../artifact-store.ts'
 import type { ReportAcceptance } from '../report-acceptance.ts'
-import { liveTicket, type EngineForExecutor, type Ticket } from '../../core/index.ts'
+import { key, liveTicket, type EngineForExecutor, type Ticket } from '../../core/index.ts'
 import { IM_WORDS } from '../../infra/text.ts'
 import { claimPull, readPull } from '../../sources/github-pull.ts'
 import type { SourceContext } from '../../sources/host.ts'
@@ -23,8 +23,31 @@ export interface ExecutorToolsHost {
   sendReplies(): Promise<void>
 }
 
-export function projectWorkerTools(attempts: ExecutionAttempts, artifacts: ArtifactStore, reports: ReportAcceptance, sessionId: string): Tool[] {
-  return [
+export function projectWorkerTools(attempts: ExecutionAttempts, artifacts: ArtifactStore, reports: ReportAcceptance, engineOrSession: Pick<EngineForExecutor, 'report'> | string, maybeSessionId?: string): Tool[] {
+  const sessionId = typeof engineOrSession === 'string' ? engineOrSession : maybeSessionId!
+  const tools: Tool[] = []
+  if (typeof engineOrSession !== 'string') tools.push(tool({ name: 'project_worker_request_question', description: 'Ask the authorized project owner one concrete question. Reuse operation_id only with the same question. The server binds the question to this native Session Assignment attempt and lease.', schema: z.object({ operation_id: z.string().trim().min(1), question: z.string().trim().min(1).max(4000) }).strict(), execute: async args => attempts.store.atomic(() => {
+    const receipt = attempts.resolve(sessionId, true)
+    const previous = receipt.ticket.attentionQuestionOperations?.find(item => item.binding.attemptId === receipt.attempt.id && item.operationId === args.operation_id)
+    if (previous) {
+      if (previous.question.question !== args.question || previous.binding.lease !== receipt.attempt.lease || previous.binding.sessionId !== sessionId) throw new Error('Question operation_id payload or execution binding changed')
+      return { question: previous.question }
+    }
+    const { attempt, assignment, ticket } = attempts.resolve(sessionId)
+    if (ticket.assignments.findLast(item => item.contract && item.state !== 'ended')?.id !== assignment.id) throw new Error('Stale worker Assignment')
+    if (ticket.lifecycle?.attentionContinuation && !ticket.lifecycle.attentionContinuation.deliveredAt) throw new Error('The previous answer is awaiting continuation')
+    const binding = { assignmentId: assignment.id, attemptId: attempt.id, lease: attempt.lease, sessionId }
+    const version = (ticket.attentionSequence ?? ticket.attention?.version ?? 0) + 1
+    const question = { id: key('attention', ticket.id, String(version)), version, question: args.question, binding }
+    const at = new Date().toISOString()
+    ticket.attention = question; ticket.attentionSequence = version
+    ticket.attentionQuestionOperations = [...ticket.attentionQuestionOperations ?? [], { operationId: args.operation_id, binding, question }]
+    assignment.report = { state: 'progress', summary: `Waiting for owner answer: ${args.question}`, at }
+    ticket.updatedAt = at
+    attempts.store.tickets.save(ticket)
+    return { question }
+  }) }))
+  return [...tools,
     tool({ name: 'project_worker_context', description: 'Read the immutable authorized plan, saved originalMessage for the original request language, pinned inputs and registered artifacts. Identity and originalMessage come only from this native Session Assignment authorization, never conversation history.', schema: z.object({}).strict(), execute: async () => {
       const { attempt, assignment, ticket } = attempts.resolve(sessionId)
       const authorization = ticket.authorizations?.find(item => item.id === assignment.contract!.authorizationId)

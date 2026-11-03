@@ -1,5 +1,6 @@
 /** Consistent recovery points and safe, inert restore manifests for T5 acceptance. */
 import { createHash } from 'node:crypto'
+import { DatabaseSync } from 'node:sqlite'
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { SCHEMA_VERSION, type Store } from './store.ts'
@@ -168,10 +169,29 @@ export function restoreRecoveryPoint(source: string, destination: string): Recov
   writeFileSync(join(target, 'INCOMPLETE'), 'Restore has not completed.\n', { mode: 0o600 })
   for (const directory of manifest.directories ?? manifest.mappings.filter(mapping => mapping.kind === 'directory').map(mapping => mapping.path)) mkdirSync(join(target, directory), { recursive: true, mode: 0o700 })
   for (const file of manifest.files) {
-    const path = join(target, file === database ? RECOVERY_DATABASE : file.path)
+    const path = join(target, file.path === database.path ? RECOVERY_DATABASE : file.path)
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); copyFileSync(join(sourceRoot, file.path), path); chmodSync(path, 0o600)
     if (statSync(path).size !== file.bytes || digest(path) !== file.sha256) throw new Error(`Recovery file changed during restore: ${file.path}`)
   }
+  const restoredDb = new DatabaseSync(join(target, RECOVERY_DATABASE))
+  try {
+    const rows = restoredDb.prepare('SELECT id, value FROM worker_artifact').all() as { id: string; value: string }[]
+    for (const row of rows) {
+      const artifact = JSON.parse(row.value) as { path?: string }
+      if (!artifact.path) continue
+      const artifactPath = resolve(artifact.path)
+      for (const mapping of manifest.mappings.filter(item => item.kind === 'directory')) {
+        const source = resolve(mapping.source)
+        const sourceCandidates = source.startsWith('/var/') ? [source, `/private${source}`] : [source]
+        const matchedSource = sourceCandidates.find(candidate => within(candidate, artifactPath))
+        if (matchedSource) {
+          artifact.path = join(realpathSync(target), mapping.path, relative(matchedSource, artifactPath))
+          break
+        }
+      }
+      restoredDb.prepare('UPDATE worker_artifact SET value = ? WHERE id = ?').run(JSON.stringify(artifact), row.id)
+    }
+  } finally { restoredDb.close() }
   const restored: RecoveryManifest = { ...manifest, restoredProfile: { execution: 'prohibited', model: 'prohibited', outbound: 'prohibited', isolatedRoot: target } }
   writeFileSync(join(target, 'manifest.json'), JSON.stringify(restored, null, 2), { mode: 0o600 }); unlinkSync(join(target, 'INCOMPLETE'))
   return restored

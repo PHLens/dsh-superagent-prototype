@@ -69,4 +69,13 @@ export class BackupService {
     for (const point of points.slice(retention)) if (point !== keep) rmSync(point, { recursive: true, force: true })
   }
   restore(source: string, destination: string): RecoveryManifest { return restoreRecoveryPoint(source, destination) }
+  status(): { configured: boolean; running: boolean; health?: ReturnType<HealthEntry['get']> } { return { configured: !!this.settings, running: !!this.active, health: this.options.health.get() } }
+  list(): Array<{ path: string; createdAt: string; bytes: number }> {
+    const root = this.settings?.directory || this.options.destinationRoot
+    if (!existsSync(root)) return []
+    return readdirSync(root, { withFileTypes: true }).filter(entry => entry.isDirectory()).flatMap(entry => {
+      const path = join(root, entry.name)
+      try { const manifest = verifyRecoveryPoint(path); return [{ path, createdAt: manifest.createdAt, bytes: manifest.files.reduce((sum, file) => sum + file.bytes, 0) }] } catch { return [] }
+    }).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  }
 }
