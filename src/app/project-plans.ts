@@ -58,6 +58,7 @@ export class ProjectPlans {
       goal: ticket.planRevisions?.at(-1)?.goal.slice(0, 300),
       authorizationCount: ticket.authorizations?.length ?? 0,
       assignmentCount: ticket.assignments?.length ?? 0,
+      assignments: ticket.assignments?.filter(item => item.contract).map(item => ({ id: item.id, assignmentKey: item.contract?.assignmentKey, title: item.contract?.plan.goal.slice(0, 160), state: item.state, waitingReason: item.waitingReason })),
     }))
     return { items: page, offset, limit, total: tickets.length, hasMore: offset + page.length < tickets.length }
   }
@@ -96,10 +97,10 @@ export class ProjectPlans {
       if (!evidence) throw new UserError('planConfirmationRequired')
       this.store.set(`project-plan-confirmation:${projectId}:${request.operationId}` as never, { request, messageId: evidence.message.id })
       const result = this.service(actorId, projectId).confirm(request)
-      const assignment = this.service(actorId, projectId).registerAssignment({ projectId, ticketId: request.ticketId,
+      const assignments = this.service(actorId, projectId).registerAssignments({ projectId, ticketId: request.ticketId,
         authorizationId: result.authorization.id, targetId: result.target.id, planRevision: request.planRevision })
       this.store.db.prepare("UPDATE conversation_message SET status='saved' WHERE id=?").run(evidence.message.id)
-      return { ...result, assignment, message: { ...evidence.message, status: 'saved' as const } }
+      return { ...result, ticket: this.store.tickets.get(request.ticketId)!, assignment: assignments[0]!, assignments, message: { ...evidence.message, status: 'saved' as const } }
     })
   }
   revoke(actorId: string, projectId: string, request: RevokePlan): PlanAuthorization {

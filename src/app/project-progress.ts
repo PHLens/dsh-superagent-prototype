@@ -10,6 +10,16 @@ export type ProjectWorkPhase = 'awaiting-confirmation' | 'queued' | 'preparing' 
   | 'failed' | 'blocked' | 'unknown' | 'authorization-revoked' | 'completed' | 'ended'
 export interface AssignmentProgress {
   assignmentId: string
+  assignmentKey?: string
+  title: string
+  goal: string
+  state: Assignment['state']
+  waitingReason?: string
+  acceptanceHold?: string
+  dependencies: string[]
+  question?: { id: string; version?: number; question: string }
+  gate?: { targetAssignmentId: string; conditionsVersion: number; conclusion?: GateDecision['conclusion'] }
+  budgetWait?: 'global-budget' | 'project-fairness' | 'worker-slot'
   planRevision: number
   authorizationId: string
   attemptId?: string
@@ -29,6 +39,10 @@ export interface ProjectProgress {
   completedAt?: string
   assignments: AssignmentProgress[]
 }
+function authorizationHold(ticket: Ticket, assignment: Assignment): boolean {
+  const id = assignment.contract?.authorizationId
+  return !id || !!ticket.authorizations?.find(item => item.id === id)?.revokedAt
+}
 interface Facts {
   attempts: readonly Attempt[]
   reports: readonly AcceptedReport[]
@@ -44,8 +58,16 @@ function assignmentProgress(ticket: Ticket, assignment: Assignment, facts: Facts
   const nativeState = native === 'running' || native === 'idle' ? native : 'unknown'
   const report = attempt && facts.reports.findLast(item => item.projectId === ticket.projectId && item.ticketId === ticket.id
     && item.assignmentId === assignment.id && item.attemptId === attempt.id && item.lease === attempt.lease)
+  const question = ticket.attentionQuestions?.find(item => item.binding?.assignmentId === assignment.id) ?? (ticket.attention?.binding?.assignmentId === assignment.id ? ticket.attention : undefined)
   const result: AssignmentProgress = {
-    assignmentId: assignment.id, authorizationId: contract.authorizationId, planRevision: contract.planRevision,
+    assignmentId: assignment.id, assignmentKey: contract.assignmentKey, title: contract.plan.goal.slice(0, 160), goal: contract.plan.goal,
+    state: assignment.state, waitingReason: assignment.waitingReason,
+    ...(attempt?.fenced ? { acceptanceHold: 'execution-fenced' } : attempt?.status === 'reconcile' ? { acceptanceHold: 'reconciliation-required' } : authorizationHold(ticket, assignment) ? { acceptanceHold: 'authorization-revoked' } : {}),
+    dependencies: contract.inputs.flatMap(input => input.kind === 'dependency' ? [input.assignmentId] : []),
+    ...(question ? { question: { id: question.id, version: question.version, question: question.question } } : {}),
+    ...(assignment.waitingReason === 'worker-slot' ? { budgetWait: 'worker-slot' as const } : {}),
+    ...(contract.proposal?.review ? { gate: { targetAssignmentId: assignment.id, conditionsVersion: contract.proposal?.review.conditionsVersion } } : {}),
+    authorizationId: contract.authorizationId, planRevision: contract.planRevision,
     attemptId: attempt?.id, attemptState: attempt?.status, phase: 'queued', nativeState,
     conditionsVersion: contract.plan.acceptance?.version ?? contract.planRevision,
     ...(report ? { reportId: report.id, reportState: report.state, reportAt: report.at } : {}),

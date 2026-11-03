@@ -210,6 +210,21 @@ export interface Decision {
   dismissed?: true
 }
 
+/** A coordinator-proposed work package inside one confirmed scope. IDs are local to the plan. */
+export interface AssignmentProposal {
+  readonly key: string
+  readonly goal: string
+  readonly outputs: readonly string[]
+  readonly completion: string
+  readonly resources: readonly string[]
+  readonly cost: string
+  readonly dependencies: readonly string[]
+  /** Each writer receives its own server-owned attempt directory. */
+  readonly writeScope: 'isolated-directory'
+  readonly acceptance: { readonly version: number; readonly mode: 'registered-files' | 'human-review' }
+  readonly review?: { readonly target: string; readonly conditionsVersion: number }
+  readonly retry?: { readonly on: readonly ('failed' | 'changes_required')[]; readonly limit: number }
+}
 /** Immutable reviewed contract. Text fields are descriptions, never executable instructions for the legacy engine. */
 export interface PlanContent {
   readonly goal: string
@@ -223,6 +238,8 @@ export interface PlanContent {
   readonly acceptance?: { readonly version: number; readonly mode: 'registered-files' | 'human-review' }
   /** Exact registered project artifact versions approved with this plan. */
   readonly artifactInputs?: readonly { readonly artifactId: string; readonly contentVersion: string }[]
+  /** Server-validated multi-worker decomposition proposed by the coordinator. */
+  readonly assignments?: readonly AssignmentProposal[]
 }
 export interface PlanRevision extends PlanContent {
   readonly projectId: string
@@ -269,6 +286,8 @@ export type PlanAssignmentInput =
   | { kind: 'dependency'; ticketId: string; assignmentId: string }
   | { kind: 'artifact'; artifactId: string; contentVersion: string }
 export interface PlanAssignmentContract {
+  readonly assignmentKey?: string
+  readonly proposal?: AssignmentProposal
   readonly authorizationId: string
   readonly targetId: string
   readonly planRevision: number
@@ -299,7 +318,7 @@ export interface Assignment {
   state: AssignmentState
   /** Present for T3 assignments only; these wait for the T4 project executor. */
   contract?: PlanAssignmentContract
-  waitingReason?: 'executor-unavailable' | 'worker-slot' | 'preparation-reconciliation' | 'worker-running' | 'worker-idle' | 'semantic-review' | 'missing-artifacts' | 'unresolved-items' | 'changes_required' | 'needs_judgment' | 'failed' | 'blocked' | 'dependency' | 'processing-paused'
+  waitingReason?: 'executor-unavailable' | 'worker-slot' | 'preparation-reconciliation' | 'worker-running' | 'worker-idle' | 'semantic-review' | 'missing-artifacts' | 'unresolved-items' | 'changes_required' | 'needs_judgment' | 'failed' | 'blocked' | 'dependency' | 'processing-paused' | 'retrying'
   createdAt: string
   startedAt?: string
   endedAt?: string
@@ -364,6 +383,7 @@ export interface LifecycleState {
   checkpoint?: { id: string; at: string; assignmentId?: string; attemptId?: string; files: readonly string[] }
   reconciliation?: { state: 'checking' | 'clear' | 'unknown'; operationId?: string; startedAt: string; observedAt?: string; assignmentId?: string; attemptId?: string; lease?: string; sessionId?: string; reason?: string; ownerIds?: string[]; attemptLeases?: string[]; pauseIntent?: PauseIntent; stopIntent?: StopIntent }
   reconciliationHistory?: { state: 'clear' | 'unknown'; operationId: string; startedAt: string; observedAt: string; assignmentId?: string; attemptId?: string; lease?: string; sessionId?: string; reason?: string; ownerIds?: string[]; attemptLeases?: string[]; pauseIntent?: PauseIntent; stopIntent?: StopIntent }[]
+  attentionContinuations?: NonNullable<LifecycleState['attentionContinuation']>[]
   attentionContinuation?: { answerId: string; answerText: string; questionId?: string; version?: number; assignmentId?: string; attemptId?: string; lease?: string; sessionId?: string; deliveredAt?: string }
 }
 /** Immutable question version; answers are append-only and only the first valid one is consumed. */
@@ -397,6 +417,8 @@ export interface Ticket {
   ended?: { at: string; by: TicketEndBy; outcome: TicketOutcome; reason?: string }
   /** Open question for a person; notification delivery never resolves it. */
   attention?: Attention
+  /** Concurrent branch questions. `attention` remains the legacy primary question projection. */
+  attentionQuestions?: Attention[]
   attentionHistory?: AttentionHistoryEntry[]
   attentionQuestionOperations?: AttentionQuestionOperation[]
   attentionSequence?: number
@@ -506,12 +528,15 @@ export function validateTicketOwnership(ticket: Ticket, previous?: Ticket, proje
       const authorization = ticket.authorizations?.find(item => item.id === contract.authorizationId)
       const target = ticket.executionTargets?.find(item => item.id === contract.targetId)
       const plan = ticket.planRevisions?.find(item => item.revision === contract.planRevision)
-      if (!ticket.projectId || assignedTargets.has(contract.targetId) || !authorization || !target || !plan
+      if (!ticket.projectId || assignedTargets.has(`${contract.targetId}:${contract.assignmentKey ?? ''}`) || !authorization || !target || !plan
         || authorization.targetId !== target.id || target.authorizationId !== authorization.id
         || authorization.planRevision !== plan.revision || target.planRevision !== plan.revision) throw new Error('Assignment plan authorization does not match')
-      assignedTargets.add(contract.targetId)
+      assignedTargets.add(`${contract.targetId}:${contract.assignmentKey ?? ''}`)
       const { projectId: _projectId, ticketId: _ticketId, revision: _revision, createdAt: _createdAt, ...expected } = plan
-      if (!unchanged(contract.plan, expected)) throw new Error('Assignment contract does not match plan revision')
+      const proposal = contract.assignmentKey ? plan.assignments?.find(item => item.key === contract.assignmentKey) : undefined
+      if (contract.assignmentKey && (!proposal || !unchanged(contract.proposal, proposal))) throw new Error('Assignment proposal does not match confirmed scope')
+      const expectedPlan = proposal ? { ...expected, assignments: undefined, goal: proposal.goal, outputs: proposal.outputs, resources: proposal.resources, cost: proposal.cost, completion: proposal.completion, acceptance: proposal.acceptance } : expected
+      if (!unchanged(contract.plan, expectedPlan)) throw new Error('Assignment contract does not match plan revision')
       if (!Array.isArray(contract.inputs)) throw new Error('Assignment input ownership does not match')
       for (const input of contract.inputs) {
         if (input?.kind === 'artifact') {

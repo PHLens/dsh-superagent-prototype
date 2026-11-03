@@ -304,7 +304,7 @@ export class DshExecutor implements Executor {
   /** Cancellation requests become observations only after the actual native workers drain. */
   private reconcileLifecycle(ticket: Ticket): void {
     const lifecycle = ticket.lifecycle
-    if (!lifecycle || !this.held(ticket) || this.projectLaunching.has(ticket.id)) return
+    if (!lifecycle || !this.held(ticket) || ticket.assignments.some(item => this.projectLaunching.has(item.id))) return
     const stopping = lifecycle.stop.intent === 'stop'
     if (stopping ? lifecycle.stop.state === 'exited' : lifecycle.pause.state === 'paused') return
     const intentKey = `${stopping ? 'stop' : 'pause'}:${stopping ? lifecycle.stop.at : lifecycle.pause.at}`
@@ -350,31 +350,35 @@ export class DshExecutor implements Executor {
     }
     this.track(ticket.id, settle())
   }
+  private continuations(ticket?: Ticket) {
+    const values = [...ticket?.lifecycle?.attentionContinuations ?? [], ...ticket?.lifecycle?.attentionContinuation ? [ticket.lifecycle.attentionContinuation] : []]
+    return [...new Map(values.map(item => [item.answerId, item])).values()]
+  }
   /** Only the persisted answer may continue its exact question's execution. Serialize before any await. */
   async continueAfterAttention(ticketId: string, answerId: string, _answerText: string): Promise<boolean> {
-    const pending = this.pendingAttention.get(ticketId)
-    if (pending) { await pending; return this.host.store.tickets.get(ticketId)?.lifecycle?.attentionContinuation?.answerId === answerId && !!this.host.store.tickets.get(ticketId)?.lifecycle?.attentionContinuation?.deliveredAt }
+    const pending = this.pendingAttention.get(answerId)
+    if (pending) { await pending; return this.continuations(this.host.store.tickets.get(ticketId)).some(item => item.answerId === answerId && !!item.deliveredAt) }
     const work = Promise.resolve().then(() => this.deliverAttention(ticketId, answerId))
-    this.pendingAttention.set(ticketId, work)
-    try { return await work } finally { if (this.pendingAttention.get(ticketId) === work) this.pendingAttention.delete(ticketId) }
+    this.pendingAttention.set(answerId, work)
+    try { return await work } finally { if (this.pendingAttention.get(answerId) === work) this.pendingAttention.delete(answerId) }
   }
   private async deliverAttention(ticketId: string, answerId: string): Promise<boolean> {
-    const initial = this.host.store.tickets.get(ticketId)?.lifecycle?.attentionContinuation
+    const initial = this.continuations(this.host.store.tickets.get(ticketId)).find(item => item.answerId === answerId)
     if (!initial || initial.answerId !== answerId || !initial.assignmentId || !initial.attemptId || !initial.lease || !initial.sessionId) return false
     const sessionId = initial.sessionId
     const validate = () => {
       const { ticket, assignment, attempt } = this.host.attempts!.resolve(sessionId)
-      const current = ticket.lifecycle?.attentionContinuation
+      const current = this.continuations(ticket).find(item => item.answerId === answerId)
       const history = ticket.attentionHistory?.find(item => item.id === initial.questionId && item.version === initial.version)
       const answer = history?.answers.find(item => item.id === answerId && !item.conflict)
       const binding = history?.binding
-      if (this.host.closing() || this.host.paused() || this.stopping.has(ticketId) || ticket.id !== ticketId || ticket.attention
+      if (this.host.closing() || this.host.paused() || this.stopping.has(ticketId) || ticket.id !== ticketId || [...ticket.attentionQuestions ?? [], ...ticket.attention ? [ticket.attention] : []].some(item => item.binding?.assignmentId === assignment.id)
         || current?.answerId !== answerId || current.questionId !== initial.questionId || current.version !== initial.version
         || current.assignmentId !== initial.assignmentId || current.attemptId !== initial.attemptId || current.lease !== initial.lease || current.sessionId !== sessionId
-        || assignment.id !== initial.assignmentId || ticket.assignments.findLast(item => item.contract && item.state !== 'ended')?.id !== assignment.id
+        || assignment.id !== initial.assignmentId || !ticket.assignments.some(item => item.id === assignment.id && item.contract && item.state !== 'ended')
         || attempt.id !== initial.attemptId || attempt.lease !== initial.lease || !['prepared', 'running'].includes(attempt.status)
         || binding?.assignmentId !== assignment.id || binding.attemptId !== attempt.id || binding.lease !== attempt.lease || binding.sessionId !== sessionId
-        || !answer || answer.text !== current.answerText || ticket.lifecycle?.reconciliation?.state === 'checking' || ticket.lifecycle?.reconciliation?.state === 'unknown') throw new Later('Attention continuation binding or lifecycle changed')
+        || !answer || answer.text !== current.answerText || (ticket.lifecycle?.reconciliation?.state !== 'clear' && ticket.lifecycle?.reconciliation?.assignmentId === assignment.id)) throw new Later('Attention continuation binding or lifecycle changed')
       return { ticket, assignment, attempt, current, answer }
     }
     let reserved = false
@@ -392,7 +396,7 @@ export class DshExecutor implements Executor {
       const held = await this.host.sessions.holds(sessionId, requestId)
       validate()
       if (!held) {
-        this.slots.reserve(ticketId, 'wake'); reserved = true
+        this.slots.reserve(initial.assignmentId, 'wake'); reserved = true
         await this.host.sessions.prompt(sessionId, requestId,
           `A person answered the pending Attention question with: ${state.answer.text}. Continue the confirmed work using that answer and submit the next durable result.`,
           'queue', () => { validate() })
@@ -409,14 +413,13 @@ export class DshExecutor implements Executor {
     } catch {
       // Keep the durable answer pending. The next pass retries the same native request id.
       return false
-    } finally { if (reserved) this.slots.free(ticketId) }
+    } finally { if (reserved) this.slots.free(initial.assignmentId) }
   }
   /** Called by the existing pass loop; project workers use the same slots as legacy workers. */
   dispatchProjects(): void {
      if (this.host.closing()) return
      for (const ticket of this.host.store.tickets.list()) {
-       const continuation = ticket.lifecycle?.attentionContinuation
-       if (continuation && !continuation.deliveredAt) void this.continueAfterAttention(ticket.id, continuation.answerId, continuation.answerText)
+       for (const continuation of this.continuations(ticket).filter(item => !item.deliveredAt)) void this.continueAfterAttention(ticket.id, continuation.answerId, continuation.answerText)
      }
     if (this.host.closing()) return
     for (const ticket of this.host.store.tickets.list()) {
@@ -444,7 +447,7 @@ export class DshExecutor implements Executor {
       if (this.held(ticket) || this.stopping.has(ticket.id)) continue
       for (const assignment of ticket.assignments.filter(item => item.contract && item.state !== 'ended')) {
         const existing = attempts.all().findLast(item => item.assignmentId === assignment.id)
-        const continuation = ticket.lifecycle?.attentionContinuation
+        const continuation = this.continuations(ticket).find(item => item.assignmentId === assignment.id && !item.deliveredAt)
         if (continuation && !continuation.deliveredAt && existing && !existing.fenced && ['prepared', 'running', 'reconcile'].includes(existing.status)
           && continuation.assignmentId === assignment.id && continuation.attemptId === existing.id && continuation.lease === existing.lease && continuation.sessionId === existing.sessionId) continue
         // A delivered answer already covers the current wake. A later explicit
@@ -452,34 +455,33 @@ export class DshExecutor implements Executor {
         const resumeAgent = existing && ticket.lifecycle?.pause.intent === 'resume' && ticket.lifecycle.observed.reason === 'resume-requested'
           ? this.host.context.agents.get(existing.sessionId as SessionId) : undefined
         if (existing && resumeAgent?.status === 'idle' && ['worker-idle', 'worker-running'].includes(assignment.waitingReason ?? '') && !this.host.reportReady?.(ticket, assignment, existing)) {
-          try { this.slots.reserve(ticket.id, 'wake') } catch { continue }
+          try { this.slots.reserve(assignment.id, 'wake') } catch { continue }
           const requestId = `project-execute:${existing.id}:${existing.lease}:resume:${ticket.lifecycle!.pause.at}`
           const work = this.host.sessions.prompt(existing.sessionId, requestId, 'Continue the confirmed project execution from the saved workspace.', 'queue', () => { attempts.resolve(existing.sessionId) })
             .then(() => { this.projectObserved.add(existing.id); this.host.engine.observeTicket(ticket.id, 'running', 'worker-resumed') })
-            .finally(() => { this.slots.free(ticket.id) })
+            .finally(() => { this.slots.free(assignment.id) })
           this.track(ticket.id, work)
           continue
         }
-        if (existing && this.projectObserved.has(existing.id)) {
+        if (existing && this.projectObserved.has(existing.id) && assignment.waitingReason !== 'retrying') {
           try { attempts.resolve(existing.sessionId) } catch { this.host.context.agents.get(existing.sessionId as SessionId)?.cancel({ kind: 'user' }, { keepInbox: false }); continue }
           if (existing.status === 'running' && this.host.context.agents.get(existing.sessionId as SessionId)?.status === 'idle' && assignment.waitingReason === 'worker-running') {
             assignment.waitingReason = 'worker-idle'; this.host.store.tickets.save(ticket)
           }
           continue
         }
-        if (existing?.status === 'reconcile' || this.projectLaunching.has(ticket.id)) continue
+        if (existing?.status === 'reconcile' || this.projectLaunching.has(assignment.id)) continue
          if (['failed', 'blocked'].includes(assignment.waitingReason ?? '')) continue
         // A ready report with an independent semantic gate is durable evidence. Resume may continue the judgment,
         // but must not re-submit the completed worker prompt or redo file actions.
         if (existing && this.host.reportReady?.(ticket, assignment, existing) && ['semantic-review', 'needs_judgment', 'unresolved-items', 'changes_required'].includes(assignment.waitingReason ?? '')) continue
-        if (attempts.all().some(item => item.ticketId === ticket.id && item.assignmentId !== assignment.id && item.status === 'running' && this.host.context.agents.get(item.sessionId as SessionId)?.status === 'running')) { assignment.waitingReason = 'worker-slot'; this.host.store.tickets.save(ticket); continue }
         if (this.host.paused()) { assignment.waitingReason = 'processing-paused'; this.host.store.tickets.save(ticket); continue }
-        if (!assignment.contract!.inputs.every(input => input.kind !== 'dependency' || this.host.store.tickets.get(input.ticketId)?.assignments.some(item => item.id === input.assignmentId && item.state === 'ended' && item.report?.state === 'ready'))) {
+        if (!assignment.contract!.inputs.every(input => input.kind !== 'dependency' || this.host.store.tickets.get(input.ticketId)?.assignments.some(item => item.id === input.assignmentId && (assignment.contract?.proposal?.review?.target === item.contract?.assignmentKey ? item.report?.state === 'ready' : item.state === 'ended' && item.endedReason === 'accepted')))) {
           assignment.waitingReason = 'dependency'; this.host.store.tickets.save(ticket); continue
         }
-        try { this.slots.reserve(ticket.id, 'launch') } catch { assignment.waitingReason = 'worker-slot'; this.host.store.tickets.save(ticket); continue }
-        const operation = this.launchProject(ticket.id, assignment.id).finally(() => { this.projectLaunching.delete(ticket.id); this.slots.free(ticket.id) })
-        this.projectLaunching.set(ticket.id, operation)
+        try { this.slots.reserve(assignment.id, 'launch') } catch { assignment.waitingReason = 'worker-slot'; this.host.store.tickets.save(ticket); continue }
+        const operation = this.launchProject(ticket.id, assignment.id).finally(() => { this.projectLaunching.delete(assignment.id); this.slots.free(assignment.id) })
+        this.projectLaunching.set(assignment.id, operation)
       }
     }
   }
@@ -538,7 +540,7 @@ export class DshExecutor implements Executor {
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
   constructor(private readonly host: ExecutorHost) {
-    this.slots = new WorkerSlots(() => [...new Set([...host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => ticket.id), ...host.attempts?.all().filter(item => item.status === 'running' && (host.context.agents.get(item.sessionId as SessionId)?.status === 'running' || runningJobs(host.context, item.sessionId).length > 0)).map(item => item.ticketId) ?? []])],
+    this.slots = new WorkerSlots(() => [...new Set([...host.store.tickets.open().filter(ticket => !ticket.projectId && this.running(ticket)).map(ticket => ticket.id), ...host.attempts?.all().filter(item => item.status === 'running' && (host.context.agents.get(item.sessionId as SessionId)?.status === 'running' || runningJobs(host.context, item.sessionId).length > 0)).map(item => item.assignmentId) ?? []])],
       () => host.store.settings().executor.maxWorkers)
     // Each launch reserves a worker slot so launches run concurrently while slots are free.
     host.effects.handle('launch', payload => this.launchQueued(payload), { limit: () => host.paused() ? 0 : this.slots.launches(),
@@ -755,7 +757,7 @@ export class DshExecutor implements Executor {
     return await until(stop(), undefined, SHUTDOWN_STOP_MS) !== false
   }
   /** Number of open tickets whose worker holds a worker slot: its turn runs, or its shell jobs or subagents still run after its turn ended. */
-  activeCount(): number { return this.host.store.tickets.open().filter(ticket => this.running(ticket)).length + (this.host.attempts?.all().filter(item => item.status === 'running' && (this.host.context.agents.get(item.sessionId as SessionId)?.status === 'running' || runningJobs(this.host.context, item.sessionId).length > 0)).length ?? 0) }
+  activeCount(): number { return this.host.store.tickets.open().filter(ticket => !ticket.projectId && this.running(ticket)).length + (this.host.attempts?.all().filter(item => item.status === 'running' && (this.host.context.agents.get(item.sessionId as SessionId)?.status === 'running' || runningJobs(this.host.context, item.sessionId).length > 0)).length ?? 0) }
   /** Whether a ticket's worker holds a worker slot: its turn runs, or its shell jobs or subagents do after its turn ended. */
   private running(ticket: Ticket): boolean {
     if (!runningAssignment(ticket)) return false

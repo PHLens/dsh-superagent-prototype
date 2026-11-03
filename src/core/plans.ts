@@ -1,5 +1,6 @@
 /** Reviewed plan revisions and explicit authorizations, stored atomically in the project Ticket aggregate. */
 import { UserError } from './errors.ts'
+import { validateAssignmentGraph } from './dependencies.ts'
 import { key } from './ids.ts'
 import type { Assignment, PlanAssignmentInput, PlanAuthorization, PlanContent, PlanExecutionTarget, PlanIntent, PlanOperation, PlanRevision, Ticket, TrustedPlanConfirmation } from './model.ts'
 import type { ProjectRepositories } from './ports.ts'
@@ -34,8 +35,11 @@ export interface RegisterPlanAssignment {
   targetId: string
   planRevision: number
   inputs?: readonly PlanAssignmentInput[]
+  /** Key in the already confirmed decomposition; never a new scope supplied by the caller. */
+  assignmentKey?: string
 }
 export interface PlanConfirmationResult { authorization: PlanAuthorization; target: PlanExecutionTarget; ticket: Ticket }
+export interface RegisterPlanAssignments extends Omit<RegisterPlanAssignment, 'assignmentKey' | 'inputs'> { proposals: readonly import('./model.ts').AssignmentProposal[] }
 
 const copy = <T>(value: T): T => structuredClone(value)
 /** Deterministic keys make object property order irrelevant to operation identity. */
@@ -49,12 +53,17 @@ function content(plan: PlanContent): PlanContent {
   if (!plan || ![plan.goal, plan.scope, plan.environment, plan.cost, plan.completion].every(text)
     || !Array.isArray(plan.outputs) || !plan.outputs.length || !plan.outputs.every(text)
     || !Array.isArray(plan.resources) || !plan.resources.every(text)) throw new UserError('invalidPlan')
+  if (plan.assignments !== undefined) {
+    if (!Array.isArray(plan.assignments) || !plan.assignments.length) throw new UserError('invalidPlan')
+    try { validateAssignmentGraph(plan.assignments) } catch { throw new UserError('invalidPlan') }
+  }
   // Explicitly copy the contract fields; unknown model-supplied fields grant no authority.
   if (plan.acceptance && (!Number.isSafeInteger(plan.acceptance.version) || plan.acceptance.version < 1 || !['registered-files', 'human-review'].includes(plan.acceptance.mode))) throw new UserError('invalidPlan')
   if (plan.artifactInputs !== undefined && (!Array.isArray(plan.artifactInputs) || !plan.artifactInputs.every(item => item && text(item.artifactId) && text(item.contentVersion)))) throw new UserError('invalidPlanInput')
   return copy({ goal: plan.goal, scope: plan.scope, outputs: plan.outputs, resources: plan.resources, environment: plan.environment, cost: plan.cost, completion: plan.completion,
     ...(plan.acceptance ? { acceptance: { version: plan.acceptance.version, mode: plan.acceptance.mode } } : {}),
-    ...(plan.artifactInputs ? { artifactInputs: plan.artifactInputs.map(item => ({ artifactId: item.artifactId, contentVersion: item.contentVersion })) } : {}) })
+    ...(plan.artifactInputs ? { artifactInputs: plan.artifactInputs.map(item => ({ artifactId: item.artifactId, contentVersion: item.contentVersion })) } : {}),
+    ...(plan.assignments ? { assignments: structuredClone(plan.assignments) } : {}) })
 }
 
 /** Plan authorization and immutable Assignment contracts; runtime dispatch is owned by the executor. */
@@ -170,6 +179,29 @@ export class Plans {
       return copy(authorization)
     })
   }
+  /** Materializes a confirmed graph atomically in dependency order; repeated calls return the same identities. */
+  registerAssignments(input: Omit<RegisterPlanAssignment, 'assignmentKey' | 'inputs'>): Assignment[] {
+    return this.options.repo.atomic(() => {
+      const ticket = this.ticket(input.projectId, input.ticketId, true)
+      const plan = ticket.planRevisions?.find(item => item.revision === input.planRevision)
+      if (!plan?.assignments?.length) return [this.registerAssignment(input)]
+      validateAssignmentGraph(plan.assignments)
+      const registered = new Map<string, Assignment>()
+      const register = (name: string): Assignment => {
+        const previous = registered.get(name)
+        if (previous) return previous
+        const proposal = plan.assignments!.find(item => item.key === name)!
+        const dependencies = proposal.dependencies.map(dep => register(dep))
+        const assignment = this.registerAssignment({ ...input, assignmentKey: name, inputs: [
+          ...(plan.artifactInputs ?? []).map(ref => ({ kind: 'artifact' as const, ...ref })),
+          ...dependencies.map(dep => ({ kind: 'dependency' as const, ticketId: ticket.id, assignmentId: dep.id })),
+        ] })
+        registered.set(name, assignment)
+        return assignment
+      }
+      return plan.assignments.map(item => register(item.key))
+    })
+  }
   registerAssignment(input: RegisterPlanAssignment): Assignment {
     return this.options.repo.atomic(() => {
       const ticket = this.ticket(input.projectId, input.ticketId, true)
@@ -178,11 +210,13 @@ export class Plans {
       if (!authorization || !target || target.authorizationId !== authorization.id || authorization.targetId !== target.id) throw new UserError('unknownPlanAuthorization')
       if (authorization.revokedAt) throw new UserError('planAuthorizationRevoked')
       if (authorization.projectId !== input.projectId || authorization.ticketId !== input.ticketId) throw new UserError('projectOwnership')
-      const old = ticket.assignments.find(item => item.contract?.targetId === target.id)
+      const old = ticket.assignments.find(item => item.contract?.targetId === target.id && item.contract.assignmentKey === input.assignmentKey)
       const plan = ticket.planRevisions?.find(item => item.revision === input.planRevision)
       if (!plan || authorization.planRevision !== input.planRevision || target.planRevision !== input.planRevision
         || (!old && ticket.planRevisions?.at(-1)?.revision !== input.planRevision)) throw new UserError('stalePlanRevision')
       if (!old && ticket.ended) throw new UserError('ticketEnded')
+      const proposal = input.assignmentKey ? plan.assignments?.find(item => item.key === input.assignmentKey) : undefined
+      if (plan.assignments?.length && !proposal) throw new UserError('invalidPlanInput')
       const inputs = copy(input.inputs ?? plan.artifactInputs?.map(item => ({ kind: 'artifact' as const, ...item })) ?? [])
       for (const pinned of plan.artifactInputs ?? []) {
         if (!inputs.some(item => item.kind === 'artifact' && item.artifactId === pinned.artifactId && item.contentVersion === pinned.contentVersion)) throw new UserError('invalidPlanInput')
@@ -197,7 +231,8 @@ export class Plans {
           || !ticket.assignments.some(item => item.id === ref.assignmentId && item.contract
             && item.ticketId === ticket.id && item.projectId === ticket.projectId)) throw new UserError('invalidPlanInput')
       }
-      const contract = { authorizationId: authorization.id, targetId: target.id, planRevision: plan.revision, plan: content(plan), inputs }
+      const workerPlan = proposal ? { ...content(plan), assignments: undefined, goal: proposal.goal, outputs: proposal.outputs, resources: proposal.resources, cost: proposal.cost, completion: proposal.completion, acceptance: proposal.acceptance } : content(plan)
+      const contract = { authorizationId: authorization.id, targetId: target.id, planRevision: plan.revision, plan: workerPlan, inputs, ...(proposal ? { assignmentKey: proposal.key, proposal } : {}) }
       if (old) {
         if (canonical(old.contract) !== canonical(contract)) throw new UserError('planAssignmentConflict')
         return copy(old)

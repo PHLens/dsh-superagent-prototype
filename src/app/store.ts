@@ -13,6 +13,7 @@ import { storeReads } from './store-read.ts'
 import { projectRepository } from './project-store.ts'
 import { CONVERSATION_SCHEMA_SQL } from './conversation-store.ts'
 import { EXECUTION_SCHEMA_SQL } from './execution-attempts.ts'
+import { EVENT_SCHEMA_SQL } from './events.ts'
 
 /** A Trigger's position on its thread timeline, ordered by timestamp and then `id` as tie-breaker. */
 export interface TimelinePlace { at: string; id: string }
@@ -102,7 +103,7 @@ export class Store implements Repositories {
             CREATE INDEX IF NOT EXISTS effect_due ON effect(kind, due, seq);
           `)
           this.db.exec(CONVERSATION_SCHEMA_SQL)
-          this.db.exec(EXECUTION_SCHEMA_SQL)
+          this.db.exec(`${EXECUTION_SCHEMA_SQL}\n${EVENT_SCHEMA_SQL}`)
           this.addColumns()
           if (version === 10) migrateTo11(this)
           if (version !== undefined && version < 16) migrateTo16(this)
@@ -271,7 +272,7 @@ export class Store implements Repositories {
     /** Newest first. */
     open: (): Ticket[] => this.values('SELECT value FROM ticket WHERE open = 1 ORDER BY rowid DESC'),
     /** Newest first. */
-    active: (): Ticket[] => this.values('SELECT value FROM ticket WHERE active = 1 ORDER BY rowid DESC'),
+    active: (): Ticket[] => this.values(`SELECT value FROM ticket WHERE json_array_length(value, '$.undelivered') > 0 OR EXISTS (SELECT 1 FROM json_each(ticket.value, '$.assignments') AS a WHERE json_extract(a.value, '$.state') IN ('pending', 'running')) ORDER BY rowid DESC`),
   }
   readonly decisions = {
     get: (id: string): Decision | undefined => { const row = this.db.prepare('SELECT value FROM decision WHERE id=?').get(id); return row ? JSON.parse(String(row.value)) as Decision : undefined },

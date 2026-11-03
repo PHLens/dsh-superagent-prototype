@@ -343,6 +343,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/conversation-store.ts` | Durable owned business conversation, input idempotency, per-project leases, mapping generations and prompt checkpoints |
 | `src/app/project-coordinator.ts` | Independent project discussion lanes, restart reconciliation, retry and coordinator lifecycle |
 | `src/app/project-progress.ts` | Root-owned project task progress projection helpers |
+| `src/app/events.ts` | Durable transactional project event facts and coalesced consumption |
+| `src/app/scheduler.ts` | Project-aware model, worker and background scheduling status |
+| `src/core/dependencies.ts` | Assignment graph validation, readiness and dependency planning |
 | `src/app/project-plans.ts` | Authenticated project-plan adapter: persisted confirmation evidence, plan version anchoring, authorization and Assignment projection |
 | `src/app/execution-attempts.ts` | Server-owned Assignment execution identity, preparation evidence, filesystem boundaries and lease validation |
 | `src/app/artifact-store.ts` | Managed write intents, immutable SHA256 file versions, exact-version reads and interrupted-operation reconciliation |
@@ -476,6 +479,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/project-session.spec.ts` | Completed durable turn projection, interrupted draft exclusion and Session message references |
 | `tests/project-auth.spec.ts` | Host admission, stable owner identity, authentication rejection and unavailable-host denial |
 | `tests/project-panel.spec.tsx` | Project creation, navigation, durable discussion, immutable artifact content and explicit semantic review |
+| `tests/project-assignments-panel.spec.tsx` | One-confirmation decomposition preview, all-Assignment progress, current-version gates, branch questions and read-only controls |
+| `tests/task-decomposition.spec.ts` | Atomic multi-Assignment confirmation, dependency acceptance, registration replay and cycle rejection |
 | `tests/project-execution.spec.ts` | Authorized worker context, file acceptance, independent owner decisions, terminal receipt replay and stale execution rejection |
 | `tests/artifact-recovery.spec.ts` | Interrupted write intent/effect reconciliation, fixed input versions, corruption/isolation rejection and durable returns after reopen |
 | `tests/project-worker-runtime.spec.ts` | Registered native tools with Session guards, shared worker slots and completed confirmation replay/explicit rerun through the coordinator |

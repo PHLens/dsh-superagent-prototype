@@ -60,7 +60,7 @@ declare module '@deepseek-ai/cordis' {
 }
 /** Increment when the managed file-tool contract changes incompatibly; absent versions are the original T4 v1. */
 const PROJECT_WORKER_TOOL_VERSION = 1
-const PROJECT_WORKER_TOOLS = ['project_worker_context', 'project_read_input', 'project_write_artifact', 'project_worker_report', 'project_worker_request_question']
+const PROJECT_WORKER_TOOLS = ['project_worker_context', 'project_read_input', 'project_write_artifact', 'project_worker_report', 'project_worker_request_question', 'project_worker_decide']
 /**
  * The DSH tools an Executor Session works with: files, search, the shell and its jobs, the web, skills, its todo list and
  * subagents. It gets no other tool the profile has, whenever it was registered: none that asks or shows a person something,

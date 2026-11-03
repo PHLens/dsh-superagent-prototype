@@ -11,6 +11,11 @@
 .dt-conversation-text { white-space: pre-wrap; line-height: 1.6; margin-top: 8px; }
 .dt-conversation-draft { border-style: dashed; color: var(--dsw-alias-label-secondary); }
 .dt-conversation-compose textarea { box-sizing: border-box; width: 100%; min-height: 100px; resize: vertical; font: inherit; color: inherit; background: var(--dsw-alias-bg-layer-2); padding: 12px; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: 10px; }
+.dt-assignment-list { padding-inline-start: 24px; display: flex; flex-direction: column; gap: 12px; }
+.dt-assignment-progress { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.dt-assignment { min-width: 0; padding: 12px; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: 10px; overflow-wrap: anywhere; }
+.dt-assignment > p { margin: 6px 0; white-space: pre-wrap; }
+.dt-assignment h4 { margin: 0; }
 /* Deployment page rendered inside DSH Plugin Manager, which owns scrolling and padding. */
 .dt-embedded { container-type: inline-size; color: var(--dsw-alias-label-primary); }
 /* Disable sticky positioning inside DSH Plugin Manager, where the host container owns scrolling and bottom padding. */
