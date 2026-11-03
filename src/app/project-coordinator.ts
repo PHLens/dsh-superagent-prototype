@@ -46,8 +46,9 @@ export class ProjectCoordinator {
   constructor(private readonly ctx: Context, private readonly store: Store, private readonly projects: Projects,
     private readonly root: string, private readonly signal: AbortSignal, private readonly prompts: Prompts,
     // Shared finite bound for all bounded coordinator operations, including feedback/recovery.
-    // 180s allows ~90s initial planning plus a repair step; tool calls never reset this timer.
-    private readonly timeoutMs = 180_000) {
+    // An actual three-step plan saved at 155.6s but its final reply exceeded 180s.
+    // Keep a finite 300s window for repair and reply; tool calls never reset it.
+    private readonly timeoutMs = 300_000) {
     this.attempts = new ExecutionAttempts(store, root)
     this.artifacts = new ArtifactStore(store, this.attempts)
     this.reports = new ReportAcceptance(store, this.attempts, this.artifacts)
