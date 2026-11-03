@@ -486,6 +486,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/backup-service.spec.ts` | Scheduler replacement, concurrent run coalescing, retention configuration and stopped-service behavior |
 | `tests/t5-backup-attention-runtime-review.spec.ts` | Runtime backup material restore, safe-restore fencing and exactly-once Attention continuation review boundaries |
 | `tests/t5-capture-contract-review.spec.ts` | Frozen capture contract: required materials, optional master evidence, partial coverage, overlapping roots, detached native/checkpoint paths and active writer refusal |
+| `tests/t5-writer-epoch.spec.ts` | Transient registered writer rejection during native capture, unrelated job isolation and subscription release on success/failure |
 | `tests/t5-recovery-completeness.spec.ts` | Detached two-project native and file recovery, cross-file capture rejection and tmp aliases |
 | `tests/t5-question-completion-gate.spec.ts` | Unanswered worker Attention blocks server completion despite ready self-report |
 | `tests/t5-attention-continuation.spec.ts` | Bound Question operation receipts, authoritative answers, serialized continuation delivery and restart recovery |
