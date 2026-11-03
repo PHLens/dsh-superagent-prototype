@@ -5,7 +5,7 @@ export const USER_ERRORS = {
   projectOwnership: ['refused', 'Project ownership does not match'],
   projectNotRunnable: ['refused', 'Project ticket is awaiting confirmation'],
   invalidProject: ['refused', 'Invalid project'],
-  invalidPlan: ['refused', 'Plan must include goal, scope, outputs, resources, environment, cost and completion criteria'],
+  invalidPlan: ['refused', 'Invalid plan: {details}'],
   unknownPlanRevision: ['missing', 'Unknown plan revision'],
   stalePlanRevision: ['refused', 'Plan revision changed; review and confirm the current revision'],
   planConfirmationRequired: ['refused', 'Confirmation requires a trusted actor and an original user message with explicit intent for this exact revision'],
@@ -67,9 +67,14 @@ export type UserErrorCode = keyof typeof USER_ERRORS
  */
 export class UserError extends Error {
   readonly missing: boolean
-  constructor(readonly code: UserErrorCode, readonly values: Record<string, string> = {}) {
+  readonly values: Record<string, string>
+  constructor(readonly code: UserErrorCode, values: Record<string, string> = {}) {
     const [kind, text] = USER_ERRORS[code]
-    super(text.replace(/\{(\w+)\}/g, (match, name: string) => values[name] ?? match))
+    const resolved = code === 'invalidPlan' && values.details === undefined
+      ? { ...values, details: 'Include goal, scope, outputs, resources, environment, cost and completion criteria, with valid assignments and acceptance.' }
+      : values
+    super(text.replace(/\{(\w+)\}/g, (match, name: string) => resolved[name] ?? match))
+    this.values = resolved
     this.missing = kind === 'missing'
   }
 }

@@ -832,7 +832,7 @@ const TEXT = {
   'userError.unknownProject': ['找不到这个项目。', USER_ERRORS.unknownProject[1]],
   'userError.projectOwnership': ['项目归属不匹配。', USER_ERRORS.projectOwnership[1]],
   'userError.invalidProject': ['项目内容无效。', USER_ERRORS.invalidProject[1]],
-  'userError.invalidPlan': ['方案必须包含目标、范围、成果、资源、环境、成本和完成标准。', USER_ERRORS.invalidPlan[1]],
+  'userError.invalidPlan': ['方案结构无效：{details}', USER_ERRORS.invalidPlan[1]],
   'userError.unknownPlanRevision': ['找不到这个方案版本。', USER_ERRORS.unknownPlanRevision[1]],
   'userError.stalePlanRevision': ['方案版本已变化，请查看并确认当前版本。', USER_ERRORS.stalePlanRevision[1]],
   'userError.planConfirmationRequired': ['确认必须来自已验证的用户身份，并明确针对这个方案版本。', USER_ERRORS.planConfirmationRequired[1]],

@@ -39,13 +39,20 @@ export function initialGraphProposals(plan: PlanContent, revision: number): Assi
 /** Parent deliverables and resource grants remain binding even when the coordinator reorganizes steps. */
 export function validateDecomposition(plan: PlanContent, proposals: readonly AssignmentProposal[]): void {
   const rows = normalizeGraphProposals(proposals)
-  requireGraph(rows.every(item => item.resources.every(resource => plan.resources.includes(resource))), 'Assignment resources exceed the confirmed plan')
+  const diagnostics: string[] = []
+  for (const item of rows) for (const [index, resource] of item.resources.entries()) if (!plan.resources.includes(resource)) {
+    diagnostics.push(`assignment ${item.key}.resources[${index}]: undeclared resource ${JSON.stringify(resource.slice(0, 100))}; copy an exact top-level resources entry, not a paraphrase`)
+  }
   for (const output of plan.outputs) {
     const producers = rows.filter(item => item.outputs.includes(output))
-    requireGraph(producers.length > 0, 'Assignment graph omits a required plan output')
-    if (plan.acceptance?.mode === 'human-review') for (const producer of producers) requireGraph(producer.acceptance.version >= plan.acceptance.version && (producer.acceptance.mode === 'human-review'
-      || rows.some(item => item.review?.target === producer.key && item.review.conditionsVersion === producer.acceptance.version)), 'Assignment graph weakens the plan semantic acceptance')
+    if (!producers.length) diagnostics.push(`required output ${JSON.stringify(output.slice(0, 100))} has no assignment producer`)
+    if (plan.acceptance?.mode === 'human-review') for (const producer of producers) {
+      const covered = producer.acceptance.version >= plan.acceptance.version && (producer.acceptance.mode === 'human-review'
+        || rows.some(item => item.review?.target === producer.key && item.review.conditionsVersion === producer.acceptance.version))
+      if (!covered) diagnostics.push(`output ${JSON.stringify(output.slice(0, 100))} from assignment ${producer.key} needs acceptance.version >= ${plan.acceptance.version} and either semantic human-review acceptance or a dependent review targeting ${producer.key} at matching conditionsVersion (current producer version ${producer.acceptance.version})`)
+    }
   }
+  requireGraph(!diagnostics.length, diagnostics.slice(0, 12).join('; ') + (diagnostics.length > 12 ? `; ${diagnostics.length - 12} additional issues; fix these and validate again` : ''))
 }
 export function currentAssignmentGraph(ticket: Ticket, authorizationId?: string): AssignmentGraphRevision | undefined {
   const id = authorizationId ?? ticket.authorizations?.findLast(item => !item.revokedAt)?.id

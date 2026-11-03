@@ -283,3 +283,36 @@ it('accepts further durable input while a model turn is pending', async () => {
     expect(manager.view('alice', p.id).messages.filter((value) => value.status === 'saved')).toHaveLength(2),
   )
 })
+
+
+it('allows a 90s planning step plus repair inside 180s, but fences late work without blocking another project', async () => {
+  vi.useFakeTimers()
+  try {
+    const p = manager.create('alice', { name: 'Planning', goal: 'Plan independently' })
+    const other = manager.create('alice', { name: 'Other', goal: 'Continue independently' })
+    let lateAuthorize!: () => void
+    mock.reply.mockImplementation(async (value: { id: string }, _input: string, text: string, authorize: () => void) => {
+      if (text === 'hang') { lateAuthorize = authorize; return await new Promise<never>(() => {}) }
+      if (text === 'plan') {
+        await new Promise(resolve => setTimeout(resolve, 90_000)); authorize()
+        await new Promise(resolve => setTimeout(resolve, 60_000)); authorize()
+      }
+      return { text: 'completed', turn: 1, sessionId: value.id, dshMessageId: 'done-' + text }
+    })
+    manager.send('alice', p.id, { requestId: 'plan', text: 'plan' })
+    await vi.waitFor(() => expect(mock.reply).toHaveBeenCalledTimes(1))
+    await vi.advanceTimersByTimeAsync(150_001)
+    expect(manager.view('alice', p.id).messages).toEqual(expect.arrayContaining([expect.objectContaining({ status: 'answered' })]))
+    manager.send('alice', p.id, { requestId: 'hang', text: 'hang' })
+    manager.send('alice', other.id, { requestId: 'other', text: 'healthy' })
+    await vi.waitFor(() => expect(manager.view('alice', other.id).messages.some(m => m.status === 'answered')).toBe(true))
+    await vi.waitFor(() => expect(lateAuthorize).toBeTypeOf('function'))
+    await vi.advanceTimersByTimeAsync(179_000)
+    expect(manager.view('alice', p.id).messages.some(m => m.status === 'running')).toBe(true)
+    await vi.advanceTimersByTimeAsync(1001)
+    expect(manager.view('alice', p.id).messages.some(m => m.status === 'error')).toBe(true)
+    expect(() => lateAuthorize()).toThrow(/Stale/)
+    const prepared = await mock.prepare.mock.results.at(-2)?.value
+    expect(prepared.cancel).toHaveBeenCalled()
+  } finally { await vi.advanceTimersByTimeAsync(180_001); vi.useRealTimers() }
+})

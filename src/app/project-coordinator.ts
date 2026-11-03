@@ -44,7 +44,10 @@ export class ProjectCoordinator {
   private budgetWaitResolver?: (projectId: string) => 'global-budget' | 'project-fairness' | undefined
   setBudgetWaitResolver(resolve: (projectId: string) => 'global-budget' | 'project-fairness' | undefined): void { this.budgetWaitResolver = resolve }
   constructor(private readonly ctx: Context, private readonly store: Store, private readonly projects: Projects,
-    private readonly root: string, private readonly signal: AbortSignal, private readonly prompts: Prompts, private readonly timeoutMs = 120_000) {
+    private readonly root: string, private readonly signal: AbortSignal, private readonly prompts: Prompts,
+    // Shared finite bound for all bounded coordinator operations, including feedback/recovery.
+    // 180s allows ~90s initial planning plus a repair step; tool calls never reset this timer.
+    private readonly timeoutMs = 180_000) {
     this.attempts = new ExecutionAttempts(store, root)
     this.artifacts = new ArtifactStore(store, this.attempts)
     this.reports = new ReportAcceptance(store, this.attempts, this.artifacts)

@@ -65,7 +65,12 @@ function content(plan: PlanContent): PlanContent {
     || !Array.isArray(plan.resources) || !plan.resources.every(text)) throw new UserError('invalidPlan')
   if (plan.assignments !== undefined) {
     if (!Array.isArray(plan.assignments) || !plan.assignments.length) throw new UserError('invalidPlan')
-    try { validateDecomposition(plan, normalizeGraphProposals(plan.assignments)) } catch { throw new UserError('invalidPlan') }
+    try { validateDecomposition(plan, normalizeGraphProposals(plan.assignments)) } catch (error) {
+      const details = error instanceof Error ? error.message.slice(0, 4000) + (error.message.length > 4000 ? '; additional issues omitted; repair and validate again' : '') : 'Assignment graph violates the confirmed resource or acceptance contract'
+      const repair = details.includes('invalid review gate')
+        ? ' Review must target a different registered assignment key, include that target in dependencies, and match its acceptance.version in conditionsVersion.' : ''
+      throw new UserError('invalidPlan', { details: details + repair })
+    }
   }
   // Explicitly copy the contract fields; unknown model-supplied fields grant no authority.
   if (plan.acceptance && (!Number.isSafeInteger(plan.acceptance.version) || plan.acceptance.version < 1 || !['registered-files', 'human-review'].includes(plan.acceptance.mode))) throw new UserError('invalidPlan')
