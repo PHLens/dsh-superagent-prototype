@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { lstatSync, mkdirSync, realpathSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, isAbsolute } from 'node:path'
 import type { Assignment, Ticket } from '../core/index.ts'
+import { activeAssignmentByKey, isActivePlanAssignment } from '../core/assignment-graphs.ts'
 import type { Store } from './store.ts'
 
 export const EXECUTION_SCHEMA_SQL = `
@@ -13,7 +14,7 @@ CREATE TABLE IF NOT EXISTS acceptance_decision (id TEXT PRIMARY KEY, ticket_id T
 `
 export interface Attempt {
   id: string; projectId: string; ticketId: string; assignmentId: string; lease: string; sessionId: string
-  workspaceId?: string; cwd: string; root: string; status: 'preparing' | 'prepared' | 'running' | 'ended' | 'reconcile'
+  workspaceId?: string; cwd: string; root: string; status: 'preparing' | 'prepared' | 'running' | 'settling' | 'ended' | 'reconcile'
   prepare?: { realpath: string; at: string; method: 'managed-empty-directory-v1' }
   fenced?: true
   context?: { toolContractVersion?: number; promptRevision: number; roleRules: string; projectConventions: string; model: unknown; tools: string[]; resources: readonly string[]; skills: { name: string; version: string }[] }
@@ -54,8 +55,8 @@ export class ExecutionAttempts {
     const newest = this.all().findLast(item => item.assignmentId === attempt?.assignmentId)
     const lifecycleBlocked = ticket?.lifecycle && (ticket.lifecycle.pause.intent === 'pause' || ticket.lifecycle.stop.intent === 'stop')
     if (!attempt || !ticket || !assignment?.contract || (!receipt && (ticket.ended || lifecycleBlocked)) || ticket.projectId !== attempt.projectId || assignment.projectId !== attempt.projectId
-      || assignment.ticketId !== ticket.id || (!receipt && assignment.state === 'ended') || !auth || auth.revokedAt || attempt.fenced || newest?.lease !== attempt.lease
-      || !(receipt ? ['prepared', 'running', 'ended'] : ['prepared', 'running']).includes(attempt.status)) throw new Error('Stale or unauthorized worker execution')
+      || assignment.ticketId !== ticket.id || (!receipt && (assignment.state === 'ended' || !isActivePlanAssignment(ticket, assignment.id))) || !auth || auth.revokedAt || attempt.fenced || newest?.lease !== attempt.lease
+      || !(receipt ? ['prepared', 'running', 'settling', 'ended'] : ['prepared', 'running']).includes(attempt.status)) throw new Error('Stale or unauthorized worker execution')
     this.validateDirectory(attempt)
     return { attempt, ticket, assignment }
   }
@@ -65,14 +66,14 @@ export class ExecutionAttempts {
   }
   allocate(ticket: Ticket, assignment: Assignment, options: { fresh?: boolean } = {}): Attempt {
     const auth = ticket.authorizations?.find(item => item.id === assignment.contract?.authorizationId)
-    if (!ticket.projectId || !assignment.contract || !auth || auth.revokedAt || ticket.ended || assignment.state === 'ended') throw new Error('Assignment is not authorized')
+    if (!ticket.projectId || !assignment.contract || !auth || auth.revokedAt || ticket.ended || assignment.state === 'ended' || !isActivePlanAssignment(ticket, assignment.id)) throw new Error('Assignment is not authorized')
     const previous = this.all().findLast(item => item.assignmentId === assignment.id)
     if (previous && !options.fresh) return previous
     const inputs: NonNullable<Attempt['inputs']>[number][] = []
     let reviewTarget: Attempt['reviewTarget']
     const review = assignment.contract.proposal?.review
     if (review) {
-      const target = ticket.assignments.find(item => item.contract?.assignmentKey === review.target && item.contract.authorizationId === assignment.contract!.authorizationId)
+      const target = activeAssignmentByKey(ticket, assignment.contract.authorizationId, review.target)
       const attempt = target && this.all().findLast(item => item.assignmentId === target.id)
       const row = attempt && this.store.db.prepare('SELECT value FROM worker_report WHERE attempt_id=? ORDER BY rowid DESC LIMIT 1').get(attempt.id)
       const report = row && JSON.parse(String(row.value)) as { id: string; state: string; artifacts: { id: string; contentVersion: string }[] } | undefined

@@ -250,6 +250,19 @@ export class Tickets extends EnginePart {
    */
   retry(ticketId: string): Ticket {
     const ticket = this.require(ticketId)
+    if (ticket.projectId && !ticket.ended && ticket.lifecycle?.pause.intent !== 'pause' && ticket.lifecycle?.stop.intent !== 'stop') {
+      const retryable = ticket.assignments.filter(item => item.contract && (item.waitingReason === 'failed' || item.waitingReason === 'blocked'))
+      if (retryable.length) {
+        for (const branch of retryable) {
+          branch.state = 'pending'; branch.waitingReason = 'retrying'
+          delete branch.report; delete branch.reportReceipt; delete branch.startedAt; delete branch.endedAt; delete branch.endedReason
+          this.requeueUntaken(ticket, branch)
+        }
+        ticket.updatedAt = this.now(); this.repo.tickets.save(ticket)
+        for (const branch of retryable) { this.options.executor.stop(ticket, branch, 'retried'); this.options.executor.start(ticket, branch) }
+        return ticket
+      }
+    }
     const latest = latestAssignment(ticket)
     if (!canRetry(ticket) || !latest) throw new UserError('notRetryable')
     if (ticket.projectId && latest.contract) {

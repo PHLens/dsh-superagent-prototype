@@ -1,11 +1,14 @@
 /** Application adapter for project plans: authenticated conversation identity and durable plan operations. */
-import { Plans, UserError, type Assignment, type PlanAssignmentInput, type PlanAuthorization, type PlanConfirmationResult, type PlanIntent, type PlanRevision, type Project, type RegisterPlanAssignment, type SavePlan, type Ticket } from '../core/index.ts'
-import type { ConfirmPlan, RevokePlan } from '../core/plans.ts'
+import { activePlanAssignments, currentAssignmentGraph, Plans, UserError, type Assignment, type AssignmentGraphRevision, type CoordinatorGraphAuthority, type PlanAssignmentInput, type PlanAuthorization, type PlanConfirmationResult, type PlanIntent, type PlanRevision, type Project, type RegisterPlanAssignment, type SavePlan, type Ticket } from '../core/index.ts'
+import type { AssignmentGraphView, ConfirmPlan, ReviseAssignments, RevokePlan } from '../core/plans.ts'
 import type { Store } from './store.ts'
 import { ConversationStore, type ConversationMessage } from './conversation-store.ts'
+import { ProjectEvents } from './events.ts'
+import { assignmentFacts, readFact } from './project-facts.ts'
 
 export type ProjectPlanConfirmation = PlanConfirmationResult & { assignment: Assignment; message: ConversationMessage }
 export type ProjectPlanInput = Omit<SavePlan, 'projectId' | 'ticketId'> & { ticketId?: string }
+export interface CoordinatorGraphLease extends CoordinatorGraphAuthority { authorize(): void }
 
 /** Binds the core Plans service to the authenticated project conversation. */
 export class ProjectPlans {
@@ -32,11 +35,19 @@ export class ProjectPlans {
       && (message.status === 'queued' || message.status === 'running' || message.status === 'answered' || message.status === 'saved'))
     return original ? { message: messages[confirmationIndex]!, original } : undefined
   }
-  private service(actorId: string, projectId: string): Plans {
+  private service(actorId: string, projectId: string, lease?: CoordinatorGraphLease): Plans {
     this.owner(actorId, projectId)
     return new Plans({
       repo: this.store,
       validateArtifact: (projectId, id, version) => this.store.registeredArtifact(projectId, id, version),
+      canReviseAssignment: assignmentId => !this.store.db.prepare("SELECT 1 FROM execution_attempt WHERE json_extract(value, '$.assignmentId')=? LIMIT 1").get(assignmentId),
+      resolveGraphAuthority: () => {
+        if (!lease) return undefined
+        lease.authorize()
+        const mapping = this.conversations.currentMapping(projectId)
+        if (!mapping || mapping.sessionId !== lease.sessionId || mapping.generation !== lease.generation) throw new Error('Stale coordinator graph generation')
+        return { sessionId: lease.sessionId, generation: lease.generation, inputId: lease.inputId, stateVersion: lease.stateVersion }
+      },
       resolveConfirmation: request => {
         if (request.projectId !== projectId) return undefined
         const evidence = this.confirmation(actorId, projectId, request)
@@ -58,7 +69,9 @@ export class ProjectPlans {
       goal: ticket.planRevisions?.at(-1)?.goal.slice(0, 300),
       authorizationCount: ticket.authorizations?.length ?? 0,
       assignmentCount: ticket.assignments?.length ?? 0,
-      assignments: ticket.assignments?.filter(item => item.contract).map(item => ({ id: item.id, assignmentKey: item.contract?.assignmentKey, title: item.contract?.plan.goal.slice(0, 160), state: item.state, waitingReason: item.waitingReason })),
+      currentGraph: currentAssignmentGraph(ticket) ? { id: currentAssignmentGraph(ticket)!.id, version: currentAssignmentGraph(ticket)!.version } : undefined,
+      activeAssignmentCount: activePlanAssignments(ticket).filter(item => item.state !== 'ended').length,
+      assignments: activePlanAssignments(ticket).filter(item => item.state !== 'ended').slice(0, 8).map(item => ({ id: item.id, assignmentKey: item.contract?.assignmentKey, title: item.contract?.plan.goal.slice(0, 160), state: item.state, waitingReason: item.waitingReason })),
     }))
     return { items: page, offset, limit, total: tickets.length, hasMore: offset + page.length < tickets.length }
   }
@@ -111,9 +124,31 @@ export class ProjectPlans {
   registerAssignment(actorId: string, projectId: string, input: Omit<RegisterPlanAssignment, 'projectId'>): Assignment {
     return this.service(actorId, projectId).registerAssignment({ ...input, projectId })
   }
+  readAssignmentGraph(actorId: string, projectId: string, input: { ticketId: string; graphId?: string }): AssignmentGraphView {
+    return this.service(actorId, projectId).readAssignmentGraph({ ...input, projectId })
+  }
+  reviseAssignments(actorId: string, projectId: string, input: Omit<ReviseAssignments, 'projectId'>, lease: CoordinatorGraphLease): AssignmentGraphRevision {
+    this.owner(actorId, projectId)
+    if (!lease || typeof lease.authorize !== 'function') throw new Error('Current coordinator graph lease is required')
+    return this.store.atomic(() => {
+      const graph = this.service(actorId, projectId, lease).reviseAssignments({ ...input, projectId })
+      new ProjectEvents(this.store).append({ id: `graph:${graph.id}`, projectId, ticketId: graph.ticketId, kind: 'assignment-ready', version: graph.id, operationId: graph.operationId, at: graph.createdAt })
+      return graph
+    })
+  }
   tickets(actorId: string, projectId: string): Ticket[] {
     this.owner(actorId, projectId)
     return this.store.tickets.list().filter(ticket => ticket.projectId === projectId)
+  }
+  readAssignmentFacts(actorId: string, projectId: string, input: { ticketId: string; assignmentId?: string; offset?: number; limit?: number }) {
+    this.owner(actorId, projectId); const ticket = this.store.tickets.get(input.ticketId)
+    if (!ticket || ticket.projectId !== projectId) throw new UserError('unknownProject')
+    return assignmentFacts(this.store, ticket, input)
+  }
+  readFact(actorId: string, projectId: string, input: { ticketId: string; kind: 'report' | 'decision' | 'assignment' | 'artifact'; id: string; contentVersion?: string; offset?: number; limit?: number }) {
+    this.owner(actorId, projectId); const ticket = this.store.tickets.get(input.ticketId)
+    if (!ticket || ticket.projectId !== projectId) throw new UserError('unknownProject')
+    return readFact(this.store, ticket, input)
   }
   static taskCandidate(tickets: readonly Ticket[]): Ticket[] {
     return tickets.filter(ticket => {

@@ -1,6 +1,7 @@
 /** Read-only presentation of stored execution facts; never grants authority or advances work. */
 import { createHash } from 'node:crypto'
 import type { Assignment, Ticket } from '../core/model.ts'
+import { activePlanAssignments } from '../core/assignment-graphs.ts'
 import type { Artifact } from './artifact-store.ts'
 import type { Attempt } from './execution-attempts.ts'
 import type { AcceptedReport, GateDecision } from './report-acceptance.ts'
@@ -65,7 +66,7 @@ function assignmentProgress(ticket: Ticket, assignment: Assignment, facts: Facts
     ...(attempt?.fenced ? { acceptanceHold: 'execution-fenced' } : attempt?.status === 'reconcile' ? { acceptanceHold: 'reconciliation-required' } : authorizationHold(ticket, assignment) ? { acceptanceHold: 'authorization-revoked' } : {}),
     dependencies: contract.inputs.flatMap(input => input.kind === 'dependency' ? [input.assignmentId] : []),
     ...(question ? { question: { id: question.id, version: question.version, question: question.question } } : {}),
-    ...(assignment.waitingReason === 'worker-slot' ? { budgetWait: 'worker-slot' as const } : {}),
+    ...(assignment.budgetWait ? { budgetWait: assignment.budgetWait } : assignment.waitingReason === 'worker-slot' ? { budgetWait: 'worker-slot' as const } : {}),
     ...(contract.proposal?.review ? { gate: { targetAssignmentId: assignment.id, conditionsVersion: contract.proposal?.review.conditionsVersion } } : {}),
     authorizationId: contract.authorizationId, planRevision: contract.planRevision,
     attemptId: attempt?.id, attemptState: attempt?.status, phase: 'queued', nativeState,
@@ -108,7 +109,7 @@ function assignmentProgress(ticket: Ticket, assignment: Assignment, facts: Facts
 }
 
 export function projectProgress(ticket: Ticket, facts: Facts): ProjectProgress {
-  const assignments = ticket.assignments.filter(item => item.contract).map(item => assignmentProgress(ticket, item, facts))
+  const assignments = activePlanAssignments(ticket).map(item => assignmentProgress(ticket, item, facts))
   const active = assignments.filter(item => !['completed', 'ended'].includes(item.phase))
   const priority: ProjectWorkPhase[] = ['running', 'unknown', 'failed', 'blocked', 'needs_judgment', 'changes_required',
     'missing-artifacts', 'unresolved-items', 'semantic-review', 'authorization-revoked', 'retrying', 'preparing', 'queued', 'worker-idle']

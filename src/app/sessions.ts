@@ -284,7 +284,7 @@ export class Sessions {
       if (!isDeepStrictEqual(pinned.resources, assignment.contract!.plan.resources)) reconcile('resource range differs from the Assignment contract')
       binding.disposers.push(agent.ctx.tools.restrict({ allow: inherited.filter(name => pinned.tools.includes(name)) }), agent.ctx.tools.guard(execution => {
         // Receipt-capable services distinguish exact historical replay from strictly authorized new writes.
-        try { this.host.attempts!.resolve(agent.id, execution.name === 'project_worker_report' || execution.name === 'project_write_artifact' || execution.name === 'project_worker_request_question') } catch (error) { return String(error) }
+        try { this.host.attempts!.resolve(agent.id, execution.name === 'project_worker_report' || execution.name === 'project_write_artifact' || execution.name === 'project_worker_request_question' || execution.name === 'project_worker_decide') } catch (error) { return String(error) }
         if (!pinned.tools.includes(execution.name)) return 'Tool has no registered project worker contract'
         return undefined
       }), agent.ctx.systemPrompt.section({ name: 'project-worker', order: 9999, interpolate: false, complete: true,

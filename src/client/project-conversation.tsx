@@ -87,6 +87,9 @@ export function ProjectConversation({ id }: { id: string }) {
   // The keyed route also remounts this component; check ownership before displaying server data.
   if (data.project.id !== id) return <LoadState loading />
   const tasks = data.tasks ?? []
+  const coordinatorBudgetWait = data.coordinator && 'budgetWait' in data.coordinator
+    && (data.coordinator.budgetWait === 'global-budget' || data.coordinator.budgetWait === 'project-fairness')
+    ? data.coordinator.budgetWait : undefined
   return <div className="dt-conversation">
     <div><Button size="sm" icon={<Icon name="chevron-left" />} onClick={() => navigate({ page: 'projects' })}>{t('tab.projects')}</Button></div>
     <header><h2>{data.project.name}</h2><p className="dt-hint">{t('projectGoalPrefix')}{data.project.goal}</p></header>
@@ -95,6 +98,9 @@ export function ProjectConversation({ id }: { id: string }) {
     {data.coordinator?.status === 'error' && <div className="dt-banner dt-danger" role="alert">
       <p>{t('conversationCoordinatorError')}</p>{data.coordinator.error && <p>{data.coordinator.error}</p>}
       <Button variant="outline" disabled={retry.busy || readOnly} onClick={() => { void retry.run() }}>{t('conversationRetry')}</Button>
+    </div>}
+    {coordinatorBudgetWait && <div className="dt-banner" role="status">
+      <strong>{t('conversationBudgetWaiting')}</strong><p>{t(budgetLabels[coordinatorBudgetWait])}</p>
     </div>}
     <section aria-label={t('projectConversation')} className="dt-conversation-history">
       {!data.messages.length && <Hint>{t('conversationEmpty')}</Hint>}

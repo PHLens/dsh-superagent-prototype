@@ -1,5 +1,6 @@
 /** Domain model of a proactive agent: the concepts and their invariants, independent of any source, policy, or executor. */
 import type { Reason } from './reasons.ts'
+import { assertAssignmentGraphs } from './assignment-graphs.ts'
 
 /** Actor identity in the source's own vocabulary; Policy decides which actors may originate work on that Source. */
 export interface ActorRef { source: string; id: string }
@@ -272,6 +273,8 @@ export interface PlanAuthorization {
   readonly intentId: string
   readonly targetId: string
   readonly createdAt: string
+  /** Only new confirmations opt in; replaying an older authorization never extends its contract. */
+  readonly graphPolicy?: 'bounded-revisions'
   revokedAt?: string
 }
 export interface PlanExecutionTarget {
@@ -286,6 +289,7 @@ export type PlanAssignmentInput =
   | { kind: 'dependency'; ticketId: string; assignmentId: string }
   | { kind: 'artifact'; artifactId: string; contentVersion: string }
 export interface PlanAssignmentContract {
+  readonly graphVersion?: number
   readonly assignmentKey?: string
   readonly proposal?: AssignmentProposal
   readonly authorizationId: string
@@ -294,13 +298,40 @@ export interface PlanAssignmentContract {
   readonly plan: PlanContent
   readonly inputs: readonly PlanAssignmentInput[]
 }
+export interface CoordinatorGraphAuthority {
+  readonly sessionId: string
+  readonly generation: number
+  readonly inputId: string
+  readonly stateVersion: number
+}
+export interface AssignmentGraphNode {
+  readonly assignmentId: string
+  readonly budgetSlot: string
+  readonly proposal: AssignmentProposal
+}
+export interface AssignmentGraphRevision {
+  readonly id: string
+  readonly version: number
+  readonly projectId: string
+  readonly ticketId: string
+  readonly authorizationId: string
+  readonly targetId: string
+  readonly planRevision: number
+  readonly previousId?: string
+  readonly operationId: string
+  readonly createdAt: string
+  readonly nodes: readonly AssignmentGraphNode[]
+  readonly createdBy: { readonly kind: 'confirmation'; readonly messageId: string }
+    | ({ readonly kind: 'coordinator' } & CoordinatorGraphAuthority)
+}
 export interface PlanOperation {
   readonly id: string
   readonly payload: string
-  readonly kind: 'save' | 'confirm' | 'revoke'
+  readonly kind: 'save' | 'confirm' | 'revoke' | 'revise-assignments'
   readonly planRevision?: number
   readonly authorizationId?: string
   readonly targetId?: string
+  readonly graphId?: string
 }
 
 export type AssignmentState = 'pending' | 'running' | 'ended'
@@ -318,12 +349,15 @@ export interface Assignment {
   state: AssignmentState
   /** Present for T3 assignments only; these wait for the T4 project executor. */
   contract?: PlanAssignmentContract
-  waitingReason?: 'executor-unavailable' | 'worker-slot' | 'preparation-reconciliation' | 'worker-running' | 'worker-idle' | 'semantic-review' | 'missing-artifacts' | 'unresolved-items' | 'changes_required' | 'needs_judgment' | 'failed' | 'blocked' | 'dependency' | 'processing-paused' | 'retrying'
+  budgetWait?: 'global-budget' | 'project-fairness'
+  waitingReason?: 'executor-unavailable' | 'worker-slot' | 'preparation-reconciliation' | 'worker-running' | 'worker-idle' | 'semantic-review' | 'missing-artifacts' | 'unresolved-items' | 'changes_required' | 'needs_judgment' | 'failed' | 'blocked' | 'dependency' | 'processing-paused' | 'retrying' | 'global-budget' | 'project-fairness'
   createdAt: string
   startedAt?: string
   endedAt?: string
   endedReason?: string
   report?: { state: ReportState; summary: string; at: string }
+  /** Current durable submission, distinct from the accepted report projection. Replaced on every submission. */
+  reportReceipt?: { id: string; state: 'progress' | 'ready' | 'blocked' | 'failed'; attemptId: string; lease: string; artifacts: readonly { id: string; contentVersion: string }[] }
   /** When Inputs last reached the worker; one at or after `report.at` means the worker has been busy with Inputs since that report. */
   deliveredAt?: string
   /**
@@ -407,6 +441,7 @@ export interface Ticket {
   /** T3 confirmation records authorization; all project stages wait for the T4 executor. */
   projectStage?: ProjectTicketStage
   /** Optional so legacy tickets retain their stored shape. All T3 state shares this aggregate and transaction. */
+  assignmentGraphs?: AssignmentGraphRevision[]
   planRevisions?: PlanRevision[]
   authorizations?: PlanAuthorization[]
   executionTargets?: PlanExecutionTarget[]
@@ -528,12 +563,15 @@ export function validateTicketOwnership(ticket: Ticket, previous?: Ticket, proje
       const authorization = ticket.authorizations?.find(item => item.id === contract.authorizationId)
       const target = ticket.executionTargets?.find(item => item.id === contract.targetId)
       const plan = ticket.planRevisions?.find(item => item.revision === contract.planRevision)
-      if (!ticket.projectId || assignedTargets.has(`${contract.targetId}:${contract.assignmentKey ?? ''}`) || !authorization || !target || !plan
+      if (!ticket.projectId || assignedTargets.has(`${contract.targetId}:${contract.graphVersion ?? 0}:${contract.assignmentKey ?? ''}`) || !authorization || !target || !plan
         || authorization.targetId !== target.id || target.authorizationId !== authorization.id
         || authorization.planRevision !== plan.revision || target.planRevision !== plan.revision) throw new Error('Assignment plan authorization does not match')
-      assignedTargets.add(`${contract.targetId}:${contract.assignmentKey ?? ''}`)
+      assignedTargets.add(`${contract.targetId}:${contract.graphVersion ?? 0}:${contract.assignmentKey ?? ''}`)
       const { projectId: _projectId, ticketId: _ticketId, revision: _revision, createdAt: _createdAt, ...expected } = plan
-      const proposal = contract.assignmentKey ? plan.assignments?.find(item => item.key === contract.assignmentKey) : undefined
+      const graph = contract.graphVersion === undefined ? undefined : ticket.assignmentGraphs?.find(item => item.authorizationId === contract.authorizationId && item.version === contract.graphVersion)
+      const graphNode = graph?.nodes.find(item => item.assignmentId === assignment.id)
+      if (contract.graphVersion !== undefined && !graphNode) throw new Error('Assignment graph contract has no immutable origin')
+      const proposal = graphNode?.proposal ?? (contract.assignmentKey ? plan.assignments?.find(item => item.key === contract.assignmentKey) : undefined)
       if (contract.assignmentKey && (!proposal || !unchanged(contract.proposal, proposal))) throw new Error('Assignment proposal does not match confirmed scope')
       const expectedPlan = proposal ? { ...expected, assignments: undefined, goal: proposal.goal, outputs: proposal.outputs, resources: proposal.resources, cost: proposal.cost, completion: proposal.completion, acceptance: proposal.acceptance } : expected
       if (!unchanged(contract.plan, expectedPlan)) throw new Error('Assignment contract does not match plan revision')
@@ -549,6 +587,7 @@ export function validateTicketOwnership(ticket: Ticket, previous?: Ticket, proje
       }
     }
   }
+  assertAssignmentGraphs(ticket, previous)
 }
 
 /** Project tickets remain drafts until T3 confirmation and are never runnable in T1. */

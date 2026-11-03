@@ -1,8 +1,9 @@
 /** Reviewed plan revisions and explicit authorizations, stored atomically in the project Ticket aggregate. */
 import { UserError } from './errors.ts'
 import { validateAssignmentGraph } from './dependencies.ts'
+import { activePlanAssignments, assignGraphBudgetSlots, currentAssignmentGraph, graphCanonical, graphIdentity, graphNodeInputs, initialGraphProposals, normalizeGraphProposals, validateDecomposition, validateRevisedGraphScope } from './assignment-graphs.ts'
 import { key } from './ids.ts'
-import type { Assignment, PlanAssignmentInput, PlanAuthorization, PlanContent, PlanExecutionTarget, PlanIntent, PlanOperation, PlanRevision, Ticket, TrustedPlanConfirmation } from './model.ts'
+import type { Assignment, AssignmentGraphRevision, AssignmentProposal, CoordinatorGraphAuthority, PlanAssignmentInput, PlanAuthorization, PlanContent, PlanExecutionTarget, PlanIntent, PlanOperation, PlanRevision, Ticket, TrustedPlanConfirmation } from './model.ts'
 import type { ProjectRepositories } from './ports.ts'
 
 export interface ConfirmPlan {
@@ -17,6 +18,9 @@ export interface PlanServiceOptions {
   /** Host resolves identity and original user intent from its trusted request/session context. */
   resolveConfirmation: (request: Readonly<ConfirmPlan>) => TrustedPlanConfirmation | undefined
   validateArtifact?: (projectId: string, artifactId: string, contentVersion: string) => boolean
+  canReviseAssignment?: (assignmentId: string) => boolean
+  /** Resolves the current trusted coordinator operation; model arguments never provide this authority. */
+  resolveGraphAuthority?: (request: Readonly<ReviseAssignments>) => CoordinatorGraphAuthority | undefined
   now?: () => string
   id?: () => string
 }
@@ -39,7 +43,13 @@ export interface RegisterPlanAssignment {
   assignmentKey?: string
 }
 export interface PlanConfirmationResult { authorization: PlanAuthorization; target: PlanExecutionTarget; ticket: Ticket }
-export interface RegisterPlanAssignments extends Omit<RegisterPlanAssignment, 'assignmentKey' | 'inputs'> { proposals: readonly import('./model.ts').AssignmentProposal[] }
+export interface ReviseAssignments {
+  projectId: string; ticketId: string; graphId: string; expectedVersion: number; operationId: string; assignments: readonly AssignmentProposal[]
+}
+export interface AssignmentGraphView {
+  ticketId: string; graph?: AssignmentGraphRevision; editable: boolean; reason?: string
+  members: { assignmentId: string; state: Assignment['state']; canRevise: boolean }[]
+}
 
 const copy = <T>(value: T): T => structuredClone(value)
 /** Deterministic keys make object property order irrelevant to operation identity. */
@@ -55,7 +65,7 @@ function content(plan: PlanContent): PlanContent {
     || !Array.isArray(plan.resources) || !plan.resources.every(text)) throw new UserError('invalidPlan')
   if (plan.assignments !== undefined) {
     if (!Array.isArray(plan.assignments) || !plan.assignments.length) throw new UserError('invalidPlan')
-    try { validateAssignmentGraph(plan.assignments) } catch { throw new UserError('invalidPlan') }
+    try { validateDecomposition(plan, normalizeGraphProposals(plan.assignments)) } catch { throw new UserError('invalidPlan') }
   }
   // Explicitly copy the contract fields; unknown model-supplied fields grant no authority.
   if (plan.acceptance && (!Number.isSafeInteger(plan.acceptance.version) || plan.acceptance.version < 1 || !['registered-files', 'human-review'].includes(plan.acceptance.mode))) throw new UserError('invalidPlan')
@@ -63,7 +73,7 @@ function content(plan: PlanContent): PlanContent {
   return copy({ goal: plan.goal, scope: plan.scope, outputs: plan.outputs, resources: plan.resources, environment: plan.environment, cost: plan.cost, completion: plan.completion,
     ...(plan.acceptance ? { acceptance: { version: plan.acceptance.version, mode: plan.acceptance.mode } } : {}),
     ...(plan.artifactInputs ? { artifactInputs: plan.artifactInputs.map(item => ({ artifactId: item.artifactId, contentVersion: item.contentVersion })) } : {}),
-    ...(plan.assignments ? { assignments: structuredClone(plan.assignments) } : {}) })
+    ...(plan.assignments ? { assignments: normalizeGraphProposals(plan.assignments) } : {}) })
 }
 
 /** Plan authorization and immutable Assignment contracts; runtime dispatch is owned by the executor. */
@@ -140,13 +150,14 @@ export class Plans {
       if (!authorization) {
         if (ticket.ended) {
           const latestAuthorization = ticket.authorizations?.findLast(item => item.planRevision === plan.revision)
+          const necessary = activePlanAssignments(ticket)
           if (input.intent !== 'rerun' || ticket.ended.outcome !== 'completed' || ticket.ended.by !== 'executor'
-            || latestAuthorization?.revokedAt || !ticket.assignments.some(item => item.contract)
-            || !ticket.assignments.filter(item => item.contract).every(item => item.state === 'ended' && item.report?.state === 'ready')) throw new UserError('ticketEnded')
+            || latestAuthorization?.revokedAt || !necessary.length
+            || !necessary.every(item => item.state === 'ended' && item.report?.state === 'ready')) throw new UserError('ticketEnded')
           delete ticket.ended
         }
         const at = this.now(), id = this.makeId(), targetId = this.makeId()
-        authorization = { id, projectId: ticket.projectId!, ticketId: ticket.id, planRevision: plan.revision, actor: copy(trusted.actor), message: copy(trusted.message), ...(trusted.originalMessage !== undefined ? { originalMessage: copy(trusted.originalMessage) } : {}), intent: input.intent, intentId, targetId, createdAt: at }
+        authorization = { id, projectId: ticket.projectId!, ticketId: ticket.id, planRevision: plan.revision, actor: copy(trusted.actor), message: copy(trusted.message), ...(trusted.originalMessage !== undefined ? { originalMessage: copy(trusted.originalMessage) } : {}), intent: input.intent, intentId, targetId, createdAt: at, graphPolicy: 'bounded-revisions' }
         ;(ticket.authorizations ??= []).push(authorization)
         ;(ticket.executionTargets ??= []).push({ id: targetId, authorizationId: id, planRevision: plan.revision, createdAt: at, waitingReason: 'executor-unavailable' })
         ticket.updatedAt = at
@@ -179,12 +190,111 @@ export class Plans {
       return copy(authorization)
     })
   }
-  /** Materializes a confirmed graph atomically in dependency order; repeated calls return the same identities. */
+  readAssignmentGraph(input: { projectId: string; ticketId: string; graphId?: string }): AssignmentGraphView {
+    const ticket = this.ticket(input.projectId, input.ticketId, true)
+    const graph = input.graphId ? ticket.assignmentGraphs?.find(item => item.id === input.graphId) : currentAssignmentGraph(ticket)
+    if (input.graphId && !graph) throw new UserError('unknownPlanRevision')
+    const authorization = ticket.authorizations?.find(item => item.id === graph?.authorizationId)
+    const current = graph && currentAssignmentGraph(ticket, graph.authorizationId)
+    const editable = !!graph && current?.id === graph.id && !authorization?.revokedAt && !ticket.ended && ticket.lifecycle?.stop.intent !== 'stop'
+    return copy({ ticketId: ticket.id, ...(graph ? { graph } : {}), editable,
+      ...(!graph ? { reason: ticket.authorizations?.length ? 'legacy-authorization' : 'confirmation-required' } : !editable ? { reason: 'historical-or-inactive' } : {}),
+      members: (graph?.nodes ?? []).map(node => {
+        const assignment = ticket.assignments.find(item => item.id === node.assignmentId)!
+        return { assignmentId: node.assignmentId, state: assignment.state, canRevise: editable && this.revisable(assignment) }
+      }) })
+  }
+  private revisable(assignment: Assignment): boolean {
+    return assignment.state === 'pending' && !assignment.startedAt && !assignment.reportReceipt
+      && (!assignment.report || assignment.report.state === 'waiting') && this.options.canReviseAssignment?.(assignment.id) === true
+  }
+  /** Replace only unexecuted contracts, preserving a bounded authorized graph and immutable receipt history. */
+  reviseAssignments(input: ReviseAssignments): AssignmentGraphRevision {
+    return this.options.repo.atomic(() => {
+      const ticket = this.ticket(input.projectId, input.ticketId, true), assignments = normalizeGraphProposals(input.assignments)
+      const request: ReviseAssignments = { projectId: input.projectId, ticketId: input.ticketId, graphId: input.graphId, expectedVersion: input.expectedVersion, operationId: input.operationId, assignments }
+      const authority = this.options.resolveGraphAuthority?.(Object.freeze(copy(request)))
+      if (!authority?.sessionId.trim() || !authority.inputId.trim() || !Number.isSafeInteger(authority.generation) || authority.generation < 1
+        || !Number.isSafeInteger(authority.stateVersion) || authority.stateVersion < 0) throw new Error('Current coordinator graph lease is required')
+      if (!input.operationId?.trim()) throw new UserError('planOperationConflict')
+      const payload = graphCanonical({ kind: 'revise-assignments', projectId: input.projectId, ticketId: input.ticketId, graphId: input.graphId, expectedVersion: input.expectedVersion, assignments })
+      const old = this.operation(ticket, input.operationId, payload)
+      if (old) {
+        const recorded = ticket.assignmentGraphs?.find(item => item.id === old.graphId)
+        if (!recorded) throw new UserError('planOperationConflict')
+        return copy(recorded)
+      }
+      if (ticket.assignmentGraphs?.some(item => item.operationId === input.operationId)) throw new UserError('planOperationConflict')
+      const base = ticket.assignmentGraphs?.find(item => item.id === input.graphId), current = base && currentAssignmentGraph(ticket, base.authorizationId)
+      if (!base || current?.id !== base.id || input.expectedVersion !== base.version) throw new UserError('stalePlanRevision')
+      const authorization = ticket.authorizations?.find(item => item.id === base.authorizationId)
+      if (!authorization || authorization.revokedAt || authorization.graphPolicy !== 'bounded-revisions') throw new UserError('planAuthorizationRevoked')
+      if (ticket.ended || ticket.lifecycle?.stop.intent === 'stop') throw new UserError('ticketEnded')
+      const plan = ticket.planRevisions!.find(item => item.revision === authorization.planRevision)!, initial = ticket.assignmentGraphs!.find(item => item.authorizationId === authorization.id && item.version === 1)!
+      validateRevisedGraphScope(plan, initial, assignments)
+      const locked = new Set(base.nodes.filter(node => !this.revisable(ticket.assignments.find(item => item.id === node.assignmentId)!)).map(node => node.assignmentId))
+      const slots = assignGraphBudgetSlots(initial, base, assignments, locked), at = this.now(), version = base.version + 1
+      const reusable = new Set<string>()
+      const graph: AssignmentGraphRevision = { id: graphIdentity(ticket.id, authorization.id, version), version, projectId: input.projectId, ticketId: ticket.id,
+        authorizationId: authorization.id, targetId: authorization.targetId, planRevision: authorization.planRevision, previousId: base.id, operationId: input.operationId, createdAt: at,
+        createdBy: { kind: 'coordinator', sessionId: authority.sessionId, generation: authority.generation, inputId: authority.inputId, stateVersion: authority.stateVersion },
+        nodes: assignments.map(proposal => {
+          const existing = base.nodes.find(node => node.proposal.key === proposal.key), budgetSlot = slots.get(proposal.key)!
+          if (existing && existing.budgetSlot === budgetSlot && graphCanonical(existing.proposal) === graphCanonical(proposal)) {
+            reusable.add(proposal.key); return { assignmentId: existing.assignmentId, budgetSlot, proposal: copy(proposal) }
+          }
+          return { assignmentId: this.makeId(), budgetSlot, proposal: copy(proposal) }
+        }) }
+      // Replacing an upstream ID also replaces pending descendants whose contracts reference that ID.
+      let changed: boolean
+      do {
+        changed = false
+        for (const node of graph.nodes) if (reusable.has(node.proposal.key)) {
+          const existing = ticket.assignments.find(item => item.id === node.assignmentId)!
+          if (graphCanonical(existing.contract!.inputs) === graphCanonical(graphNodeInputs(ticket, graph, node, initial, plan))) continue
+          if (locked.has(existing.id)) throw new Error('A consumed input version cannot be replaced')
+          ;(node as { assignmentId: string }).assignmentId = this.makeId(); reusable.delete(node.proposal.key); changed = true
+        }
+      } while (changed)
+      const currentIds = new Set(graph.nodes.map(node => node.assignmentId))
+      for (const oldNode of base.nodes) if (!currentIds.has(oldNode.assignmentId)) {
+        const assignment = ticket.assignments.find(item => item.id === oldNode.assignmentId)!
+        if (!this.revisable(assignment)) throw new Error('An execution cannot be superseded')
+        assignment.state = 'ended'; assignment.endedAt = at; assignment.endedReason = 'superseded'; delete assignment.waitingReason; delete assignment.budgetWait
+        assignment.report = { state: 'dropped', summary: `Superseded by assignment graph ${version}`, at }
+      }
+      for (const node of graph.nodes) if (!ticket.assignments.some(item => item.id === node.assignmentId)) {
+        const proposal = node.proposal, workerPlan = { ...content(plan), assignments: undefined, goal: proposal.goal, outputs: proposal.outputs, resources: proposal.resources,
+          cost: proposal.cost, completion: proposal.completion, acceptance: proposal.acceptance }
+        ticket.assignments.push({ id: node.assignmentId, projectId: ticket.projectId, ticketId: ticket.id, state: 'pending', createdAt: at, waitingReason: 'executor-unavailable',
+          report: { state: 'waiting', summary: 'executor-unavailable', at }, contract: { graphVersion: version, assignmentKey: proposal.key, proposal: copy(proposal),
+            authorizationId: authorization.id, targetId: authorization.targetId, planRevision: plan.revision, plan: workerPlan, inputs: graphNodeInputs(ticket, graph, node, initial, plan) } })
+      }
+      const again = this.options.resolveGraphAuthority?.(Object.freeze(copy(request)))
+      if (graphCanonical(again) !== graphCanonical(authority)) throw new Error('Coordinator graph lease changed')
+      ;(ticket.assignmentGraphs ??= []).push(graph); ticket.updatedAt = at
+      this.record(ticket, { id: input.operationId, kind: 'revise-assignments', payload, authorizationId: authorization.id, targetId: authorization.targetId, planRevision: plan.revision, graphId: graph.id })
+      this.options.repo.tickets.save(ticket)
+      return copy(graph)
+    })
+  }
+  private initialGraph(input: Omit<RegisterPlanAssignment, 'assignmentKey' | 'inputs'>, assignments: Assignment[]): Assignment[] {
+    const ticket = this.ticket(input.projectId, input.ticketId, true), authorization = ticket.authorizations!.find(item => item.id === input.authorizationId)!
+    if (authorization.graphPolicy !== 'bounded-revisions' || currentAssignmentGraph(ticket, authorization.id)) return assignments
+    const plan = ticket.planRevisions!.find(item => item.revision === authorization.planRevision)!, proposals = initialGraphProposals(plan, plan.revision)
+    const graph: AssignmentGraphRevision = { id: graphIdentity(ticket.id, authorization.id, 1), version: 1, projectId: ticket.projectId!, ticketId: ticket.id,
+      authorizationId: authorization.id, targetId: authorization.targetId, planRevision: plan.revision, operationId: `initial:${authorization.id}`, createdAt: authorization.createdAt,
+      createdBy: { kind: 'confirmation', messageId: authorization.message.id }, nodes: proposals.map(proposal => ({
+        assignmentId: assignments.find(item => item.contract?.assignmentKey === (plan.assignments?.length ? proposal.key : undefined))!.id, budgetSlot: proposal.key, proposal })) }
+    ;(ticket.assignmentGraphs ??= []).push(graph); this.options.repo.tickets.save(ticket)
+    return assignments
+  }
+  /** Materializes a confirmed graph atomically; repeated confirmation never reactivates historical work. */
   registerAssignments(input: Omit<RegisterPlanAssignment, 'assignmentKey' | 'inputs'>): Assignment[] {
     return this.options.repo.atomic(() => {
       const ticket = this.ticket(input.projectId, input.ticketId, true)
       const plan = ticket.planRevisions?.find(item => item.revision === input.planRevision)
-      if (!plan?.assignments?.length) return [this.registerAssignment(input)]
+      if (!plan?.assignments?.length) return this.initialGraph(input, [this.registerAssignment(input)])
       validateAssignmentGraph(plan.assignments)
       const registered = new Map<string, Assignment>()
       const register = (name: string): Assignment => {
@@ -199,7 +309,7 @@ export class Plans {
         registered.set(name, assignment)
         return assignment
       }
-      return plan.assignments.map(item => register(item.key))
+      return this.initialGraph(input, plan.assignments.map(item => register(item.key)))
     })
   }
   registerAssignment(input: RegisterPlanAssignment): Assignment {

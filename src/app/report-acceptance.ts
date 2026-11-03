@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import type { Assignment, Ticket } from '../core/index.ts'
+import { activePlanAssignments } from '../core/assignment-graphs.ts'
 import type { Store } from './store.ts'
 import { ExecutionAttempts, type Attempt } from './execution-attempts.ts'
 import { ArtifactStore, digest } from './artifact-store.ts'
@@ -40,7 +41,17 @@ export class ReportAcceptance {
       }
       const report: AcceptedReport = { ...input, id: randomUUID(), attemptId: attempt.id, lease: attempt.lease, sessionId, projectId: attempt.projectId, ticketId: ticket.id, assignmentId: assignment.id, at: new Date().toISOString() }
       this.store.db.prepare('INSERT INTO worker_report VALUES (?,?,?,?)').run(report.id, attempt.id, input.operationId, JSON.stringify(report))
+      assignment.reportReceipt = { id: report.id, state: report.state, attemptId: report.attemptId, lease: report.lease, artifacts: report.artifacts }
       assignment.report = { state: input.state === 'ready' ? 'waiting' : input.state, summary: input.completed, at: report.at }
+      if (report.state === 'ready') {
+        for (const reviewer of activePlanAssignments(ticket).filter(item => item.contract?.proposal?.review?.target === assignment.contract?.assignmentKey && item.contract?.proposal?.review && item.contract.authorizationId === assignment.contract!.authorizationId)) {
+          const old = this.attempts.all().findLast(item => item.assignmentId === reviewer.id)
+          if (!old?.reviewTarget || old.reviewTarget.reportId === report.id) continue
+          reviewer.state = 'pending'; reviewer.waitingReason = 'retrying'
+          delete reviewer.report; delete reviewer.reportReceipt; delete reviewer.endedAt; delete reviewer.endedReason
+          old.status = 'settling'; this.attempts.save(old)
+        }
+      }
       this.aggregate(ticket, assignment, attempt, report)
       return report
     })
@@ -71,6 +82,12 @@ export class ReportAcceptance {
   decideWorker(sessionId: string, input: { operationId: string; reportId: string; conclusion: GateDecision['conclusion']; evidence: string }): GateDecision {
     if (!input.operationId.trim() || !input.evidence.trim()) throw new Error('Judge operation and evidence required')
     return this.store.atomic(() => {
+      const receipt = this.attempts.resolve(sessionId, true)
+      const replay = this.decisions(receipt.ticket.id).find(item => item.operationId === `judge:${receipt.attempt.id}:${input.operationId}`)
+      if (replay) {
+        if (replay.reportId !== input.reportId || replay.evidence !== input.evidence || replay.conclusion !== input.conclusion || replay.judge.attemptId !== receipt.attempt.id || replay.judge.lease !== receipt.attempt.lease) throw new Error('Judge operation conflict')
+        return replay
+      }
       const judge = this.attempts.resolve(sessionId)
       const registration = judge.assignment.contract!.proposal?.review, snapshot = judge.attempt.reviewTarget
       if (!registration || !snapshot || input.reportId !== snapshot.reportId || snapshot.assignmentId === judge.assignment.id) throw new Error('Judge has no registered target snapshot')
@@ -104,7 +121,7 @@ export class ReportAcceptance {
       else if (report.unresolved.length) reason = 'unresolved-items'
       else if ((ticket.attentionQuestions?.some(question => question.binding?.assignmentId === assignment.id && !question.resolvedAt)
         || (ticket.attention?.binding?.assignmentId === assignment.id && !ticket.attention.resolvedAt))) reason = 'unresolved-question'
-      else if (assignment.contract!.plan.acceptance?.mode !== 'registered-files') {
+      else if (assignment.contract!.plan.acceptance?.mode !== 'registered-files' || activePlanAssignments(ticket).some(item => item.contract?.proposal?.review && item.contract.authorizationId === assignment.contract!.authorizationId && item.contract.proposal.review.target === assignment.contract!.assignmentKey)) {
         const decision = this.decisions(ticket.id).findLast(item => item.assignmentId === assignment.id && item.reportId === report.id && item.targetVersion === this.target(report)
           && item.conditionsVersion === (assignment.contract!.plan.acceptance?.version ?? assignment.contract!.planRevision) && item.judge.generation === attempt.lease)
         if (decision?.conclusion !== 'passed') reason = decision?.conclusion ?? 'semantic-review'
@@ -112,7 +129,7 @@ export class ReportAcceptance {
       if (!reason) {
         assignment.state = 'ended'; assignment.endedAt = completionAt; assignment.endedReason = 'accepted'; assignment.report = { state: 'ready', summary: report.completed, at: report.at }
         attempt.status = 'ended'; this.attempts.save(attempt)
-        if (ticket.assignments.filter(item => item.contract).every(item => item.state === 'ended' && item.endedReason === 'accepted')) ticket.ended = { at: completionAt, by: 'executor', outcome: 'completed' }
+        if (activePlanAssignments(ticket).every(item => item.state === 'ended' && item.endedReason === 'accepted')) ticket.ended = { at: completionAt, by: 'executor', outcome: 'completed' }
       }
     }
     assignment.waitingReason = reason as Assignment['waitingReason']
@@ -121,7 +138,7 @@ export class ReportAcceptance {
     if ((reason === 'changes_required' || reason === 'failed') && retry?.on.includes(reason) && retries < retry.limit) {
       assignment.state = 'pending'; assignment.startedAt = undefined
       assignment.waitingReason = 'retrying'
-      attempt.status = 'ended'; attempt.error = `Registered retry: ${reason}`; this.attempts.save(attempt)
+      attempt.status = 'settling'; attempt.error = `Registered retry pending native/job settlement: ${reason}`; this.attempts.save(attempt)
     }
     ticket.updatedAt = new Date().toISOString(); this.store.tickets.save(ticket)
     new ProjectEvents(this.store).append({ id: `report:${report.id}:${reason ?? 'accepted'}`, projectId: attempt.projectId, ticketId: ticket.id, assignmentId: assignment.id, kind: reason ? 'acceptance-changed' : 'report-recorded', version: report.id, operationId: report.operationId, at: report.at })

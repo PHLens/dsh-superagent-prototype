@@ -7,7 +7,7 @@ import { key, threadKey, validateTicketOwnership, type ChannelRef, type Decision
   type ThreadFacts, type Ticket, type Trigger, type TriggerDisposition } from '../core/index.ts'
 import { KV, type Family, type Key } from '../kv.ts'
 import { SettingsSchema, type Settings, type SettingsOrigin, type SettingsSave } from '../policy.ts'
-import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, migrateTo16, tooOld } from './migration.ts'
+import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, migrateTo16, migrateTo17, tooOld } from './migration.ts'
 import { Versions } from './versions.ts'
 import { storeReads } from './store-read.ts'
 import { projectRepository } from './project-store.ts'
@@ -107,6 +107,7 @@ export class Store implements Repositories {
           this.addColumns()
           if (version === 10) migrateTo11(this)
           if (version !== undefined && version < 16) migrateTo16(this)
+          if (version !== undefined && version < 17) migrateTo17(this)
           if (version !== SCHEMA_VERSION) this.set(KV.store.schema, SCHEMA_VERSION)
         })
       } catch (error) {

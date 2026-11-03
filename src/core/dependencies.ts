@@ -34,7 +34,7 @@ export function assignmentReady(ticket: Pick<Ticket, 'assignments'>, assignment:
   for (const input of inputs) if (input.kind === 'dependency') {
     const dependency = ticket.assignments.find(item => item.id === input.assignmentId)
     const reviewing = dependency && assignment.contract?.proposal?.review?.target === dependency.contract?.assignmentKey
-    if (reviewing ? dependency.report?.state !== 'ready' : !dependency || dependency.state !== 'ended' || dependency.endedReason !== 'accepted') blockedBy.push(input.assignmentId)
+    if (reviewing ? dependency.reportReceipt?.state !== 'ready' : !dependency || dependency.state !== 'ended' || dependency.endedReason !== 'accepted') blockedBy.push(input.assignmentId)
   }
   return blockedBy.length ? { ready: false, blockedBy, reason: 'dependency' } : { ready: true, blockedBy: [] }
 }

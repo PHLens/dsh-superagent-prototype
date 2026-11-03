@@ -11,3 +11,5 @@ export { Plans, type PlanServiceOptions, type SavePlan, type ConfirmPlan, type R
 export { canRetry, ticketStage, type TicketStage } from './stage.ts'
 export { key } from './ids.ts'
 export { validateAssignmentGraph, assignmentReady, planAssignments, type DependencyResult } from './dependencies.ts'
+
+export * from './assignment-graphs.ts'

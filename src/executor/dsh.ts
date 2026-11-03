@@ -4,7 +4,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { mkdir, rmdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { executableTicket, key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
+import { activePlanAssignments, isActivePlanAssignment, executableTicket, key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
   from '../core/index.ts'
 import type { Machine } from '../deployment.ts'
@@ -12,6 +12,7 @@ import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
 import type { Settings } from '../policy.ts'
 import type { Store } from '../app/store.ts'
 import type { ExecutionAttempts, Attempt } from '../app/execution-attempts.ts'
+import type { ProjectScheduler, BudgetLease } from '../app/scheduler.ts'
 import { Later, type Effects } from '../app/effects.ts'
 import { executionRoot, type Variable } from '../app/execution-environment.ts'
 import type { Sessions } from '../app/sessions.ts'
@@ -58,6 +59,7 @@ export function transient(error: unknown): boolean {
 const ticketWorktreeName = (name: string, id: string): string => `${WorktreeNameSchema.parse(name)}-${id.slice(0, 12)}`
 /** Host dependencies used by `DshExecutor`. */
 export interface ExecutorHost {
+  readonly scheduler?: ProjectScheduler
   readonly attempts?: ExecutionAttempts
   readonly masterId?: string
   checkpointFiles?(ticket: Ticket): readonly string[]
@@ -234,10 +236,14 @@ export class DshExecutor implements Executor {
     const startedAt = now(), lifecycle = initial.lifecycle
     const intentAt = { pause: lifecycle?.pause.at ?? startedAt, stop: lifecycle?.stop.at ?? startedAt }
     const intent = { pause: lifecycle?.pause.intent ?? 'none' as const, stop: lifecycle?.stop.intent ?? 'none' as const }
-    const assignment = initial.assignments.filter(item => item.contract && item.state !== 'ended').at(-1)
     const allAttempts = this.host.attempts?.all().filter(item => item.ticketId === ticketId) ?? []
+    const assignments = initial.assignments.filter(item => item.contract && item.state !== 'ended')
+     const assignment = assignments.find(item => {
+       const attempt = allAttempts.findLast(candidate => candidate.assignmentId === item.id)
+       return !!attempt
+     }) ?? assignments[0]
     const attempt = assignment ? allAttempts.findLast(item => item.assignmentId === assignment.id) : undefined
-    const scopedAttempts = allAttempts.filter(item => item.status !== 'ended')
+    const scopedAttempts = allAttempts
     const ownerIds = [...new Set([...scopedAttempts.map(item => item.sessionId), ...(!initial.projectId ? [workerSessionId(ticketId)] : [])])].sort()
     const attemptLeases = scopedAttempts.map(item => `${item.id}:${item.lease}`).sort()
     const checking = { state: 'checking' as const, operationId, startedAt, ownerIds, attemptLeases, pauseIntent: intent.pause, stopIntent: intent.stop,
@@ -270,15 +276,17 @@ export class DshExecutor implements Executor {
           if (ownerAttempt && (agent.id !== ownerAttempt.sessionId || agent.session.header.cwd !== ownerAttempt.cwd)) { state = 'unknown'; reason = 'session-cwd-mismatch'; break }
         }
       }
-      if (state === 'clear' && attempt) {
-        try { this.host.attempts?.validateDirectory(attempt) } catch { state = 'unknown'; reason = 'prepare-evidence-mismatch' }
-        if (state === 'clear' && assignment && this.host.reportReady?.(initial, assignment, attempt) && !this.host.evidenceReady?.(initial, assignment, attempt)) {
+      for (const branch of scopedAttempts) {
+        if (state !== 'clear') break
+        const owner = initial.assignments.find(item => item.id === branch.assignmentId)
+        try { this.host.attempts?.validateDirectory(branch) } catch { state = 'unknown'; reason = 'prepare-evidence-mismatch' }
+        if (state === 'clear' && owner && this.host.reportReady?.(initial, owner, branch) && !this.host.evidenceReady?.(initial, owner, branch)) {
           state = 'unknown'; reason = 'artifact-evidence-mismatch'
         }
       }
       if (state === 'clear' && this.host.outboundUnknown?.(initial)) { state = 'unknown'; reason = 'outbound-receipt-unknown' }
       const current = this.host.store.tickets.get(ticketId)
-      const currentAttempts = this.host.attempts?.all().filter(item => item.ticketId === ticketId && item.status !== 'ended') ?? []
+      const currentAttempts = this.host.attempts?.all().filter(item => item.ticketId === ticketId) ?? []
       const currentScope = [...new Set([...currentAttempts.map(item => item.sessionId), ...(!initial.projectId ? [workerSessionId(ticketId)] : [])])].sort()
       const currentLeases = currentAttempts.map(item => `${item.id}:${item.lease}`).sort()
       const unchanged = !!current && current.lifecycle?.reconciliation?.operationId === operationId
@@ -288,7 +296,9 @@ export class DshExecutor implements Executor {
       if (!unchanged) { persistUnknown('reconciliation-facts-changed'); return { state: 'unknown', operationId } }
       const observedAt = now()
       current!.lifecycle!.reconciliation = { ...checking, state, observedAt, ...(reason ? { reason } : {}) }
-      if (state === 'clear' && attempt?.status === 'reconcile' && attempt.prepare) { attempt.status = 'prepared'; this.host.attempts!.save(attempt) }
+      if (state === 'clear') for (const branch of scopedAttempts) {
+        if (branch.status === 'reconcile' && branch.prepare) { branch.status = 'prepared'; this.host.attempts!.save(branch) }
+      }
       const history = current!.lifecycle!.reconciliationHistory ?? []
       current!.lifecycle!.reconciliationHistory = [...history.filter(item => item.operationId !== operationId), { ...checking, state, observedAt, ...(reason ? { reason } : {}) }]
       this.host.store.tickets.save(current!)
@@ -375,7 +385,7 @@ export class DshExecutor implements Executor {
       if (this.host.closing() || this.host.paused() || this.stopping.has(ticketId) || ticket.id !== ticketId || [...ticket.attentionQuestions ?? [], ...ticket.attention ? [ticket.attention] : []].some(item => item.binding?.assignmentId === assignment.id)
         || current?.answerId !== answerId || current.questionId !== initial.questionId || current.version !== initial.version
         || current.assignmentId !== initial.assignmentId || current.attemptId !== initial.attemptId || current.lease !== initial.lease || current.sessionId !== sessionId
-        || assignment.id !== initial.assignmentId || !ticket.assignments.some(item => item.id === assignment.id && item.contract && item.state !== 'ended')
+        || assignment.id !== initial.assignmentId || !isActivePlanAssignment(ticket, assignment.id)
         || attempt.id !== initial.attemptId || attempt.lease !== initial.lease || !['prepared', 'running'].includes(attempt.status)
         || binding?.assignmentId !== assignment.id || binding.attemptId !== attempt.id || binding.lease !== attempt.lease || binding.sessionId !== sessionId
         || !answer || answer.text !== current.answerText || (ticket.lifecycle?.reconciliation?.state !== 'clear' && ticket.lifecycle?.reconciliation?.assignmentId === assignment.id)) throw new Later('Attention continuation binding or lifecycle changed')
@@ -396,10 +406,10 @@ export class DshExecutor implements Executor {
       const held = await this.host.sessions.holds(sessionId, requestId)
       validate()
       if (!held) {
-        this.slots.reserve(initial.assignmentId, 'wake'); reserved = true
-        await this.host.sessions.prompt(sessionId, requestId,
+        if (!this.host.scheduler) { this.slots.reserve(initial.assignmentId, 'wake'); reserved = true }
+        await this.admitWake(state.attempt, requestId, () => { validate() }, () => this.host.sessions.prompt(sessionId, requestId,
           `A person answered the pending Attention question with: ${state.answer.text}. Continue the confirmed work using that answer and submit the next durable result.`,
-          'queue', () => { validate() })
+          'queue', () => { validate() }))
       }
       // A held native message also completes a crash-interrupted application receipt.
       const latest = validate()
@@ -443,10 +453,29 @@ export class DshExecutor implements Executor {
     }
     const attempts = this.host.attempts
     if (!attempts) return
+    this.syncWorkerBudgets()
+    this.host.scheduler?.cancelQueued(row => {
+      if (row.kind !== 'worker') return false
+      const ticket = this.host.store.tickets.list().find(item => item.assignments.some(branch => row.id.startsWith(`worker:${branch.id}:`)))
+      return !ticket || !!ticket.ended || this.held(ticket) || this.host.paused() || this.host.closing()
+    })
+    for (const attempt of attempts.all().filter(item => item.status === 'settling')) {
+      const agent = this.host.context.agents.get(attempt.sessionId as SessionId)
+      if (!agent) { attempt.status = 'reconcile'; attempt.error = 'Retry owner is unloaded; physical exit requires reconciliation'; attempts.save(attempt); continue }
+      if (agent.id !== attempt.sessionId || agent.session.header.cwd !== attempt.cwd) { attempt.status = 'reconcile'; attempt.error = 'Retry owner/cwd mismatch'; attempts.save(attempt); continue }
+      if (agent.status !== 'idle' || runningJobs(this.host.context, attempt.sessionId).length) {
+        if (!attempt.fenced) this.stopProject(attempt.ticketId, attempt.assignmentId)
+        continue
+      }
+      attempt.status = 'ended'; attempt.fenced = true; attempts.save(attempt)
+      this.projectObserved.delete(attempt.id)
+    }
     for (const ticket of this.host.store.tickets.list().filter(item => item.projectId && !item.ended)) {
       if (this.held(ticket) || this.stopping.has(ticket.id)) continue
-      for (const assignment of ticket.assignments.filter(item => item.contract && item.state !== 'ended')) {
-        const existing = attempts.all().findLast(item => item.assignmentId === assignment.id)
+      for (const assignment of activePlanAssignments(ticket).filter(item => item.state !== 'ended')) {
+        const orphanedLiveOwner = attempts.all().some(item => item.ticketId !== ticket.id && !this.host.context.agents.get(item.sessionId as SessionId) && runningJobs(this.host.context, item.sessionId).length > 0)
+         if (orphanedLiveOwner) { assignment.waitingReason = 'worker-slot'; this.host.store.tickets.save(ticket); continue }
+         const existing = attempts.all().findLast(item => item.assignmentId === assignment.id)
         const continuation = this.continuations(ticket).find(item => item.assignmentId === assignment.id && !item.deliveredAt)
         if (continuation && !continuation.deliveredAt && existing && !existing.fenced && ['prepared', 'running', 'reconcile'].includes(existing.status)
           && continuation.assignmentId === assignment.id && continuation.attemptId === existing.id && continuation.lease === existing.lease && continuation.sessionId === existing.sessionId) continue
@@ -455,9 +484,9 @@ export class DshExecutor implements Executor {
         const resumeAgent = existing && ticket.lifecycle?.pause.intent === 'resume' && ticket.lifecycle.observed.reason === 'resume-requested'
           ? this.host.context.agents.get(existing.sessionId as SessionId) : undefined
         if (existing && resumeAgent?.status === 'idle' && ['worker-idle', 'worker-running'].includes(assignment.waitingReason ?? '') && !this.host.reportReady?.(ticket, assignment, existing)) {
-          try { this.slots.reserve(assignment.id, 'wake') } catch { continue }
+          if (!this.host.scheduler) { try { this.slots.reserve(assignment.id, 'wake') } catch { continue } }
           const requestId = `project-execute:${existing.id}:${existing.lease}:resume:${ticket.lifecycle!.pause.at}`
-          const work = this.host.sessions.prompt(existing.sessionId, requestId, 'Continue the confirmed project execution from the saved workspace.', 'queue', () => { attempts.resolve(existing.sessionId) })
+          const work = this.admitWake(existing, requestId, () => { attempts.resolve(existing.sessionId); if (this.held(this.host.store.tickets.get(ticket.id)!)) throw new Later('Worker resume held') }, () => this.host.sessions.prompt(existing.sessionId, requestId, 'Continue the confirmed project execution from the saved workspace.', 'queue', () => { attempts.resolve(existing.sessionId) }))
             .then(() => { this.projectObserved.add(existing.id); this.host.engine.observeTicket(ticket.id, 'running', 'worker-resumed') })
             .finally(() => { this.slots.free(assignment.id) })
           this.track(ticket.id, work)
@@ -470,30 +499,97 @@ export class DshExecutor implements Executor {
           }
           continue
         }
-        if (existing?.status === 'reconcile' || this.projectLaunching.has(assignment.id)) continue
+        if (existing?.status === 'reconcile' || existing?.status === 'settling' || this.projectLaunching.has(assignment.id)) continue
          if (['failed', 'blocked'].includes(assignment.waitingReason ?? '')) continue
         // A ready report with an independent semantic gate is durable evidence. Resume may continue the judgment,
         // but must not re-submit the completed worker prompt or redo file actions.
         if (existing && this.host.reportReady?.(ticket, assignment, existing) && ['semantic-review', 'needs_judgment', 'unresolved-items', 'changes_required'].includes(assignment.waitingReason ?? '')) continue
         if (this.host.paused()) { assignment.waitingReason = 'processing-paused'; this.host.store.tickets.save(ticket); continue }
-        if (!assignment.contract!.inputs.every(input => input.kind !== 'dependency' || this.host.store.tickets.get(input.ticketId)?.assignments.some(item => item.id === input.assignmentId && (assignment.contract?.proposal?.review?.target === item.contract?.assignmentKey ? item.report?.state === 'ready' : item.state === 'ended' && item.endedReason === 'accepted')))) {
+        if (!assignment.contract!.inputs.every(input => input.kind !== 'dependency' || this.host.store.tickets.get(input.ticketId)?.assignments.some(item => item.id === input.assignmentId && (assignment.contract?.proposal?.review?.target === item.contract?.assignmentKey ? item.reportReceipt?.state === 'ready' : item.state === 'ended' && item.endedReason === 'accepted')))) {
           assignment.waitingReason = 'dependency'; this.host.store.tickets.save(ticket); continue
         }
-        try { this.slots.reserve(assignment.id, 'launch') } catch { assignment.waitingReason = 'worker-slot'; this.host.store.tickets.save(ticket); continue }
-        const operation = this.launchProject(ticket.id, assignment.id).finally(() => { this.projectLaunching.delete(assignment.id); this.slots.free(assignment.id) })
+        if (!this.host.scheduler) { try { this.slots.reserve(assignment.id, 'launch') } catch { assignment.waitingReason = 'worker-slot'; this.host.store.tickets.save(ticket); continue } }
+        const operation = this.admitProject(ticket.id, assignment.id).finally(() => { this.projectLaunching.delete(assignment.id); if (!this.host.scheduler) this.slots.free(assignment.id) })
         this.projectLaunching.set(assignment.id, operation)
       }
     }
+  }
+  private readonly workerBudgets = new Map<string, BudgetLease>()
+  private readonly pendingWorkerBudgets = new Map<string, BudgetLease>()
+  private async admitWake(attempt: Attempt, requestId: string, validate: () => void, run: () => Promise<unknown>): Promise<void> {
+    const scheduler = this.host.scheduler
+    if (!scheduler) { await run(); return }
+    this.syncWorkerBudgets()
+    let lease = this.workerBudgets.get(attempt.id)
+    if (!lease) {
+      lease = await scheduler.acquire({ id: `worker:${attempt.assignmentId}:wake:${requestId}`, projectId: attempt.projectId, ownerId: attempt.sessionId, kind: 'worker', signal: this.host.lifetime, validate })
+      this.workerBudgets.set(attempt.id, lease)
+    }
+    validate()
+    await run()
+  }
+  /** Restore every live historical owner before queued work can receive capacity. Unknown owners retain their leases. */
+  private syncWorkerBudgets(): void {
+    const scheduler = this.host.scheduler
+    if (!scheduler) return
+    for (const ticket of this.host.store.tickets.list().filter(item => !item.projectId)) {
+      const id = `legacy:${ticket.id}`
+      if (this.running(ticket)) {
+        if (!this.workerBudgets.has(id)) this.workerBudgets.set(id, scheduler.adopt({ id: `worker-owner:${id}`, projectId: 'legacy', ownerId: workerSessionId(ticket.id), kind: 'worker' }))
+      } else { const lease = this.workerBudgets.get(id); this.workerBudgets.delete(id); lease?.release() }
+    }
+    for (const attempt of this.host.attempts?.all() ?? []) {
+      if (this.pendingWorkerBudgets.has(attempt.assignmentId)) continue
+      const agent = this.host.context.agents.get(attempt.sessionId as SessionId)
+      const physicalJobs = runningJobs(this.host.context, attempt.sessionId).length
+      const busy = agent?.status === 'running' || physicalJobs > 0
+        || scheduler.status().some(row => row.ownerId === attempt.sessionId && row.state === 'running' && row.kind !== 'worker')
+      const unknown = attempt.status === 'reconcile'
+      const terminal = ['ended', 'settling'].includes(attempt.status)
+      if (busy || unknown || (!terminal && !agent) || (!agent && terminal && physicalJobs > 0)) {
+        if (!this.workerBudgets.has(attempt.id)) this.workerBudgets.set(attempt.id, scheduler.adopt({ id: `worker-owner:${attempt.id}`, projectId: attempt.projectId, ownerId: attempt.sessionId, kind: 'worker' }))
+      } else if (agent?.status === 'idle') {
+        const lease = this.workerBudgets.get(attempt.id)
+        this.workerBudgets.delete(attempt.id); lease?.release()
+      }
+    }
+  }
+  private async admitProject(ticketId: string, assignmentId: string): Promise<void> {
+    const scheduler = this.host.scheduler
+    if (!scheduler) return this.launchProject(ticketId, assignmentId)
+    const original = this.host.store.tickets.get(ticketId)!
+    const branch = original.assignments.find(item => item.id === assignmentId)!
+    const authorization = branch.contract!.authorizationId
+    const previous = this.host.attempts!.all().findLast(item => item.assignmentId === assignmentId)
+    const validate = () => {
+      const ticket = this.host.store.tickets.get(ticketId), assignment = ticket?.assignments.find(item => item.id === assignmentId)
+      if (!ticket || ticket.ended || !assignment?.contract || assignment.state === 'ended' || !isActivePlanAssignment(ticket, assignmentId) || assignment.contract.authorizationId !== authorization
+        || this.held(ticket) || this.host.closing() || this.host.paused()
+        || this.host.attempts!.all().findLast(item => item.assignmentId === assignmentId)?.id !== previous?.id) throw new Error('Worker admission authority changed')
+    }
+    let lease: BudgetLease | undefined, assigned = false
+    try {
+      lease = previous && previous.status !== 'ended' ? this.workerBudgets.get(previous.id) : undefined
+      if (branch.waitingReason === 'executor-unavailable') { branch.waitingReason = 'worker-slot'; this.host.store.tickets.save(original) }
+      lease ??= await scheduler.acquire({ id: `worker:${assignmentId}:${previous?.id ?? 'initial'}`, projectId: original.projectId!, kind: 'worker', signal: this.host.lifetime, validate })
+      validate()
+      if (lease) this.pendingWorkerBudgets.set(assignmentId, lease)
+      await this.launchProject(ticketId, assignmentId)
+      this.pendingWorkerBudgets.delete(assignmentId)
+      const current = this.host.attempts!.all().findLast(item => item.assignmentId === assignmentId)
+      if (current && (current.id !== previous?.id || current.status !== 'ended')) { this.workerBudgets.set(current.id, lease); assigned = true }
+    } catch { /* Cancellation or stale authority cannot launch work. Durable branches reconstruct the queue. */ }
+    finally { this.pendingWorkerBudgets.delete(assignmentId); if (!assigned) lease?.release() }
   }
   private async launchProject(ticketId: string, assignmentId: string): Promise<void> {
     const attempts = this.host.attempts!
     let attempt: Attempt | undefined
     try {
       let ticket = this.host.store.tickets.get(ticketId)!, assignment = ticket.assignments.find(item => item.id === assignmentId)!
-      if (this.held(ticket) || this.host.closing() || this.host.paused()) return
+      if (this.held(ticket) || this.host.closing() || this.host.paused() || !isActivePlanAssignment(ticket, assignmentId)) return
       await this.stopped(ticketId)
       ticket = this.host.store.tickets.get(ticketId)!; assignment = ticket.assignments.find(item => item.id === assignmentId)!
-      if (this.held(ticket) || this.host.closing() || this.host.paused()) return
+      if (this.held(ticket) || this.host.closing() || this.host.paused() || !isActivePlanAssignment(ticket, assignmentId)) return
       attempt = attempts.prepare(attempts.allocate(ticket, assignment, { fresh: (attempts.all().findLast(item => item.assignmentId === assignment.id)?.status === 'ended' || !!attempts.all().findLast(item => item.assignmentId === assignment.id)?.fenced) }))
       const agent = await this.host.sessions.ensure(attempt.sessionId, attempt.cwd, `Project worker: ${ticket.title}`, 'worker')
       attempts.resolve(agent.id)
@@ -540,7 +636,7 @@ export class DshExecutor implements Executor {
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
   constructor(private readonly host: ExecutorHost) {
-    this.slots = new WorkerSlots(() => [...new Set([...host.store.tickets.open().filter(ticket => !ticket.projectId && this.running(ticket)).map(ticket => ticket.id), ...host.attempts?.all().filter(item => item.status === 'running' && (host.context.agents.get(item.sessionId as SessionId)?.status === 'running' || runningJobs(host.context, item.sessionId).length > 0)).map(item => item.assignmentId) ?? []])],
+    this.slots = new WorkerSlots(() => [...new Set([...host.store.tickets.open().filter(ticket => !ticket.projectId && this.running(ticket)).map(ticket => ticket.id), ...host.attempts?.all().filter(item => (host.context.agents.get(item.sessionId as SessionId)?.status === 'running' || runningJobs(host.context, item.sessionId).length > 0)).map(item => item.assignmentId) ?? []])],
       () => host.store.settings().executor.maxWorkers)
     // Each launch reserves a worker slot so launches run concurrently while slots are free.
     host.effects.handle('launch', payload => this.launchQueued(payload), { limit: () => host.paused() ? 0 : this.slots.launches(),
@@ -704,7 +800,7 @@ export class DshExecutor implements Executor {
       attempt.status = 'reconcile'; attempt.error = 'Stop requires reconciliation: Worker Session/cwd mapping mismatch'; attempts.save(attempt)
       return
     }
-    if (['preparing', 'prepared', 'running'].includes(attempt.status)) { attempt.fenced = true; attempts.save(attempt) }
+    if (['preparing', 'prepared', 'running', 'settling'].includes(attempt.status)) { attempt.fenced = true; attempts.save(attempt) }
     agent.cancel({ kind: 'user' }, { keepInbox: false })
     this.projectObserved.delete(attempt.id)
     this.stopWork(ticketId, 'stopped', false, attempt.sessionId)
@@ -757,7 +853,7 @@ export class DshExecutor implements Executor {
     return await until(stop(), undefined, SHUTDOWN_STOP_MS) !== false
   }
   /** Number of open tickets whose worker holds a worker slot: its turn runs, or its shell jobs or subagents still run after its turn ended. */
-  activeCount(): number { return this.host.store.tickets.open().filter(ticket => !ticket.projectId && this.running(ticket)).length + (this.host.attempts?.all().filter(item => item.status === 'running' && (this.host.context.agents.get(item.sessionId as SessionId)?.status === 'running' || runningJobs(this.host.context, item.sessionId).length > 0)).length ?? 0) }
+  activeCount(): number { return this.host.store.tickets.open().filter(ticket => !ticket.projectId && this.running(ticket)).length + (this.host.attempts?.all().filter(item => (this.host.context.agents.get(item.sessionId as SessionId)?.status === 'running' || runningJobs(this.host.context, item.sessionId).length > 0)).length ?? 0) }
   /** Whether a ticket's worker holds a worker slot: its turn runs, or its shell jobs or subagents do after its turn ended. */
   private running(ticket: Ticket): boolean {
     if (!runningAssignment(ticket)) return false
@@ -887,7 +983,7 @@ export class DshExecutor implements Executor {
       // filesystem effects do not. Quarantine an attempt that was preparing or running so
       // dispatchProjects cannot silently replay work with an unknown external outcome.
       if (ticket.projectId && this.host.attempts) {
-        for (const assignment of ticket.assignments.filter(item => item.contract && item.state !== 'ended')) {
+        for (const assignment of activePlanAssignments(ticket).filter(item => item.state !== 'ended')) {
           const attempt = this.host.attempts.all().findLast(item => item.assignmentId === assignment.id)
           if (attempt && (attempt.status === 'preparing' || attempt.status === 'running')) {
             attempt.status = 'reconcile'; attempt.error = 'Host restarted during project execution; explicit reconciliation is required'

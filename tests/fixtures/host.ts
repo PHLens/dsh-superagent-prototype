@@ -160,7 +160,7 @@ export async function startRuntime(seed?: (store: Store) => void) {
     const done = argv[0] === 'sh' && hooks.prepare ? hooks.prepare.then(() => exited) : Promise.resolve(exited)
     return { done, collected: { stdout: reader(answers[argv.join(' ')] ?? ''), stderr: reader('') } }
   }) }
-  const agents = new Map<string, FakeAgent>()
+  const agents = Object.assign(new Map<string, FakeAgent>(), { currentInitiator: () => undefined })
   /** Each Session's next step, which takes the messages that wait for one. */
   const steps = new Map<string, () => void>(), claims = new Map<string, () => void>()
   const tools = new Map<string, Map<string, RegisteredTool>>()

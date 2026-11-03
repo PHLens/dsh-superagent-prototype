@@ -27,6 +27,7 @@ import { MasterAssessor } from './assessment.ts'
 import { KV } from '../kv.ts'
 import { Store } from './store.ts'
 import { ProjectCoordinator } from './project-coordinator.ts'
+import { ProjectScheduler, ManagedBudgetHooks } from './scheduler.ts'
 import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
 import { Effects } from './effects.ts'
@@ -87,6 +88,8 @@ export class Runtime extends Service implements SourceHost {
   private readonly stopped = new AbortController()
   private readonly disposers: (() => void)[] = []
   private releaseLock?: () => Promise<void>
+  readonly scheduler: ProjectScheduler
+  private budgetHooks?: ManagedBudgetHooks
   private closingFlag = false
   private stopping?: Promise<void>
   private readonly sourceDeps: SourceContextDeps
@@ -148,7 +151,25 @@ export class Runtime extends Service implements SourceHost {
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() }, backupChanged: value => { if (!this.safeRestore) this.backup.start(value) } })
       if (!this.safeRestore) this.backup.start(store.settings().backup)
-      this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, attempts, masterId, health: board.claim('worker'), machine,
+      this.scheduler = new ProjectScheduler({ limits: () => { const count = store.settings().executor.maxWorkers; return { model: count, worker: count, background: count } },
+        cursor: { read: kind => store.get(`budget.cursor.${kind}`), write: (kind, projectId) => store.set(`budget.cursor.${kind}`, projectId) },
+        onChange: rows => {
+          for (const ticket of store.tickets.list().filter(item => item.projectId)) {
+            let changed = false
+            for (const branch of ticket.assignments) {
+              const ownerIds = attempts.all().filter(item => item.assignmentId === branch.id).map(item => item.sessionId)
+              const wait = rows.find(row => row.state === 'queued' && (row.id.startsWith(`worker:${branch.id}:`) || row.ownerId && ownerIds.includes(row.ownerId)))?.waitingReason
+              const projected = wait as ('global-budget' | 'project-fairness' | undefined)
+              if (branch.budgetWait !== projected) { branch.budgetWait = projected; changed = true }
+            }
+            if (changed) store.tickets.save(ticket)
+          }
+        } })
+      this.projectCoordinator.setBudgetWaitResolver(projectId => {
+        const mapping = this.projectCoordinator.conversations.currentMapping(projectId)
+        return this.scheduler.status().find(row => row.kind === 'model' && row.state === 'queued' && row.projectId === projectId && row.ownerId === mapping?.sessionId)?.waitingReason
+      })
+      this.executor = new DshExecutor({ scheduler: this.scheduler, context: ctx, get engine() { return runtime.engine }, store, effects, attempts, masterId, health: board.claim('worker'), machine,
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         checkpointFiles: ticket => ticket.projectId ? artifacts.list(ticket.projectId, ticket.id).filter(item => item.status === 'registered').map(item => item.path) : [],
         reportReady: (ticket, assignment, attempt) => reports.reports(ticket.id).some(report => report.attemptId === attempt.id && report.lease === attempt.lease && report.assignmentId === assignment.id && report.state === 'ready'),
@@ -159,6 +180,39 @@ export class Runtime extends Service implements SourceHost {
         },
         outboundUnknown: ticket => store.db.prepare("SELECT 1 FROM outbox WHERE json_extract(value, '$.ticketId') = ? AND json_extract(value, '$.reconciliation.state') = 'unknown' LIMIT 1").get(ticket.id) !== undefined,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
+      const validateWorker = (ownerId: string, lease: string) => {
+        const { attempt, ticket } = attempts.resolve(ownerId)
+        if (this.lifetime.aborted || this.closing() || this.paused() || attempt.lease !== lease || ticket.lifecycle?.pause.intent === 'pause' || ticket.lifecycle?.stop.intent === 'stop') throw new Error('Managed owner authority changed')
+      }
+      this.budgetHooks = new ManagedBudgetHooks(ctx, this.scheduler, {
+        resolve: ownerId => {
+          const attempt = attempts.all().findLast(item => item.sessionId === ownerId)
+          if (!attempt) {
+            const mapping = this.projectCoordinator.conversations.listMappings().find(item => item.sessionId === ownerId)
+            if (!mapping) return undefined
+            return { ownerId, projectId: mapping.projectId, validate: () => {
+              this.projectCoordinator.validateBudgetOwner(ownerId, mapping.projectId, mapping.generation)
+              const current = this.projectCoordinator.conversations.currentMapping(mapping.projectId)
+              if (this.lifetime.aborted || this.closing() || this.paused() || current?.generation !== mapping.generation || current.sessionId !== ownerId) throw new Error('Coordinator owner authority changed')
+            } }
+          }
+          return { ownerId, projectId: attempt.projectId, validate: () => validateWorker(ownerId, attempt.lease) }
+        },
+        owners: () => [...attempts.all().filter(attempt => !!attempt.sessionId).map(attempt => ({ ownerId: attempt.sessionId, projectId: attempt.projectId, validate: () => {
+          validateWorker(attempt.sessionId, attempt.lease)
+        } })), ...this.projectCoordinator.conversations.listMappings().map(mapping => ({ ownerId: mapping.sessionId, projectId: mapping.projectId, validate: () => this.projectCoordinator.validateBudgetOwner(mapping.sessionId, mapping.projectId, mapping.generation) }))],
+        onUncertain: (ownerId, jobId) => {
+          const attempt = attempts.all().findLast(item => item.sessionId === ownerId)
+          if (!attempt) {
+            const mapping = this.projectCoordinator.conversations.listMappings().find(item => item.sessionId === ownerId)
+            if (mapping) store.set(`project-coordinator-uncertain:${ownerId}`, { jobId, projectId: mapping.projectId, generation: mapping.generation })
+            return
+          }
+          const ticket = store.tickets.get(attempt.ticketId), branch = ticket?.assignments.find(item => item.id === attempt.assignmentId)
+          if (branch && ticket) { attempt.status = 'reconcile'; attempt.error = `Unknown physical exit for job ${jobId}`; branch.waitingReason = 'preparation-reconciliation'; store.atomic(() => { attempts.save(attempt); store.tickets.save(ticket) }) }
+        }
+      })
+      this.budgetHooks.install()
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
@@ -185,7 +239,7 @@ export class Runtime extends Service implements SourceHost {
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
       const evals = board.claim('evals', { state: 'ready', detail: 'No unavailable Eval in the last hour' })
       const evaluateDue = () => { engine.evaluateDue(); evals.set(evalsHealth(store)) }
-      const passes = this.passes = new Passes({ engine: { receive: trigger => engine.receive(trigger), evaluateDue }, effects, projectPass: () => executor.dispatchProjects(),
+      const passes = this.passes = new Passes({ engine: { receive: trigger => engine.receive(trigger), evaluateDue }, effects, projectPass: () => { this.budgetHooks?.sync(); this.scheduler.refresh(); this.projectCoordinator.pumpEvents(); return executor.dispatchProjects() },
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
@@ -224,7 +278,10 @@ export class Runtime extends Service implements SourceHost {
   checkSetup(): void { this.setup.check() }
   receive(trigger: Trigger): ReceiveResult { return this.safeRestore ? 'filtered' : this.passes.receive(trigger) }
   idle(): Promise<void> { return this.passes.idle() }
-  pump(): Promise<void> { return this.safeRestore ? Promise.resolve() : this.passes.pump() }
+  pump(): Promise<void> {
+    if (!this.safeRestore) { this.budgetHooks?.sync(); this.scheduler.refresh(); this.projectCoordinator.pumpEvents() }
+    return this.safeRestore ? Promise.resolve() : this.passes.pump()
+  }
   sendReplies(): Promise<void> { return this.safeRestore ? Promise.resolve() : this.outbox.sent() }
   private closing(): boolean { return this.closingFlag }
   /** Hold evaluation, dispatch, and outbound delivery while paused or awaiting setup; sources still record incoming triggers. */
@@ -395,7 +452,7 @@ export class Runtime extends Service implements SourceHost {
   /** Idempotent stop; concurrent or repeated calls share the same shutdown promise. */
   stop(): Promise<void> { return this.stopping ??= this.shutdown() }
   private async shutdown(): Promise<void> {
-    this.closingFlag = true; const passes = this.passes.stop(); this.stopped.abort()
+    this.closingFlag = true; this.scheduler.close(); const passes = this.passes.stop(); this.stopped.abort()
     let canRelease = false
     try {
       this.assessor.stop()
@@ -409,6 +466,7 @@ export class Runtime extends Service implements SourceHost {
       // A timeout is an unknown boundary. Keep the sessions, executor and Store fenced and open until native work is known idle.
       const drained = await this.executor.shutdown()
       if (!drained) return
+      this.budgetHooks?.sync(); this.budgetHooks?.dispose()
       this.executor.dispose()
       this.sessions.dispose()
       for (const dispose of this.disposers.reverse()) dispose()

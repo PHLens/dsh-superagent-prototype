@@ -17,7 +17,7 @@ import type { SettingsVersion, Store } from './store.ts'
 import { Versions } from './versions.ts'
 import { KV, type Key } from '../kv.ts'
 
-export const SCHEMA_VERSION = 16
+export const SCHEMA_VERSION = 17
 /** The oldest database schema version this build can open and migrate directly. */
 export const OLDEST_SCHEMA = 10
 /** Returns an error message explaining why `version` cannot be opened: older schemas need a new state directory. */
@@ -29,6 +29,25 @@ export function migrateTo16(store: Store): void {
     const value = JSON.parse(String(row.value)) as Record<string, unknown>
     if (!value.lifecycle) value.lifecycle = { pause: { intent: 'none', state: 'running', at: String(value.updatedAt ?? new Date().toISOString()) }, stop: { intent: 'none', state: 'running', at: String(value.updatedAt ?? new Date().toISOString()) }, observed: { state: 'unknown', at: String(value.updatedAt ?? new Date().toISOString()) } }
     store.db.prepare('UPDATE ticket SET value=? WHERE id=?').run(JSON.stringify(value), String(row.id))
+  }
+}
+
+/** T6 changes report, question and continuation semantics: older binaries must refuse these records. */
+export function migrateTo17(store: Store): void {
+  for (const row of store.db.prepare('SELECT id, value FROM ticket').all()) {
+    const ticket = JSON.parse(String(row.value)) as Ticket
+    if (!ticket.projectId) continue
+    if (ticket.attention && !ticket.attentionQuestions) ticket.attentionQuestions = [ticket.attention]
+    if (ticket.lifecycle?.attentionContinuation && !ticket.lifecycle.attentionContinuations) ticket.lifecycle.attentionContinuations = [ticket.lifecycle.attentionContinuation]
+    for (const assignment of ticket.assignments) {
+      const attempt = store.db.prepare("SELECT id, value FROM execution_attempt WHERE json_extract(value,'$.assignmentId')=? ORDER BY rowid DESC LIMIT 1").get(assignment.id)
+      if (!attempt) continue
+      const receipt = store.db.prepare('SELECT value FROM worker_report WHERE attempt_id=? ORDER BY rowid DESC LIMIT 1').get(String(attempt.id))
+      if (!receipt) continue
+      const report = JSON.parse(String(receipt.value)) as NonNullable<Ticket['assignments'][number]['reportReceipt']>
+      assignment.reportReceipt = { id: report.id, state: report.state, attemptId: report.attemptId, lease: report.lease, artifacts: report.artifacts }
+    }
+    store.db.prepare('UPDATE ticket SET value=? WHERE id=?').run(JSON.stringify(ticket), ticket.id)
   }
 }
 
