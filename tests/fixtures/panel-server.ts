@@ -344,7 +344,7 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET backup/points': { answer: () => ({ points: server.backupPoints }) },
   'POST backup/create': { answer: () => {
     const createdAt = '2026-11-03T00:00:00Z'
-    server.backupPoints = [{ path: '/srv/dsh-superagent/backups/point-1', createdAt, bytes: 1234 }]
+    server.backupPoints = [{ path: '/srv/dsh-superagent/backups/point-1', createdAt, bytes: 1234, complete: true, consistency: 'declared-files-quiesced' }]
     return { manifest: { createdAt } as ApiResponse<'POST backup/create'>['manifest'] }
   } },
   'POST backup/restore': { body: true, answer: ({ body }) => ({ manifest: {

@@ -19,7 +19,7 @@ import { ConversationStore } from '../src/app/conversation-store.ts'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import { workerFixture } from './fixtures/project-worker.ts'
-import { createRecoveryPoint } from '../src/app/backup.ts'
+import { createRecoveryPoint, restoreRecoveryPoint } from '../src/app/backup.ts'
 
 let h: Host, base: string
 beforeEach(async () => { base = mkdtempSync(join(tmpdir(), 't5-completeness-review-')); h = await startRuntime() })
@@ -139,7 +139,7 @@ it('restores registered artifact paths when configured roots use the actual tmp 
     f.store.close(); sourceOpen = false
     renameSync(alias, hidden)
     const target = join(base, 'alias-restored')
-    h.runtime.backup.restore(point, target)
+    restoreRecoveryPoint(point, target)
     const restored = new Store(join(target, 'orchestrator.sqlite'))
     try {
       const artifacts = new ArtifactStore(restored, new ExecutionAttempts(restored, target))

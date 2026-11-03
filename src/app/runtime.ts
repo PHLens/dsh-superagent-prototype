@@ -144,7 +144,7 @@ export class Runtime extends Service implements SourceHost {
            const workspaces = store.tickets.list().flatMap(ticket => ticket.execution?.directory && existsSync(ticket.execution.directory) ? [ticket.execution.directory] : [])
            return { workspaces: [...new Set([projects, ...workspaces].filter(existsSync))], nativeState: [] }
          },
-        prepareMaterials: () => this.backupMaterials(), health: board.claim('backup'), lifetime: this.lifetime })
+        prepareMaterials: () => this.backupMaterials(), applicationFull: true, health: board.claim('backup'), lifetime: this.lifetime })
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() }, backupChanged: value => { if (!this.safeRestore) this.backup.start(value) } })
       if (!this.safeRestore) this.backup.start(store.settings().backup)
@@ -256,11 +256,46 @@ export class Runtime extends Service implements SourceHost {
     return hash.digest('hex')
   }
   private async backupMaterials(): Promise<BackupMaterialSnapshot> {
+    // Registered writer activity is an epoch, not a content hash: even a writer
+    // that restores its bytes before verification invalidates this capture.
+    const ids = this.managedBackupSessionIds()
+    const jobs = this.ctx.get('jobs') as { list(id: string): readonly { owner?: string; status: string }[]; events: { subscribe(filter: { owner: string }, listener: () => void): () => void } } | undefined
+    const related = (agent: Agent): boolean => ids.has(agent.id)
+    const quiet = () => {
+      for (const id of ids) {
+        const agent = this.ctx.agents.get(id as SessionId)
+        if ((agent && agent.status !== 'idle') || jobs?.list(id).some(job => job.owner === id && ['running', 'stopping'].includes(job.status))) throw new Error(`Active application writer prevents recovery capture: ${id}`)
+      }
+    }
+    quiet()
+    let changed = false
+    const releases: Array<() => void> = []
+    const release = () => { for (const dispose of releases.splice(0)) dispose() }
+    releases.push(this.ctx.on('agent/status', ({ agent }) => { if (related(agent)) changed = true }))
+    for (const id of ids) if (jobs) releases.push(jobs.events.subscribe({ owner: id }, () => { changed = true }))
+    try {
+      const materials = await this.readBackupMaterials()
+      const verify = materials.verify
+      return { ...materials, release, verify: async () => {
+        await verify?.()
+        quiet()
+        if (changed) throw new Error('Registered application writer activity changed during recovery capture')
+      } }
+    } catch (error) { release(); throw error }
+  }
+  private async readBackupMaterials(): Promise<BackupMaterialSnapshot> {
     await this.passes.idle()
     await this.projectCoordinator.idle()
+    if (this.executor.activeCount() > 0) throw new Error('Active application writer jobs prevent a complete recovery point')
     await this.ctx.sessionPersistence.flush()
+    const listedAll = await this.ctx.sessionPersistence.list()
     const associated = this.managedBackupSessionIds()
-    const snapshots = (await this.ctx.sessionPersistence.list()).filter(snapshot => associated.has(snapshot.header.id))
+    const masterEvidence = listedAll.some(snapshot => snapshot.header.id === this.masterId)
+      || !!this.ctx.agents.get(this.masterId as SessionId) || !!this.store.get(KV.sessions.prompts(this.masterId))?.length
+      || !!await this.ctx.sessionPersistence.stat(this.masterId as SessionId)
+    const unusedMaster = !masterEvidence
+    if (unusedMaster) associated.delete(this.masterId)
+    const snapshots = listedAll.filter(snapshot => associated.has(snapshot.header.id))
     const nativeSessions: NativeSessionArchive[] = []
     for (const snapshot of snapshots) {
       const handle = await this.ctx.sessionPersistence.open(snapshot.header.id as SessionId, 'read')
@@ -273,15 +308,16 @@ export class Runtime extends Service implements SourceHost {
       }
     }
     const workspaces = new Set<string>(), attachments = new Set<string>(), externalResources = new Set<string>()
-    for (const project of this.store.projects.list()) if (project.directory && existsSync(project.directory)) workspaces.add(project.directory)
+    for (const project of this.store.projects.list()) if (project.directory) workspaces.add(project.directory)
     for (const ticket of this.store.tickets.list()) {
-      if (ticket.execution?.directory && existsSync(ticket.execution.directory)) workspaces.add(ticket.execution.directory)
-      for (const revision of ticket.planRevisions ?? []) for (const resource of revision.resources) if (resource.startsWith('/') && existsSync(resource)) externalResources.add(resource)
-      if (ticket.projectId) for (const artifact of this.projectCoordinator.artifacts.list(ticket.projectId, ticket.id)) if (existsSync(artifact.path)) attachments.add(artifact.path)
+      if (ticket.execution?.directory) workspaces.add(ticket.execution.directory)
+      for (const revision of ticket.planRevisions ?? []) for (const resource of revision.resources) if (resource.startsWith('/')) externalResources.add(resource)
+      if (ticket.projectId) for (const artifact of this.projectCoordinator.artifacts.list(ticket.projectId, ticket.id)) attachments.add(artifact.path)
     }
     for (const attempt of this.projectCoordinator.attempts.all()) {
-      for (const path of [attempt.root, attempt.cwd]) if (existsSync(path)) workspaces.add(path)
+      for (const path of [attempt.root, attempt.cwd]) workspaces.add(path)
     }
+    for (const path of [...workspaces, ...attachments, ...externalResources]) if (!existsSync(path)) throw new Error(`Required recovery material is missing: ${path}`)
     const roots = { workspaces: [...workspaces], attachments: [...attachments], nativeState: [], externalResources: [...externalResources] }
     const capturedDb = this.recoveryDbToken()
     const capturedFiles = this.recoveryFilesToken([...roots.workspaces, ...roots.attachments, ...roots.externalResources])
@@ -290,12 +326,16 @@ export class Runtime extends Service implements SourceHost {
     return {
       roots,
       nativeSessions,
+      expectedNativeSessionIds: [...associated],
+      relocations: [{ source: this.machine.stateDir, path: '.' }],
       consistency: 'declared-files-quiesced',
       verify: async () => {
+        if (this.executor.activeCount() > 0) throw new Error('Application writer jobs started during recovery capture')
         if (this.recoveryDbToken() !== capturedDb) throw new Error('Database changed during recovery capture')
         if (JSON.stringify(this.projectCoordinator.attempts.all()) !== capturedAttempts) throw new Error('Managed worker changed during recovery capture')
         if (this.recoveryFilesToken([...roots.workspaces, ...roots.attachments, ...roots.externalResources]) !== capturedFiles) throw new Error('Recovery files changed during capture')
         const currentIds = this.managedBackupSessionIds()
+        if (unusedMaster && !this.ctx.agents.get(this.masterId as SessionId) && !await this.ctx.sessionPersistence.stat(this.masterId as SessionId)) currentIds.delete(this.masterId)
         for (const id of currentIds) {
           const current = await this.ctx.sessionPersistence.stat(id as SessionId)
           if (!current || !revisions.has(id) || JSON.stringify(current.revision) !== JSON.stringify(revisions.get(id))) throw new Error(`Managed native session changed during recovery capture: ${id}`)

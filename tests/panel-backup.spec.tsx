@@ -42,7 +42,7 @@ it('retains a backup draft after a revision conflict instead of silently replaci
 })
 
 it('shows archived backup settings in read-only recovery and never submits a retained local draft', async () => {
-  server.backupPoints = [{ path: '/archived/point', createdAt: '2026-11-03T00:00:00Z', bytes: 123 }]
+  server.backupPoints = [{ path: '/archived/point', createdAt: '2026-11-03T00:00:00Z', bytes: 123, complete: true, consistency: 'declared-files-quiesced' }]
   at({ page: 'settings', query: { group: 'backup' } })
   await mount(zh)
   await type(field<HTMLInputElement>(zh.backupDirectory), '/unsaved-live-instance-path')
@@ -88,7 +88,7 @@ it('creates a recovery point with saved settings and restores the selected point
 })
 
 it('preserves the selected recovery point and destination after a restore failure', async () => {
-  server.backupPoints = [{ path: '/backups/point-1', createdAt: '2026-11-03T00:00:00Z', bytes: 123 }]
+  server.backupPoints = [{ path: '/backups/point-1', createdAt: '2026-11-03T00:00:00Z', bytes: 123, complete: true, consistency: 'declared-files-quiesced' }]
   const actual = globalThis.fetch
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     if (String(input).endsWith('/backup/restore')) return new Response(JSON.stringify({ error: 'Restore destination already exists' }), {

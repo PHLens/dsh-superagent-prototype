@@ -19,6 +19,8 @@ export interface RecoveryManifest {
   mappings: RecoveryMapping[]
   directories: string[]
   nativeSessions: Array<{ id: string; path: string; revision?: unknown }>
+  relocations: Array<{ source: string; path: string }>
+  coverage?: { kind: 'application-full'; nativeSessionIds: string[] }
   boundaries: { workspaces: string[]; attachments: string[]; nativeState: string[]; externalResources: string[] }
   missing: string[]
   excluded: { path: string; reason: string }[]
@@ -32,6 +34,9 @@ export interface RecoveryOptions {
   roots?: { workspaces?: string[]; attachments?: string[]; nativeState?: string[]; externalResources?: string[] }
   /** Session event logs captured through the native persistence API, never by guessing a filesystem path. */
   nativeSessions?: NativeSessionArchive[]
+  /** Path-only relocation roots whose contents are intentionally not copied. */
+  relocations?: Array<{ source: string; path: string }>
+  coverage?: RecoveryManifest['coverage']
   /** Additional credential/config roots to omit, even when nested in a declared file root. */
   credentialPaths?: string[]
   schemaVersion?: number
@@ -58,7 +63,7 @@ function freshRoot(path: string): void {
 export function createRecoveryPoint(store: Store, options: RecoveryOptions): RecoveryManifest {
   const destination = canonicalDestination(options.destination), database = join(destination, RECOVERY_DATABASE)
   const roots = options.roots ?? {}
-  const declared = [...new Set([...roots.workspaces ?? [], ...roots.attachments ?? [], ...roots.nativeState ?? []].map(root => resolve(root)))]
+  const declared = [...new Set([...roots.workspaces ?? [], ...roots.attachments ?? [], ...roots.nativeState ?? [], ...roots.externalResources ?? []].map(root => resolve(root)))].sort((a, b) => a.length - b.length || a.localeCompare(b)).filter((root, _, all) => !all.some(parent => parent !== root && root.startsWith(`${parent}${sep}`) && statSafe(parent)?.isDirectory()))
   const databasePath = resolve(options.databasePath)
   const openedPath = store.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file
   if (typeof openedPath !== 'string' || realpathSync(databasePath) !== realpathSync(openedPath)) throw new Error('Recovery databasePath must identify the open Store database')
@@ -74,7 +79,7 @@ export function createRecoveryPoint(store: Store, options: RecoveryOptions): Rec
   const manifest: RecoveryManifest = {
     format: 1, createdAt: new Date().toISOString(), schemaVersion: options.schemaVersion ?? SCHEMA_VERSION,
     consistency: options.consistency ?? (declared.length || options.nativeSessions?.length ? 'declared-files-best-effort' : 'database-only'),
-    database: { file: RECOVERY_DATABASE, walIncluded: true, sha256: files[0]!.sha256 }, files, mappings: [], directories: [], nativeSessions: [],
+    database: { file: RECOVERY_DATABASE, walIncluded: true, sha256: files[0]!.sha256 }, files, mappings: [], directories: [], nativeSessions: [], relocations: options.relocations ?? [], coverage: options.coverage,
     boundaries: { workspaces: roots.workspaces ?? [], attachments: roots.attachments ?? [], nativeState: roots.nativeState ?? [], externalResources: roots.externalResources ?? [] },
     missing: [], excluded: [], incomplete: [],
     restoredProfile: { execution: 'prohibited', model: 'prohibited', outbound: 'prohibited', isolatedRoot: '' },
@@ -169,6 +174,7 @@ export function restoreRecoveryPoint(source: string, destination: string): Recov
   const manifestPath = confined(sourceRoot, 'manifest.json')
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as RecoveryManifest
   if (manifest.format !== 1 || !Number.isSafeInteger(manifest.schemaVersion) || manifest.schemaVersion < OLDEST_SCHEMA || manifest.schemaVersion > SCHEMA_VERSION || !Array.isArray(manifest.files) || !Array.isArray(manifest.mappings) || !Array.isArray(manifest.missing) || !Array.isArray(manifest.incomplete) || manifest.missing.length || manifest.incomplete.length || !manifest.database || manifest.database.walIncluded !== true) throw new Error('Invalid or incomplete recovery manifest')
+  for (const relocation of manifest.relocations ?? []) if (!relocation || typeof relocation.source !== 'string' || !isAbsolute(relocation.source) || typeof relocation.path !== 'string' || isAbsolute(relocation.path) || relocation.path.split('/').includes('..') || relocation.path.split(sep).some(credentialName)) throw new Error('Invalid recovery relocation')
   const paths = new Set<string>()
   for (const file of manifest.files) {
     const path = confined(sourceRoot, file.path)
@@ -216,12 +222,16 @@ export function restoreRecoveryPoint(source: string, destination: string): Recov
         if (!matchedSource) continue
         return join(destinationRoot, mapping.path, mapping.kind === 'directory' ? relative(matchedSource, resolve(value)) : '')
       }
+      for (const relocation of manifest.relocations ?? []) {
+        const matchedSource = sourceCandidates(relocation.source).find(candidate => within(candidate, resolve(value)))
+        if (matchedSource) return join(destinationRoot, relocation.path, relative(matchedSource, resolve(value)))
+      }
       return value
     }
-    const rewrite = (value: unknown, key = ''): unknown => {
-      if (typeof value === 'string' && ['path', 'directory', 'cwd', 'root', 'realpath'].includes(key)) return relocate(value)
-      if (Array.isArray(value)) return value.map(item => rewrite(item, key))
-      if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, rewrite(item, name)]))
+    const rewrite = (value: unknown, key = '', parent = ''): unknown => {
+      if (typeof value === 'string' && (['path', 'directory', 'cwd', 'root', 'realpath'].includes(key) || (parent === 'checkpoint' && key === 'files'))) return relocate(value)
+      if (Array.isArray(value)) return value.map(item => rewrite(item, key, parent))
+      if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, rewrite(item, name, key)]))
       return value
     }
     const rewriteRows = (table: string) => {

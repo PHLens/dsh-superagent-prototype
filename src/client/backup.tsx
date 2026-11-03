@@ -98,8 +98,9 @@ function BackupOperations({ readOnly, revision }: { readOnly: boolean; revision:
     {data && !data.points.length && <Hint>{t('backupPointsEmpty')}</Hint>}
     {data && data.points.length > 0 && <ul className="dt-list">{data.points.map(point => <li key={point.path}>
       <time dateTime={point.createdAt}>{when(point.createdAt, t('lang'))}</time> · {point.bytes.toLocaleString()} bytes
+      {!point.complete && <p>{t('backupPartial')}</p>}
       <p className="dt-mono">{point.path}</p>
-      {!readOnly && <Button variant="outline" disabled={busy} onClick={() => { setSource(point.path); setRestored(undefined) }}>{t('backupChooseRestore')}</Button>}
+      {!readOnly && point.complete && <Button variant="outline" disabled={busy} onClick={() => { setSource(point.path); setRestored(undefined) }}>{t('backupChooseRestore')}</Button>}
     </li>)}</ul>}
     {!readOnly && source && <form className="dt-form" aria-label={t('backupRestore')} onSubmit={event => {
       event.preventDefault(); void restore.run()
