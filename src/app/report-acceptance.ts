@@ -74,6 +74,7 @@ export class ReportAcceptance {
       const outputs = report.artifacts.map(ref => this.artifacts.read(attempt.projectId, ref.id, ref.contentVersion).output)
       if (assignment.contract!.plan.outputs.some(output => !outputs.includes(output))) reason = 'missing-artifacts'
       else if (report.unresolved.length) reason = 'unresolved-items'
+      else if (ticket.attention && !ticket.attention.resolvedAt) reason = 'unresolved-question'
       else if (assignment.contract!.plan.acceptance?.mode !== 'registered-files') {
         const decision = this.decisions(ticket.id).findLast(item => item.assignmentId === assignment.id && item.reportId === report.id && item.targetVersion === this.target(report)
           && item.conditionsVersion === (assignment.contract!.plan.acceptance?.version ?? assignment.contract!.planRevision) && item.judge.generation === attempt.lease)
@@ -92,7 +93,7 @@ export class ReportAcceptance {
     if (owner && report.state !== 'progress') {
       const id = `worker-result:${report.id}:${reason ?? 'accepted'}`
       const reasons: Record<string, string> = {
-        'missing-artifacts': '必要文件尚未全部提交', 'unresolved-items': '仍有未解决的工作事项',
+        'missing-artifacts': '必要文件尚未全部提交', 'unresolved-items': '仍有未解决的工作事项', 'unresolved-question': '仍有未回答的问题',
         'semantic-review': '等待独立语义复核', changes_required: '独立复核要求修改', needs_judgment: '等待进一步独立判断',
         blocked: '执行遇到阻碍', failed: '执行失败，等待处理',
       }

@@ -1,17 +1,24 @@
 /** Owns scheduled and manual recovery point creation without dispatching application work. */
 import { existsSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { createRecoveryPoint, restoreRecoveryPoint, verifyRecoveryPoint, type RecoveryManifest, type RecoveryOptions } from './backup.ts'
+import { createRecoveryPoint, finalizeRecoveryPoint, restoreRecoveryPoint, verifyRecoveryPoint, type NativeSessionArchive, type RecoveryManifest, type RecoveryOptions } from './backup.ts'
 import type { Store } from './store.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import type { Settings } from '../policy.ts'
 
+export interface BackupMaterialSnapshot {
+  roots?: RecoveryOptions['roots']
+  nativeSessions?: NativeSessionArchive[]
+  consistency: 'database-only' | 'declared-files-best-effort' | 'declared-files-quiesced'
+  verify?: () => Promise<void>
+}
 export interface BackupServiceOptions {
   store: Store
   databasePath: string
   destinationRoot: string
   recovery: Omit<RecoveryOptions, 'databasePath' | 'destination'>
   recoveryRoots?: () => RecoveryOptions['roots']
+  prepareMaterials?: () => Promise<BackupMaterialSnapshot>
   health: HealthEntry
   lifetime: AbortSignal
   now?: () => Date
@@ -47,11 +54,18 @@ export class BackupService {
     if (!settings) return Promise.reject(new Error('Backup service is not configured'))
     const root = settings.directory || this.options.destinationRoot
     const destination = join(root, `${this.now().toISOString().replaceAll(':', '-')}-${reason}`)
-    this.active = Promise.resolve().then(() => {
+    this.active = Promise.resolve().then(async () => {
       if (this.cancelled()) throw new Error('Backup service stopped before recovery point creation')
-      const manifest = createRecoveryPoint(this.options.store, { ...this.options.recovery, roots: this.options.recoveryRoots?.() ?? this.options.recovery.roots, databasePath: this.options.databasePath, destination })
-      if (this.cancelled()) { rmSync(destination, { recursive: true, force: true }); throw new Error('Backup service stopped during recovery point creation') }
-      verifyRecoveryPoint(destination, manifest)
+      const materials = this.options.prepareMaterials ? await this.options.prepareMaterials() : undefined
+      if (this.cancelled()) throw new Error('Backup service stopped while preparing recovery materials')
+      const manifest = createRecoveryPoint(this.options.store, { ...this.options.recovery, roots: materials?.roots ?? this.options.recoveryRoots?.() ?? this.options.recovery.roots,
+        nativeSessions: materials?.nativeSessions, consistency: materials?.consistency, complete: false, databasePath: this.options.databasePath, destination })
+      if (this.cancelled()) throw new Error('Backup service stopped during recovery point creation')
+      await materials?.verify?.()
+      if (this.cancelled()) throw new Error('Backup service stopped during final material verification')
+      if (materials?.consistency === 'declared-files-quiesced' && manifest.consistency !== 'declared-files-quiesced') throw new Error('Recovery materials changed or were incomplete during capture')
+      verifyRecoveryPoint(destination, manifest, { allowIncompleteMarker: true })
+      finalizeRecoveryPoint(destination, manifest)
       this.options.health.set({ state: 'ready', detail: `Recovery point created at ${destination}` })
       this.retain(root, settings.retention, destination)
       return manifest

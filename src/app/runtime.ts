@@ -10,7 +10,8 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-subprocess'
-import { existsSync, mkdirSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
 import { Engine, Projects, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
@@ -43,7 +44,8 @@ import { feishuSettings } from '../sources/feishu.ts'
 import { health, type Health, type SourceContext, type SourceHost } from '../sources/host.ts'
 import { Sessions } from './sessions.ts'
 import { Settings } from './settings.ts'
-import { BackupService } from './backup-service.ts'
+import { BackupService, type BackupMaterialSnapshot } from './backup-service.ts'
+import type { NativeSessionArchive } from './backup.ts'
 import { sourceContextOf, type SourceContextDeps } from './source-context.ts'
 import type { ResourceHost } from './resources.ts'
 import { mainTools, type MainToolsHost } from './tools/main.ts'
@@ -140,9 +142,9 @@ export class Runtime extends Service implements SourceHost {
         recoveryRoots: () => {
            const projects = join(machine.stateDir, 'projects')
            const workspaces = store.tickets.list().flatMap(ticket => ticket.execution?.directory && existsSync(ticket.execution.directory) ? [ticket.execution.directory] : [])
-           return { workspaces: [...new Set([projects, ...workspaces].filter(existsSync))], nativeState: existsSync(projects) ? [projects] : [] }
+           return { workspaces: [...new Set([projects, ...workspaces].filter(existsSync))], nativeState: [] }
          },
-        health: board.claim('backup'), lifetime: this.lifetime })
+        prepareMaterials: () => this.backupMaterials(), health: board.claim('backup'), lifetime: this.lifetime })
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() }, backupChanged: value => { if (!this.safeRestore) this.backup.start(value) } })
       if (!this.safeRestore) this.backup.start(store.settings().backup)
@@ -227,6 +229,81 @@ export class Runtime extends Service implements SourceHost {
   private closing(): boolean { return this.closingFlag }
   /** Hold evaluation, dispatch, and outbound delivery while paused or awaiting setup; sources still record incoming triggers. */
   private paused(): boolean { return this.safeRestore || !this.setup.configured() || this.store.settings().paused }
+  private managedBackupSessionIds(): Set<string> {
+    const ids = new Set<string>([this.masterId])
+    for (const ticket of this.store.tickets.list()) if (!ticket.projectId) ids.add(workerSessionId(ticket.id))
+    for (const attempt of this.projectCoordinator.attempts.all()) ids.add(attempt.sessionId)
+    for (const row of this.store.db.prepare('SELECT session_id FROM conversation_mapping').all() as { session_id: string }[]) ids.add(row.session_id)
+    return ids
+  }
+  private recoveryDbToken(): string {
+    const path = join(this.machine.stateDir, `.backup-token-${randomUUID()}.sqlite`)
+    try {
+      this.store.db.prepare('VACUUM INTO ?').run(path)
+      return createHash('sha256').update(readFileSync(path)).digest('hex')
+    } finally { if (existsSync(path)) unlinkSync(path) }
+  }
+  private recoveryFilesToken(paths: string[]): string {
+    const hash = createHash('sha256')
+    const visit = (path: string) => {
+      let stat
+      try { stat = lstatSync(path) } catch { return }
+      if (stat.isSymbolicLink()) return
+      if (stat.isDirectory()) { for (const entry of readdirSync(path)) visit(join(path, entry)) ; return }
+      if (stat.isFile()) hash.update(path).update(readFileSync(path))
+    }
+    for (const path of [...new Set(paths)].sort()) visit(path)
+    return hash.digest('hex')
+  }
+  private async backupMaterials(): Promise<BackupMaterialSnapshot> {
+    await this.passes.idle()
+    await this.projectCoordinator.idle()
+    await this.ctx.sessionPersistence.flush()
+    const associated = this.managedBackupSessionIds()
+    const snapshots = (await this.ctx.sessionPersistence.list()).filter(snapshot => associated.has(snapshot.header.id))
+    const nativeSessions: NativeSessionArchive[] = []
+    for (const snapshot of snapshots) {
+      const handle = await this.ctx.sessionPersistence.open(snapshot.header.id as SessionId, 'read')
+      try {
+        const body = await handle.read()
+        nativeSessions.push({ id: snapshot.header.id, header: snapshot.header, inheritedEventCount: handle.inheritedEventCount ?? 0, events: body.events, revision: snapshot.revision })
+      } finally {
+        if (typeof handle.close === 'function') await handle.close()
+        else await handle[Symbol.asyncDispose]?.()
+      }
+    }
+    const workspaces = new Set<string>(), attachments = new Set<string>(), externalResources = new Set<string>()
+    for (const project of this.store.projects.list()) if (project.directory && existsSync(project.directory)) workspaces.add(project.directory)
+    for (const ticket of this.store.tickets.list()) {
+      if (ticket.execution?.directory && existsSync(ticket.execution.directory)) workspaces.add(ticket.execution.directory)
+      for (const revision of ticket.planRevisions ?? []) for (const resource of revision.resources) if (resource.startsWith('/') && existsSync(resource)) externalResources.add(resource)
+      if (ticket.projectId) for (const artifact of this.projectCoordinator.artifacts.list(ticket.projectId, ticket.id)) if (existsSync(artifact.path)) attachments.add(artifact.path)
+    }
+    for (const attempt of this.projectCoordinator.attempts.all()) {
+      for (const path of [attempt.root, attempt.cwd]) if (existsSync(path)) workspaces.add(path)
+    }
+    const roots = { workspaces: [...workspaces], attachments: [...attachments], nativeState: [], externalResources: [...externalResources] }
+    const capturedDb = this.recoveryDbToken()
+    const capturedFiles = this.recoveryFilesToken([...roots.workspaces, ...roots.attachments, ...roots.externalResources])
+    const capturedAttempts = JSON.stringify(this.projectCoordinator.attempts.all())
+    const revisions = new Map(nativeSessions.map(session => [session.id, session.revision]))
+    return {
+      roots,
+      nativeSessions,
+      consistency: 'declared-files-quiesced',
+      verify: async () => {
+        if (this.recoveryDbToken() !== capturedDb) throw new Error('Database changed during recovery capture')
+        if (JSON.stringify(this.projectCoordinator.attempts.all()) !== capturedAttempts) throw new Error('Managed worker changed during recovery capture')
+        if (this.recoveryFilesToken([...roots.workspaces, ...roots.attachments, ...roots.externalResources]) !== capturedFiles) throw new Error('Recovery files changed during capture')
+        const currentIds = this.managedBackupSessionIds()
+        for (const id of currentIds) {
+          const current = await this.ctx.sessionPersistence.stat(id as SessionId)
+          if (!current || !revisions.has(id) || JSON.stringify(current.revision) !== JSON.stringify(revisions.get(id))) throw new Error(`Managed native session changed during recovery capture: ${id}`)
+        }
+        for (const id of revisions.keys()) if (!currentIds.has(id)) throw new Error(`Managed native session disappeared during recovery capture: ${id}`)
+      }
+    }
+  }
   private async initialize(): Promise<void> {
     // Register management HTTP routes before setup completes so operators can fix setup problems in the UI.
     this.disposers.push(registerHttp(this.ctx, this.httpHost()))

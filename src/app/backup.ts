@@ -9,6 +9,7 @@ import { OLDEST_SCHEMA } from './migration.ts'
 export const RECOVERY_DATABASE = 'orchestrator.sqlite'
 export interface RecoveryFile { path: string; sha256: string; bytes: number }
 export interface RecoveryMapping { source: string; path: string; kind: 'file' | 'directory' }
+export interface NativeSessionArchive { id: string; header: unknown; inheritedEventCount: number; events: readonly unknown[]; revision?: unknown }
 export interface RecoveryManifest {
   format: 1
   createdAt: string
@@ -17,20 +18,26 @@ export interface RecoveryManifest {
   files: RecoveryFile[]
   mappings: RecoveryMapping[]
   directories: string[]
+  nativeSessions: Array<{ id: string; path: string; revision?: unknown }>
   boundaries: { workspaces: string[]; attachments: string[]; nativeState: string[]; externalResources: string[] }
   missing: string[]
   excluded: { path: string; reason: string }[]
   incomplete: string[]
   consistency: 'database-only' | 'declared-files-best-effort' | 'declared-files-quiesced'
-  restoredProfile: { execution: 'prohibited'; model: 'prohibited'; outbound: 'prohibited'; isolatedRoot: string }
+  restoredProfile: { execution: 'prohibited'; model: 'prohibited'; outbound: 'prohibited'; autoResume?: false; isolatedRoot: string; nativeArchiveRoot?: string }
 }
 export interface RecoveryOptions {
   databasePath: string
   destination: string
   roots?: { workspaces?: string[]; attachments?: string[]; nativeState?: string[]; externalResources?: string[] }
+  /** Session event logs captured through the native persistence API, never by guessing a filesystem path. */
+  nativeSessions?: NativeSessionArchive[]
   /** Additional credential/config roots to omit, even when nested in a declared file root. */
   credentialPaths?: string[]
   schemaVersion?: number
+  consistency?: 'database-only' | 'declared-files-best-effort' | 'declared-files-quiesced'
+  /** Leave INCOMPLETE until the service validates every material and promotes the point. */
+  complete?: boolean
 }
 const digest = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex')
 const statSafe = (path: string) => { try { return lstatSync(path) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error } }
@@ -66,8 +73,8 @@ export function createRecoveryPoint(store: Store, options: RecoveryOptions): Rec
   const files: RecoveryFile[] = [{ path: RECOVERY_DATABASE, sha256: digest(database), bytes: statSync(database).size }]
   const manifest: RecoveryManifest = {
     format: 1, createdAt: new Date().toISOString(), schemaVersion: options.schemaVersion ?? SCHEMA_VERSION,
-    consistency: declared.length ? 'declared-files-best-effort' : 'database-only',
-    database: { file: RECOVERY_DATABASE, walIncluded: true, sha256: files[0]!.sha256 }, files, mappings: [], directories: [],
+    consistency: options.consistency ?? (declared.length || options.nativeSessions?.length ? 'declared-files-best-effort' : 'database-only'),
+    database: { file: RECOVERY_DATABASE, walIncluded: true, sha256: files[0]!.sha256 }, files, mappings: [], directories: [], nativeSessions: [],
     boundaries: { workspaces: roots.workspaces ?? [], attachments: roots.attachments ?? [], nativeState: roots.nativeState ?? [], externalResources: roots.externalResources ?? [] },
     missing: [], excluded: [], incomplete: [],
     restoredProfile: { execution: 'prohibited', model: 'prohibited', outbound: 'prohibited', isolatedRoot: '' },
@@ -100,15 +107,34 @@ export function createRecoveryPoint(store: Store, options: RecoveryOptions): Rec
     copy(root, join(destination, path))
     if (statSafe(join(destination, path))) manifest.mappings.push({ source: root, path, kind: stat.isDirectory() ? 'directory' : 'file' })
   }
+  for (const session of options.nativeSessions ?? []) {
+    if (!session.id || !Number.isSafeInteger(session.inheritedEventCount) || session.inheritedEventCount < 0 || !Array.isArray(session.events)) {
+      manifest.incomplete.push(`native-session:${session.id || 'unknown'}`); continue
+    }
+    const path = join('native-sessions', `${managedName(`session:${session.id}`)}.json`)
+    mkdirSync(dirname(join(destination, path)), { recursive: true, mode: 0o700 })
+    writeFileSync(join(destination, path), JSON.stringify(session), { mode: 0o600 })
+    const entry = { path, sha256: digest(join(destination, path)), bytes: statSync(join(destination, path)).size }
+    files.push(entry); manifest.mappings.push({ source: `native-session:${session.id}`, path, kind: 'file' })
+    manifest.nativeSessions.push({ id: session.id, path, ...(session.revision === undefined ? {} : { revision: session.revision }) })
+  }
+  if (manifest.missing.length || manifest.incomplete.length) {
+    if (manifest.consistency === 'declared-files-quiesced') manifest.consistency = 'declared-files-best-effort'
+  }
   writeFileSync(join(destination, 'manifest.json.tmp'), JSON.stringify(manifest, null, 2), { mode: 0o600 })
   renameSync(join(destination, 'manifest.json.tmp'), join(destination, 'manifest.json'))
-  if (!manifest.missing.length && !manifest.incomplete.length) unlinkSync(marker)
+  if (options.complete !== false && !manifest.missing.length && !manifest.incomplete.length) unlinkSync(marker)
   return manifest
 }
+/** Promotes an already verified point after every asynchronous material check has passed. */
+export function finalizeRecoveryPoint(destination: string, manifest: RecoveryManifest): void {
+  if (manifest.missing.length || manifest.incomplete.length) throw new Error('Cannot finalize an incomplete recovery point')
+  unlinkSync(join(destination, 'INCOMPLETE'))
+}
 /** Verifies a recovery point before it becomes visible to retention or restore. */
-export function verifyRecoveryPoint(source: string, expected?: RecoveryManifest): RecoveryManifest {
+export function verifyRecoveryPoint(source: string, expected?: RecoveryManifest, options: { allowIncompleteMarker?: boolean } = {}): RecoveryManifest {
   const root = realpathSync(resolve(source))
-  if (existsSync(join(root, 'INCOMPLETE'))) throw new Error('Recovery point is incomplete')
+  if (!options.allowIncompleteMarker && existsSync(join(root, 'INCOMPLETE'))) throw new Error('Recovery point is incomplete')
   const manifest = JSON.parse(readFileSync(confined(root, 'manifest.json'), 'utf8')) as RecoveryManifest
   if (manifest.format !== 1 || manifest.schemaVersion < OLDEST_SCHEMA || manifest.schemaVersion > SCHEMA_VERSION || manifest.missing.length || manifest.incomplete.length || !manifest.database?.walIncluded) {
     throw new Error('Invalid or incomplete recovery manifest')
@@ -155,7 +181,7 @@ export function restoreRecoveryPoint(source: string, destination: string): Recov
   const mapped = new Set<string>()
   for (const mapping of manifest.mappings) {
     const path = confined(sourceRoot, mapping.path)
-    if (!mapping.path.startsWith('managed-files/') || mapping.path.split('/').some(credentialName) || mapping.source.split(sep).some(credentialName) || mapped.has(mapping.path) || !['file', 'directory'].includes(mapping.kind)) throw new Error('Invalid recovery file mapping')
+    if ((!mapping.path.startsWith('managed-files/') && !mapping.path.startsWith('native-sessions/')) || mapping.path.split('/').some(credentialName) || mapping.source.split(sep).some(credentialName) || mapped.has(mapping.path) || !['file', 'directory'].includes(mapping.kind)) throw new Error('Invalid recovery file mapping')
     mapped.add(mapping.path)
     if (mapping.kind === 'file' ? !paths.has(mapping.path) : !statSafe(path)?.isDirectory()) throw new Error('Missing recovery file mapping')
   }
@@ -175,24 +201,47 @@ export function restoreRecoveryPoint(source: string, destination: string): Recov
   }
   const restoredDb = new DatabaseSync(join(target, RECOVERY_DATABASE))
   try {
-    const rows = restoredDb.prepare('SELECT id, value FROM worker_artifact').all() as { id: string; value: string }[]
-    for (const row of rows) {
-      const artifact = JSON.parse(row.value) as { path?: string }
-      if (!artifact.path) continue
-      const artifactPath = resolve(artifact.path)
-      for (const mapping of manifest.mappings.filter(item => item.kind === 'directory')) {
-        const source = resolve(mapping.source)
-        const sourceCandidates = source.startsWith('/var/') ? [source, `/private${source}`] : [source]
-        const matchedSource = sourceCandidates.find(candidate => within(candidate, artifactPath))
-        if (matchedSource) {
-          artifact.path = join(realpathSync(target), mapping.path, relative(matchedSource, artifactPath))
-          break
-        }
+    const destinationRoot = realpathSync(target)
+    const sourceCandidates = (source: string) => {
+      const resolved = resolve(source)
+      if (resolved.startsWith('/private/var/') || resolved.startsWith('/private/tmp/')) return [resolved, resolved.slice('/private'.length)]
+      if (resolved.startsWith('/var/') || resolved.startsWith('/tmp/')) return [resolved, `/private${resolved}`]
+      return [resolved]
+    }
+    const relocate = (value: string): string => {
+      if (!isAbsolute(value)) return value
+      for (const mapping of manifest.mappings) {
+        if (mapping.source.startsWith('native-session:')) continue
+        const matchedSource = sourceCandidates(mapping.source).find(candidate => within(candidate, resolve(value)))
+        if (!matchedSource) continue
+        return join(destinationRoot, mapping.path, mapping.kind === 'directory' ? relative(matchedSource, resolve(value)) : '')
       }
-      restoredDb.prepare('UPDATE worker_artifact SET value = ? WHERE id = ?').run(JSON.stringify(artifact), row.id)
+      return value
+    }
+    const rewrite = (value: unknown, key = ''): unknown => {
+      if (typeof value === 'string' && ['path', 'directory', 'cwd', 'root', 'realpath'].includes(key)) return relocate(value)
+      if (Array.isArray(value)) return value.map(item => rewrite(item, key))
+      if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, rewrite(item, name)]))
+      return value
+    }
+    const rewriteRows = (table: string) => {
+      const rows = restoredDb.prepare(`SELECT id, value FROM ${table}`).all() as { id: string; value: string }[]
+      const update = restoredDb.prepare(`UPDATE ${table} SET value = ? WHERE id = ?`)
+      for (const row of rows) update.run(JSON.stringify(rewrite(JSON.parse(row.value))), row.id)
+    }
+    for (const table of ['worker_artifact', 'worker_report', 'execution_attempt', 'ticket', 'project']) rewriteRows(table)
+    const mappings = restoredDb.prepare('SELECT project_id, generation, cwd FROM conversation_mapping').all() as { project_id: string; generation: number; cwd: string }[]
+    const updateMapping = restoredDb.prepare('UPDATE conversation_mapping SET cwd = ? WHERE project_id = ? AND generation = ?')
+    for (const mapping of mappings) updateMapping.run(relocate(mapping.cwd), mapping.project_id, mapping.generation)
+    for (const session of manifest.nativeSessions ?? []) {
+      const archivePath = join(target, session.path)
+      const archive = JSON.parse(readFileSync(archivePath, 'utf8')) as { header: unknown }
+      archive.header = rewrite(archive.header)
+      writeFileSync(archivePath, JSON.stringify(archive), { mode: 0o600 })
     }
   } finally { restoredDb.close() }
-  const restored: RecoveryManifest = { ...manifest, restoredProfile: { execution: 'prohibited', model: 'prohibited', outbound: 'prohibited', isolatedRoot: target } }
+  const restored: RecoveryManifest = { ...manifest, restoredProfile: { execution: 'prohibited', model: 'prohibited', outbound: 'prohibited', isolatedRoot: target,
+    ...(manifest.nativeSessions?.length ? { autoResume: false as const, nativeArchiveRoot: join(target, 'native-sessions') } : {}) } }
   writeFileSync(join(target, 'manifest.json'), JSON.stringify(restored, null, 2), { mode: 0o600 }); unlinkSync(join(target, 'INCOMPLETE'))
   return restored
 }

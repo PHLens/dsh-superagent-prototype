@@ -485,6 +485,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/backup.spec.ts` | WAL-inclusive recovery snapshots, credential exclusions, incomplete capture markers, confined hash-verified restore and inert recovery profile |
 | `tests/backup-service.spec.ts` | Scheduler replacement, concurrent run coalescing, retention configuration and stopped-service behavior |
 | `tests/t5-backup-attention-runtime-review.spec.ts` | Runtime backup material restore, safe-restore fencing and exactly-once Attention continuation review boundaries |
+| `tests/t5-recovery-completeness.spec.ts` | Detached two-project native and file recovery, cross-file capture rejection and tmp aliases |
+| `tests/t5-question-completion-gate.spec.ts` | Unanswered worker Attention blocks server completion despite ready self-report |
 | `tests/t5-attention-continuation.spec.ts` | Bound Question operation receipts, authoritative answers, serialized continuation delivery and restart recovery |
 | `tests/projects.spec.ts` | Project identity and Ticket/Assignment ownership; unauthorized drafts never execute |
 | `tests/no-github-startup.spec.ts` | Startup and application project APIs without external accounts; resource-specific readiness and safe environment |
