@@ -342,8 +342,13 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/project-store.ts` | SQLite project repository with stable ids; project lifecycle stays in the core service |
 | `src/app/conversation-store.ts` | Durable owned business conversation, input idempotency, per-project leases, mapping generations and prompt checkpoints |
 | `src/app/project-coordinator.ts` | Independent project discussion lanes, restart reconciliation, retry and coordinator lifecycle |
-| `src/app/project-progress.ts` | Root-owned project task progress projection helpers |
+| `src/app/project-progress.ts` | Read-only task progress projection; reviewer targets resolve within their authorization's current graph, with conclusions bound to the current attempt, report, registered artifacts and conditions |
+| `src/app/events.ts` | Durable transactional project event facts and coalesced consumption |
+| `src/app/scheduler.ts` | Project-aware model, worker and background scheduling status; owned native Session exit facts rebuild unknown physical occupancy even after JobView retention, and later positive acknowledgement releases it |
+| `src/core/dependencies.ts` | Assignment graph validation, readiness and dependency planning |
+| `src/core/assignment-graphs.ts` | Immutable authorized graph versions, current necessary work, scope and cost-slot validation, and fixed input lineage |
 | `src/app/project-plans.ts` | Authenticated project-plan adapter: persisted confirmation evidence, plan version anchoring, authorization and Assignment projection |
+| `src/app/project-facts.ts` | Authorized bounded coordinator facts, exact report/decision/artifact reads, and explicit pagination |
 | `src/app/execution-attempts.ts` | Server-owned Assignment execution identity, preparation evidence, filesystem boundaries and lease validation |
 | `src/app/artifact-store.ts` | Managed write intents, immutable SHA256 file versions, exact-version reads and interrupted-operation reconciliation |
 | `src/app/report-acceptance.ts` | Durable worker report receipts, independent version-bound acceptance decisions and deterministic completion returns |
@@ -435,6 +440,10 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 ## Tests
 
+Project coordinator operations use a finite 300-second default, including model turns, feedback and recovery waits. Actual planning required 155.6 seconds to save a valid draft after two rejected calls, and its final reply exceeded the previous 180-second bound. Tool calls do not reset the timer. Timeout still cancels the Session, revokes its input lease and rejects late writes; it does not authorize replay of a committed plan.
+
+Project context and fact tools omit absent optional properties from their returned objects. The native tool runtime validates canonical JSON before rendering text; `JSON.stringify` in a renderer cannot repair an `undefined` property rejected at that earlier boundary. This projection preserves registered review targets, artifact versions and ownership checks without changing native validation.
+
 | Test | Covers |
 | --- | --- |
 | `tests/plans.spec.ts` | Immutable plan revision service and save-operation conflicts |
@@ -471,11 +480,34 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/project-store.spec.ts` | Project persistence, restart, rename/directory identity, isolation and transactional rollback |
 | `tests/project-conversation.spec.ts` | Business input/reply persistence, idempotency, ownership and project lane isolation |
 | `tests/coordinator-recovery.spec.ts` | Mapping replacement, prompt restart persistence and stale-generation/state rejection |
-| `tests/project-coordinator.spec.ts` | Project lane concurrency, durable dispatch, retry races and restart recovery |
+| `tests/project-coordinator.spec.ts` | Project lane concurrency, durable dispatch, retry races, restart recovery, 300s bounded multi-step planning and late authorization fencing |
+| `tests/t6-actual-planning.spec.ts` | Actual rejected four-node tool payload, atomic structural rejection, repaired draft replay/conflict, one-confirmation graph and serialized missing-field feedback |
+| `tests/project-tool-json.spec.ts` | Actual rc.5 tool output validation of ordinary/reviewer context, absent/current facts, report pages, draft listings and ownership rejection |
 | `tests/project-progress.spec.ts` | Read-only project progress projection, exact attempt/report/artifact gates and lifecycle phases |
 | `tests/project-session.spec.ts` | Completed durable turn projection, interrupted draft exclusion and Session message references |
 | `tests/project-auth.spec.ts` | Host admission, stable owner identity, authentication rejection and unavailable-host denial |
 | `tests/project-panel.spec.tsx` | Project creation, navigation, durable discussion, immutable artifact content and explicit semantic review |
+| `tests/project-assignments-panel.spec.tsx` | One-confirmation decomposition preview, all-Assignment progress, current-version gates, branch questions and read-only controls |
+| `tests/task-decomposition.spec.ts` | Atomic multi-Assignment confirmation, dependency acceptance, registration replay and cycle rejection |
+| `tests/assignment-dependencies.spec.ts` | Current submitted review receipts, bound decisions, stale reports and accepted downstream artifact snapshots |
+| `tests/assignment-graph-revisions.spec.ts` | Authorized pending graph changes, immutable execution/history, operation replay, cost/retry/resource bounds and coordinator lease fences |
+| `tests/t6-independent-graph-boundaries.spec.ts` | Independent graph replay, rerun, historical locks, authorization isolation and final lease checks |
+| `tests/t6-graph-consumers.spec.ts` | Current graph file-receipt completion, exact report replay, progress selection and stale assignment allocation rejection |
+| `tests/project-facts.spec.ts` | Current report context, immutable artifact paging, project/task/actor/version fences |
+| `tests/t6-feedback-context-review.spec.ts` | Feedback context facts, bounded task coalescing, and read-tool availability |
+| `tests/t6-feedback-state-advance-review.spec.ts` | Safe feedback recovery after project state advancement and stale abandoned leases |
+| `tests/t6-final-facts-boundaries.spec.ts` | Fresh retry fact isolation and stable Assignment pagination snapshots |
+| `tests/t6-final-exit-projection.spec.ts` | Unknown physical exit fencing, reviewer target projection and legacy worker budget admission |
+| `tests/t6-plugin-activation.spec.ts` | Real entry-point Cordis activation with the public `jobs` dependency available to managed budgeting |
+| `tests/t6-final-57cdecb-native-exit.spec.ts` | rc.5 Session settlement truth retained across JobView removal and observer reconstruction |
+| `tests/t6-final-54906f-positive-notification.spec.ts` | Positive settlement replay folds prior unknown history before notifying current uncertainty |
+| `tests/t6-final-57cdecb-regressions.spec.ts` | Same-key rerun authorization isolation and complete Assignment contentVersion pagination |
+| `tests/t6-feedback-recovery-review.spec.ts` | Durable feedback native receipts, commit rollback, generation replacement, lease revocation, backoff and coordinator error recovery |
+| `tests/t6-fixed-review-boundaries.spec.ts` | Independent Runtime/SQLite review boundaries for decomposition, physical settlement, reconciliation, judgment feedback and project fairness |
+| `tests/t6-integration-budget-preflight.spec.ts` | Runtime coordinator model sharing and single worker reservation across asynchronous preparation |
+| `tests/t6-warm-budget-preflight.spec.ts` | Warm resume admission under another project's unknown physical owner budget occupancy |
+| `tests/t6-budget-projection-preflight.spec.ts` | Runtime model queue reason projection and clearing without overwriting semantic waits |
+| `tests/project-scheduler.spec.ts` | Shared model/worker/background budget admission, fairness, cancellation and live owner settlement |
 | `tests/project-execution.spec.ts` | Authorized worker context, file acceptance, independent owner decisions, terminal receipt replay and stale execution rejection |
 | `tests/artifact-recovery.spec.ts` | Interrupted write intent/effect reconciliation, fixed input versions, corruption/isolation rejection and durable returns after reopen |
 | `tests/project-worker-runtime.spec.ts` | Registered native tools with Session guards, shared worker slots and completed confirmation replay/explicit rerun through the coordinator |

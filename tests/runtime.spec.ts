@@ -154,7 +154,7 @@ beforeEach(async () => {
     [SCOPED]: `global\0credential.helper\n\0global\0credential.https://github.com.helper\n${credentialHelper(AGENT())}\0`,
   }
   const ctx = new Context()
-  agents = new Map()
+  agents = Object.assign(new Map(), { currentInitiator: () => undefined })
   tools = new Map()
   sections = new Map()
   guards = new Map()

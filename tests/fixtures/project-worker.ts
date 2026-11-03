@@ -9,7 +9,7 @@ import { ArtifactStore } from '../../src/app/artifact-store.ts'
 import { ReportAcceptance, type FileReport } from '../../src/app/report-acceptance.ts'
 import type { PlanContent } from '../../src/core/index.ts'
 
-export function workerFixture(directory: string, acceptance?: PlanContent['acceptance']) {
+export function workerFixture(directory: string, acceptance?: PlanContent['acceptance'], assignments?: PlanContent['assignments']) {
   const store = new Store(join(directory, 'project.sqlite'))
   const projects = new Projects({ repo: store })
   const conversations = new ConversationStore(store)
@@ -18,7 +18,7 @@ export function workerFixture(directory: string, acceptance?: PlanContent['accep
   conversations.appendUser(project.id, 'owner', { clientRequestKey: 'original', text: 'Write a sourced note, without GitHub' })
   const plans = new ProjectPlans(store, projects, conversations)
   const plan = plans.save('owner', project.id, { expectedRevision: 0, operationId: 'draft', plan: {
-    goal: 'Sourced note', scope: 'A Markdown file', outputs: ['note'], resources: [], environment: 'Managed file worker', cost: 'One worker', completion: 'A nonempty sourced note', ...(acceptance ? { acceptance } : {}),
+    goal: 'Sourced note', scope: 'A Markdown file', outputs: ['note'], resources: [], environment: 'Managed file worker', cost: 'One worker', completion: 'A nonempty sourced note', ...(acceptance ? { acceptance } : {}), ...(assignments ? { assignments } : {}),
   } })
   conversations.appendUser(project.id, 'owner', { clientRequestKey: 'confirm', text: '按这个方案做' })
   const confirmed = plans.confirm('owner', project.id, { projectId: project.id, ticketId: plan.ticketId, planRevision: 1, operationId: 'confirm', intent: 'execute' })

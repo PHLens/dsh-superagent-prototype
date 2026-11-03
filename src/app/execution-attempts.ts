@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { lstatSync, mkdirSync, realpathSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, isAbsolute } from 'node:path'
 import type { Assignment, Ticket } from '../core/index.ts'
+import { activeAssignmentByKey, isActivePlanAssignment } from '../core/assignment-graphs.ts'
 import type { Store } from './store.ts'
 
 export const EXECUTION_SCHEMA_SQL = `
@@ -13,10 +14,13 @@ CREATE TABLE IF NOT EXISTS acceptance_decision (id TEXT PRIMARY KEY, ticket_id T
 `
 export interface Attempt {
   id: string; projectId: string; ticketId: string; assignmentId: string; lease: string; sessionId: string
-  workspaceId?: string; cwd: string; root: string; status: 'preparing' | 'prepared' | 'running' | 'ended' | 'reconcile'
+  workspaceId?: string; cwd: string; root: string; status: 'preparing' | 'prepared' | 'running' | 'settling' | 'ended' | 'reconcile'
   prepare?: { realpath: string; at: string; method: 'managed-empty-directory-v1' }
   fenced?: true
   context?: { toolContractVersion?: number; promptRevision: number; roleRules: string; projectConventions: string; model: unknown; tools: string[]; resources: readonly string[]; skills: { name: string; version: string }[] }
+  /** Immutable artifact versions consumed when this attempt was admitted. */
+  inputs?: readonly { artifactId: string; contentVersion: string; assignmentId?: string; reportId?: string }[]
+  reviewTarget?: { assignmentId: string; attemptId: string; lease: string; reportId: string; conditionsVersion: number; artifacts: { id: string; contentVersion: string }[] }
   createdAt: string; error?: string
 }
 export function contained(root: string, target: string): boolean {
@@ -51,8 +55,8 @@ export class ExecutionAttempts {
     const newest = this.all().findLast(item => item.assignmentId === attempt?.assignmentId)
     const lifecycleBlocked = ticket?.lifecycle && (ticket.lifecycle.pause.intent === 'pause' || ticket.lifecycle.stop.intent === 'stop')
     if (!attempt || !ticket || !assignment?.contract || (!receipt && (ticket.ended || lifecycleBlocked)) || ticket.projectId !== attempt.projectId || assignment.projectId !== attempt.projectId
-      || assignment.ticketId !== ticket.id || (!receipt && assignment.state === 'ended') || !auth || auth.revokedAt || attempt.fenced || newest?.lease !== attempt.lease
-      || !(receipt ? ['prepared', 'running', 'ended'] : ['prepared', 'running']).includes(attempt.status)) throw new Error('Stale or unauthorized worker execution')
+      || assignment.ticketId !== ticket.id || (!receipt && (assignment.state === 'ended' || !isActivePlanAssignment(ticket, assignment.id))) || !auth || auth.revokedAt || attempt.fenced || newest?.lease !== attempt.lease
+      || !(receipt ? ['prepared', 'running', 'settling', 'ended'] : ['prepared', 'running']).includes(attempt.status)) throw new Error('Stale or unauthorized worker execution')
     this.validateDirectory(attempt)
     return { attempt, ticket, assignment }
   }
@@ -62,15 +66,43 @@ export class ExecutionAttempts {
   }
   allocate(ticket: Ticket, assignment: Assignment, options: { fresh?: boolean } = {}): Attempt {
     const auth = ticket.authorizations?.find(item => item.id === assignment.contract?.authorizationId)
-    if (!ticket.projectId || !assignment.contract || !auth || auth.revokedAt || ticket.ended || assignment.state === 'ended') throw new Error('Assignment is not authorized')
+    if (!ticket.projectId || !assignment.contract || !auth || auth.revokedAt || ticket.ended || assignment.state === 'ended' || !isActivePlanAssignment(ticket, assignment.id)) throw new Error('Assignment is not authorized')
     const previous = this.all().findLast(item => item.assignmentId === assignment.id)
     if (previous && !options.fresh) return previous
+    const inputs: NonNullable<Attempt['inputs']>[number][] = []
+    let reviewTarget: Attempt['reviewTarget']
+    const review = assignment.contract.proposal?.review
+    if (review) {
+      const target = activeAssignmentByKey(ticket, assignment.contract.authorizationId, review.target)
+      const attempt = target && this.all().findLast(item => item.assignmentId === target.id)
+      const row = attempt && this.store.db.prepare('SELECT value FROM worker_report WHERE attempt_id=? ORDER BY rowid DESC LIMIT 1').get(attempt.id)
+      const report = row && JSON.parse(String(row.value)) as { id: string; state: string; artifacts: { id: string; contentVersion: string }[] } | undefined
+      if (!target || !attempt || attempt.fenced || attempt.status === 'reconcile' || !report || report.state !== 'ready'
+        || review.conditionsVersion !== (target.contract!.plan.acceptance?.version ?? target.contract!.planRevision)) throw new Error('Review target is not ready at the registered conditions version')
+      reviewTarget = { assignmentId: target.id, attemptId: attempt.id, lease: attempt.lease, reportId: report.id, conditionsVersion: review.conditionsVersion, artifacts: report.artifacts }
+      for (const artifact of report.artifacts) inputs.push({ artifactId: artifact.id, contentVersion: artifact.contentVersion, assignmentId: target.id, reportId: report.id })
+    }
+
+    for (const ref of assignment.contract.inputs) {
+      if (ref.kind === 'artifact') { inputs.push({ artifactId: ref.artifactId, contentVersion: ref.contentVersion }); continue }
+      if (ref.assignmentId === reviewTarget?.assignmentId) continue
+      const upstream = ticket.assignments.find(item => item.id === ref.assignmentId)
+      if (ref.ticketId !== ticket.id || upstream?.state !== 'ended' || upstream.endedReason !== 'accepted') throw new Error('Assignment dependency is not accepted')
+      const upstreamAttempt = this.all().findLast(item => item.assignmentId === upstream.id && !item.fenced)
+      const report = this.store.db.prepare('SELECT value FROM worker_report WHERE attempt_id=? ORDER BY rowid DESC LIMIT 1').get(upstreamAttempt?.id ?? '')
+      const result = report && JSON.parse(String(report.value)) as { id: string; state: string; artifacts: { id: string; contentVersion: string }[] } | undefined
+      if (!result || result.state !== 'ready') throw new Error('Assignment dependency has no current ready report')
+      for (const artifact of result.artifacts) {
+        if (!this.store.registeredArtifact(ticket.projectId, artifact.id, artifact.contentVersion)) throw new Error('Dependency artifact version is unavailable')
+        inputs.push({ artifactId: artifact.id, contentVersion: artifact.contentVersion, assignmentId: upstream.id, reportId: result.id })
+      }
+    }
     const projectRoot = join(this.stateDir, 'projects', ticket.projectId)
     managedDirectory(this.stateDir, projectRoot)
     const root = realpathSync(projectRoot)
     if (!contained(realpathSync(this.stateDir), root)) throw new Error('Project root escaped state directory')
     const id = randomUUID(), attempt: Attempt = { id, projectId: ticket.projectId, ticketId: ticket.id, assignmentId: assignment.id,
-      lease: randomUUID(), sessionId: `project-worker-${randomUUID()}`, root, cwd: join(root, 'executions', id), status: 'preparing', createdAt: new Date().toISOString() }
+      lease: randomUUID(), sessionId: `project-worker-${randomUUID()}`, root, cwd: join(root, 'executions', id), status: 'preparing', inputs, reviewTarget, createdAt: new Date().toISOString() }
     this.store.atomic(() => this.save(attempt))
     return attempt
   }

@@ -209,7 +209,7 @@ export class Tickets extends EnginePart {
   }
   /** Saves an answer against an exact question version before any continuation is requested. */
   answerAttention(ticketId: string, version: number, actor: ActorRef, source: string, text: string, questionId: string): { answer: AttentionAnswer; resolved: boolean } {
-    const ticket = this.require(ticketId), attention = ticket.attention
+    const ticket = this.require(ticketId), attention = ticket.attentionQuestions?.find(item => item.id === questionId) ?? (ticket.attention?.id === questionId ? ticket.attention : undefined)
     const history = ticket.attentionHistory?.find(item => item.version === version && item.id === questionId)
     if (history || !attention) {
       const prior = history?.answers.find(item => !item.conflict)
@@ -230,9 +230,14 @@ export class Tickets extends EnginePart {
     if (prior) { ticket.updatedAt = at; this.repo.tickets.save(ticket); return { answer, resolved: false } }
     attention.resolvedAt = at; attention.answers = [answer]; ticket.answers = [...ticket.answers ?? [], answer.id]
     ticket.attentionHistory = [...ticket.attentionHistory ?? [], { ...attention, version, answers: [...attention.answers], resolvedAt: at }]
-    delete ticket.attention
+    if (ticket.attentionQuestions) {
+      ticket.attentionQuestions = ticket.attentionQuestions.filter(item => item.id !== attention.id)
+      if (!ticket.attentionQuestions.length) delete ticket.attentionQuestions
+    }
+    if (ticket.attention?.id === attention.id) delete ticket.attention
      const lifecycle = this.lifecycle(ticket)
      lifecycle.attentionContinuation = { answerId: answer.id, answerText: answer.text, questionId: attention.id, version, ...attention.binding }
+     lifecycle.attentionContinuations = [...lifecycle.attentionContinuations ?? [], lifecycle.attentionContinuation]
      ticket.lifecycle = lifecycle; ticket.updatedAt = at
     this.repo.tickets.save(ticket); return { answer, resolved: true }
   }
@@ -245,6 +250,19 @@ export class Tickets extends EnginePart {
    */
   retry(ticketId: string): Ticket {
     const ticket = this.require(ticketId)
+    if (ticket.projectId && !ticket.ended && ticket.lifecycle?.pause.intent !== 'pause' && ticket.lifecycle?.stop.intent !== 'stop') {
+      const retryable = ticket.assignments.filter(item => item.contract && (item.waitingReason === 'failed' || item.waitingReason === 'blocked'))
+      if (retryable.length) {
+        for (const branch of retryable) {
+          branch.state = 'pending'; branch.waitingReason = 'retrying'
+          delete branch.report; delete branch.reportReceipt; delete branch.startedAt; delete branch.endedAt; delete branch.endedReason
+          this.requeueUntaken(ticket, branch)
+        }
+        ticket.updatedAt = this.now(); this.repo.tickets.save(ticket)
+        for (const branch of retryable) { this.options.executor.stop(ticket, branch, 'retried'); this.options.executor.start(ticket, branch) }
+        return ticket
+      }
+    }
     const latest = latestAssignment(ticket)
     if (!canRetry(ticket) || !latest) throw new UserError('notRetryable')
     if (ticket.projectId && latest.contract) {

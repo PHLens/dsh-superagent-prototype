@@ -17,6 +17,15 @@ function setup(repo: ProjectRepositories = new MemoryRepositories()) {
 }
 
 describe('Plans revisions', () => {
+  it('returns bounded structural feedback while preserving exact resource and review gates', () => {
+    const { plans, scope, repo } = setup()
+    const investigation = (key: string, resource: string) => ({ key, goal: `Investigate ${key}`, outputs: [`${key}.md`], resources: [resource], dependencies: [], completion: `Complete ${key}`, cost: 'One worker', writeScope: 'isolated-directory' as const, acceptance: { version: 1, mode: 'registered-files' as const } })
+    const rejected = { ...plan, outputs: ['a.md', 'synthesis.md'], acceptance: { version: 1, mode: 'human-review' as const }, resources: ['canonical fact'], assignments: [investigation('a', 'paraphrased fact'), { ...investigation('synthesis', 'canonical fact'), outputs: ['synthesis.md'], dependencies: ['a'], acceptance: { version: 1, mode: 'registered-files' as const } }] }
+    expect(() => plans.save({ ...scope, expectedRevision: 0, plan: rejected })).toThrow(/undeclared resource|needs human-review acceptance|targeting/)
+    expect(repo.tickets.get(scope.ticketId)?.planRevisions).toBeUndefined()
+    const valid = { ...plan, outputs: ['a.md', 'synthesis.md', 'review.md'], acceptance: { version: 1, mode: 'registered-files' as const }, resources: ['canonical fact'], assignments: [investigation('a', 'canonical fact'), { ...investigation('synthesis', 'canonical fact'), outputs: ['synthesis.md'], dependencies: ['a'], acceptance: { version: 1, mode: 'human-review' as const } }, { ...investigation('review', 'canonical fact'), outputs: ['review.md'], dependencies: ['synthesis'], review: { target: 'synthesis', conditionsVersion: 1 } }] }
+    expect(plans.save({ ...scope, expectedRevision: 0, plan: valid }).revision).toBe(1)
+  })
   it('attaches immutable complete revisions to the existing project Ticket', () => {
     const { repo, plans, scope } = setup()
     const mutable = structuredClone(plan) as { -readonly [K in keyof PlanContent]: PlanContent[K] }

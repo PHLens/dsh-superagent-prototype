@@ -10,3 +10,6 @@ export { Projects, type ProjectServiceOptions, type CreateProject, type UpdatePr
 export { Plans, type PlanServiceOptions, type SavePlan, type ConfirmPlan, type RevokePlan, type RegisterPlanAssignment, type PlanConfirmationResult } from './plans.ts'
 export { canRetry, ticketStage, type TicketStage } from './stage.ts'
 export { key } from './ids.ts'
+export { validateAssignmentGraph, assignmentReady, planAssignments, type DependencyResult } from './dependencies.ts'
+
+export * from './assignment-graphs.ts'

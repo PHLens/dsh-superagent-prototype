@@ -34,28 +34,34 @@ export function projectWorkerTools(attempts: ExecutionAttempts, artifacts: Artif
       return { question: previous.question }
     }
     const { attempt, assignment, ticket } = attempts.resolve(sessionId)
-    if (ticket.assignments.findLast(item => item.contract && item.state !== 'ended')?.id !== assignment.id) throw new Error('Stale worker Assignment')
-    if (ticket.lifecycle?.attentionContinuation && !ticket.lifecycle.attentionContinuation.deliveredAt) throw new Error('The previous answer is awaiting continuation')
+    if (!ticket.assignments.some(item => item.id === assignment.id && item.contract && item.state !== 'ended')) throw new Error('Stale worker Assignment')
     const binding = { assignmentId: assignment.id, attemptId: attempt.id, lease: attempt.lease, sessionId }
     const version = (ticket.attentionSequence ?? ticket.attention?.version ?? 0) + 1
     const question = { id: key('attention', ticket.id, String(version)), version, question: args.question, binding }
     const at = new Date().toISOString()
-    ticket.attention = question; ticket.attentionSequence = version
+    ticket.attention ??= question
+    ticket.attentionQuestions = [...ticket.attentionQuestions ?? [], question]
+    ticket.attentionSequence = version
     ticket.attentionQuestionOperations = [...ticket.attentionQuestionOperations ?? [], { operationId: args.operation_id, binding, question }]
     assignment.report = { state: 'progress', summary: `Waiting for owner answer: ${args.question}`, at }
     ticket.updatedAt = at
     attempts.store.tickets.save(ticket)
     return { question }
   }) }))
+  if (attempts.bySession(sessionId)?.reviewTarget) tools.push(tool({ name: 'project_worker_decide', description: 'Submit an independent version-bound judgment for your server-registered review target. A ready review report is not a gate decision. Read reviewTarget in context; use changes_required or needs_judgment when the content does not satisfy its conditions.', schema: z.object({ operation_id: z.string().min(1), report_id: z.string().min(1), conclusion: z.enum(['passed', 'changes_required', 'needs_judgment']), evidence: z.string().min(1) }).strict(), execute: async args => reports.decideWorker(sessionId, { operationId: args.operation_id, reportId: args.report_id, conclusion: args.conclusion, evidence: args.evidence }) }))
   return [...tools,
     tool({ name: 'project_worker_context', description: 'Read the immutable authorized plan, saved originalMessage for the original request language, pinned inputs and registered artifacts. Identity and originalMessage come only from this native Session Assignment authorization, never conversation history.', schema: z.object({}).strict(), execute: async () => {
       const { attempt, assignment, ticket } = attempts.resolve(sessionId)
       const authorization = ticket.authorizations?.find(item => item.id === assignment.contract!.authorizationId)
-      return { plan: assignment.contract!.plan, originalMessage: authorization?.originalMessage, inputs: assignment.contract!.inputs, outputs: artifacts.view(attempt.projectId).filter(item => item.ticketId === attempt.ticketId), context: attempt.context }
+      return { plan: assignment.contract!.plan, inputs: assignment.contract!.inputs, pinnedInputs: attempt.inputs ?? [],
+        ...(authorization?.originalMessage ? { originalMessage: authorization.originalMessage } : {}),
+        ...(attempt.reviewTarget ? { reviewTarget: attempt.reviewTarget } : {}),
+        outputs: artifacts.view(attempt.projectId).filter(item => item.ticketId === attempt.ticketId),
+        ...(attempt.context ? { context: attempt.context } : {}) }
     } }),
     tool({ name: 'project_read_input', description: 'Read only an exact artifact content version pinned in this Assignment input contract.', schema: z.object({ id: z.string(), contentVersion: z.string() }).strict(), execute: async args => {
       const { attempt, assignment } = attempts.resolve(sessionId)
-      if (!assignment.contract!.inputs.some(item => item.kind === 'artifact' && item.artifactId === args.id && item.contentVersion === args.contentVersion)) throw new Error('Artifact input is not pinned in this contract')
+      if (!attempt.inputs?.some(item => item.artifactId === args.id && item.contentVersion === args.contentVersion) && !assignment.contract!.inputs.some(item => item.kind === 'artifact' && item.artifactId === args.id && item.contentVersion === args.contentVersion)) throw new Error('Artifact input is not pinned in this contract')
       const item = artifacts.read(attempt.projectId, args.id, args.contentVersion)
       return { id: item.id, contentVersion: item.contentVersion, name: item.name, content: item.content }
     } }),

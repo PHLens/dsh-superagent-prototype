@@ -7,6 +7,8 @@ import { errorText } from './text.ts'
 import { Hint, LoadState } from './widgets.tsx'
 import { TaskLifecycle } from './task-lifecycle.tsx'
 
+const budgetLabels = { 'global-budget': 'assignmentBudgetGlobal', 'project-fairness': 'assignmentBudgetFairness', 'worker-slot': 'executionWorkerSlot' } as const
+
 const executionReasons = {
   'executor-unavailable': 'planWaitingExecutor', 'worker-slot': 'executionWorkerSlot', 'preparation-reconciliation': 'executionPreparation',
   'worker-running': 'executionRunning', 'worker-idle': 'executionIdle', 'semantic-review': 'executionSemanticReview',
@@ -85,6 +87,9 @@ export function ProjectConversation({ id }: { id: string }) {
   // The keyed route also remounts this component; check ownership before displaying server data.
   if (data.project.id !== id) return <LoadState loading />
   const tasks = data.tasks ?? []
+  const coordinatorBudgetWait = data.coordinator && 'budgetWait' in data.coordinator
+    && (data.coordinator.budgetWait === 'global-budget' || data.coordinator.budgetWait === 'project-fairness')
+    ? data.coordinator.budgetWait : undefined
   return <div className="dt-conversation">
     <div><Button size="sm" icon={<Icon name="chevron-left" />} onClick={() => navigate({ page: 'projects' })}>{t('tab.projects')}</Button></div>
     <header><h2>{data.project.name}</h2><p className="dt-hint">{t('projectGoalPrefix')}{data.project.goal}</p></header>
@@ -93,6 +98,9 @@ export function ProjectConversation({ id }: { id: string }) {
     {data.coordinator?.status === 'error' && <div className="dt-banner dt-danger" role="alert">
       <p>{t('conversationCoordinatorError')}</p>{data.coordinator.error && <p>{data.coordinator.error}</p>}
       <Button variant="outline" disabled={retry.busy || readOnly} onClick={() => { void retry.run() }}>{t('conversationRetry')}</Button>
+    </div>}
+    {coordinatorBudgetWait && <div className="dt-banner" role="status">
+      <strong>{t('conversationBudgetWaiting')}</strong><p>{t(budgetLabels[coordinatorBudgetWait])}</p>
     </div>}
     <section aria-label={t('projectConversation')} className="dt-conversation-history">
       {!data.messages.length && <Hint>{t('conversationEmpty')}</Hint>}
@@ -115,19 +123,24 @@ export function ProjectConversation({ id }: { id: string }) {
       {tasks.map(task => {
         const plan = task.planRevisions?.at(-1)
         const authorization = task.authorizations?.findLast(item => item.planRevision === plan?.revision)
-        const assignment = task.assignments.find(item => item.contract?.targetId === authorization?.targetId)
-        const execution = task.progress?.assignments.find(item => item.assignmentId === assignment?.id)
-        const report = assignment && (execution ? data.reports?.find(item => item.id === execution.reportId)
-          : data.reports?.findLast(item => item.assignmentId === assignment.id))
-        const waitingLabel = execution ? !['completed', 'ended'].includes(execution.phase) ? progressLabels[execution.phase] : undefined
-          : assignment?.waitingReason ? executionReasons[assignment.waitingReason] : undefined
+        const latestExecutionAuthorization = task.authorizations?.findLast(item => task.assignments.some(assignment => assignment.contract?.authorizationId === item.id))
+        const assignments = task.assignments.filter(item => item.contract
+          && (item.state !== 'ended' || item.contract.authorizationId === latestExecutionAuthorization?.id))
+        const otherActiveAuthorizations = task.authorizations?.filter(item => !item.revokedAt && item.id !== authorization?.id
+          && assignments.some(assignment => assignment.state !== 'ended' && assignment.contract?.authorizationId === item.id)) ?? []
+        const assignmentTitle = (id: string) => {
+          const execution = task.progress?.assignments.find(item => item.assignmentId === id)
+          return execution?.title || execution?.goal || task.assignments.find(item => item.id === id)?.contract?.plan.goal || t('assignmentUnknown')
+        }
+        const proposalTitle = (key: string) => plan?.assignments?.find(item => item.key === key)?.goal || t('assignmentUnknown')
         const held = task.lifecycle?.pause.intent === 'pause' || task.lifecycle?.stop.intent === 'stop'
           || task.lifecycle?.reconciliation?.state === 'checking' || task.lifecycle?.reconciliation?.state === 'unknown'
           || task.progress?.reconciliation === 'checking' || task.progress?.reconciliation === 'unknown'
+        const reviewHeld = task.lifecycle?.pause.intent === 'pause' || task.lifecycle?.stop.intent === 'stop' || !!state?.paused
         const controllable = task.assignments.some(item => item.state !== 'ended')
           || task.lifecycle?.pause.intent === 'pause' || task.lifecycle?.stop.intent === 'stop'
-        const canReview = authorization && !authorization.revokedAt && !task.ended && assignment?.state !== 'ended'
-          && assignment?.contract && assignment.contract.plan.acceptance?.mode !== 'registered-files' && report?.state === 'ready'
+        const hasBranchQuestion = assignments.some(item => task.progress?.assignments.some(progress => progress.assignmentId === item.id && progress.question)
+          || task.attention?.binding?.assignmentId === item.id)
         return <article key={task.id} className="dt-conversation-plan">
           {plan ? <>
             <strong>{t('planRevision', { revision: plan.revision })}</strong>
@@ -141,27 +154,74 @@ export function ProjectConversation({ id }: { id: string }) {
               <dt>{t('planCompletion')}</dt><dd>{plan.completion}</dd>
               <dt>{t('acceptanceMode')}</dt><dd>{t(plan.acceptance?.mode === 'registered-files' ? 'registeredFiles' : 'humanReview')}</dd>
             </dl>
+            {!!plan.assignments?.length && <section aria-label={t('assignmentPlan')}>
+              <h4>{t('assignmentPlan')}</h4>
+              <ol className="dt-assignment-list">{plan.assignments.map(proposal => <li key={proposal.key} className="dt-assignment">
+                <strong>{proposal.goal}</strong>
+                <p>{t('planOutputs')}{t('labelSeparator')}{proposal.outputs.join(', ')}</p>
+                {!!proposal.resources.length && <p className="dt-hint">{t('planResources')}{t('labelSeparator')}{proposal.resources.join('; ')}</p>}
+                <p className="dt-hint">{t('planCost')}{t('labelSeparator')}{proposal.cost}</p>
+                {!!proposal.dependencies.length && <p className="dt-hint">{t('assignmentDependencies')}{t('labelSeparator')}{proposal.dependencies.map(proposalTitle).join('; ')}</p>}
+                {proposal.review && <p className="dt-hint">{t('assignmentReviewTarget')}{t('labelSeparator')}{proposalTitle(proposal.review.target)}</p>}
+                {proposal.retry && <p className="dt-hint">{t('assignmentRetryLimit', { count: proposal.retry.limit })}</p>}
+                <p className="dt-hint">{t('planCompletion')}{t('labelSeparator')}{proposal.completion}</p>
+              </li>)}</ol>
+            </section>}
             {authorization ? <p className="dt-hint">{t(authorization.revokedAt ? 'planRevoked' : 'planConfirmed')}</p> : <Button variant="primary" size="sm" disabled={!!confirming || readOnly}
               onClick={() => { void confirm(task.id, plan.revision) }}>{t('planConfirm')}</Button>}
             {authorization && !authorization.revokedAt && <Button size="sm" disabled={!!confirming || readOnly || held || task.ended?.by === 'human'}
               onClick={() => { void confirm(task.id, plan.revision, 'rerun') }}>{t('planRerun')}</Button>}
             {authorization && !authorization.revokedAt && <Button size="sm" disabled={!!confirming || readOnly}
               onClick={() => { void revoke(task.id, authorization.id) }}>{t('planRevoke')}</Button>}
-            {waitingLabel && !authorization?.revokedAt && <p className="dt-hint">{t('executionWait', { reason: t(waitingLabel) })}</p>}
-            {assignment?.state === 'ended' && assignment.report?.state === 'ready' && <p>{t('executionDone')}</p>}
+            {authorization && task.ended?.outcome === 'completed' && <p>{t('executionDone')}</p>}
             <TaskLifecycle key={task.id} id={task.id} lifecycle={controllable || task.ended ? task.lifecycle : undefined}
-              reconciliationState={task.progress?.reconciliation} attention={task.attention}
+              reconciliationState={task.progress?.reconciliation} attention={hasBranchQuestion ? undefined : task.attention}
               ended={!!task.ended} enabled={controllable}
               retryable={task.assignments.some(item => item.state !== 'ended' && item.report?.state === 'failed')}
               readOnly={readOnly} reload={reload} />
-            {!!report?.unresolved.length && <div><strong>{t('reportUnresolved')}</strong><ul>{report.unresolved.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}
-            {canReview && report && <div>
+            {otherActiveAuthorizations.map(item => <div className="dt-row-actions" key={item.id}>
+              <span className="dt-hint">{t('planRevision', { revision: item.planRevision })}</span>
+              <Button size="sm" disabled={!!confirming || readOnly} onClick={() => { void revoke(task.id, item.id) }}>{t('planRevoke')}</Button>
+            </div>)}
+            {!!assignments.length && <section aria-label={t('assignmentProgress')} className="dt-assignment-progress">
+              <h4>{t('assignmentProgress')}</h4>
+              {assignments.map(assignment => {
+                const execution = task.progress?.assignments.find(item => item.assignmentId === assignment.id)
+                const report = execution ? data.reports?.find(item => item.id === execution.reportId)
+                  : data.reports?.findLast(item => item.assignmentId === assignment.id)
+                const reason = execution?.waitingReason ?? assignment.waitingReason
+                const queuedReason = execution?.phase === 'queued' && ['dependency', 'worker-slot', 'processing-paused'].includes(reason ?? '')
+                const label = execution?.phase === 'completed' ? 'executionDone' : execution?.phase === 'ended' ? 'taskEnded'
+                  : queuedReason ? executionReasons[reason as keyof typeof executionReasons]
+                    : execution ? progressLabels[execution.phase]
+                      : reason && Object.hasOwn(executionReasons, reason) ? executionReasons[reason as keyof typeof executionReasons]
+                        : assignment.state === 'ended' ? 'taskEnded' : 'taskQueued'
+                const branchHeld = reviewHeld || !!execution?.acceptanceHold || !execution && held
+                const branchAuthorization = task.authorizations?.find(item => item.id === assignment.contract?.authorizationId)
+                const canReviewBranch = branchAuthorization && !branchAuthorization.revokedAt && !task.ended && assignment.state !== 'ended'
+                  && assignment.contract && assignment.contract.plan.acceptance?.mode !== 'registered-files' && report?.state === 'ready'
+                const question = execution?.question ?? (task.attention?.binding?.assignmentId === assignment.id ? task.attention : undefined)
+                return <article className="dt-assignment" key={assignment.id} aria-label={assignmentTitle(assignment.id)}>
+                  <strong>{assignmentTitle(assignment.id)}</strong>
+                  <p className="dt-hint">{t('planRevision', { revision: assignment.contract!.planRevision })}</p>
+                  <p className="dt-hint" role="status">{t('executionWait', { reason: t(branchAuthorization?.revokedAt ? 'planRevoked' : label) })}</p>
+                  {execution?.budgetWait && !['completed', 'ended'].includes(execution.phase) && <p className="dt-hint">{t(budgetLabels[execution.budgetWait])}</p>}
+                  {!!execution?.dependencies.length && <p className="dt-hint">{t('assignmentDependencies')}{t('labelSeparator')}{execution.dependencies.map(assignmentTitle).join('; ')}</p>}
+                  {execution?.gate && <p className="dt-hint">{t('assignmentReviewTarget')}{t('labelSeparator')}{assignmentTitle(execution.gate.targetAssignmentId)}
+                    {' · '}{t(execution.gate.conclusion === 'passed' ? 'assignmentGatePassed' : execution.gate.conclusion === 'changes_required' ? 'assignmentGateChanges' : execution.gate.conclusion === 'needs_judgment' ? 'assignmentGateJudgment' : 'assignmentGateWaiting')}</p>}
+                  {question && <TaskLifecycle key={assignment.id + ':' + question.id} id={task.id} attention={question}
+                    ended={!!task.ended} enabled={false} readOnly={readOnly} reload={reload} />}
+                  {!!report?.unresolved.length && <div><strong>{t('reportUnresolved')}</strong><ul>{report.unresolved.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}
+                  {canReviewBranch && report && <div>
                 <p>{report.completed}</p><p>{report.evidence.join('\n')}</p>
                 {!!report.unresolved.length && <p className="dt-hint">{t('acceptanceBlockersRemain')}</p>}
-                {held && <Hint>{t('taskReviewHeld')}</Hint>}
-                <label>{t('acceptanceEvidence')}<textarea className="dt-input" disabled={readOnly || held} aria-label={t('acceptanceEvidence')} value={reviewEvidence[report.id] ?? ''} onChange={event => setReviewEvidence(previous => ({ ...previous, [report.id]: event.target.value }))} /></label>
-                {(['passed', 'changes_required', 'needs_judgment'] as const).map(conclusion => <Button key={conclusion} size="sm" disabled={!!confirming || readOnly || held || !reviewEvidence[report.id]?.trim()} onClick={() => { void decide(task.id, report.id, conclusion) }}>{t(conclusion === 'passed' ? 'acceptancePass' : conclusion === 'changes_required' ? 'acceptanceChanges' : 'acceptanceJudgment')}</Button>)}
+                {branchHeld && <Hint>{t(state?.paused ? 'executionPaused' : assignments.length > 1 ? 'assignmentReviewHeld' : 'taskReviewHeld')}</Hint>}
+                <label>{t('acceptanceEvidence')}<textarea className="dt-input" disabled={readOnly || branchHeld} aria-label={t('acceptanceEvidence')} value={reviewEvidence[report.id] ?? ''} onChange={event => setReviewEvidence(previous => ({ ...previous, [report.id]: event.target.value }))} /></label>
+                {(['passed', 'changes_required', 'needs_judgment'] as const).map(conclusion => <Button key={conclusion} size="sm" disabled={!!confirming || readOnly || branchHeld || !reviewEvidence[report.id]?.trim()} onClick={() => { void decide(task.id, report.id, conclusion) }}>{t(conclusion === 'passed' ? 'acceptancePass' : conclusion === 'changes_required' ? 'acceptanceChanges' : 'acceptanceJudgment')}</Button>)}
               </div>}
+                </article>
+              })}
+            </section>}
           </> : <p className="dt-hint">{t('planNoRevision')}</p>}
         </article>
       })}

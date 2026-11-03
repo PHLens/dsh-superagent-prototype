@@ -2,10 +2,12 @@
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import type { Assignment, Ticket } from '../core/index.ts'
+import { activePlanAssignments } from '../core/assignment-graphs.ts'
 import type { Store } from './store.ts'
 import { ExecutionAttempts, type Attempt } from './execution-attempts.ts'
 import { ArtifactStore, digest } from './artifact-store.ts'
 import { ConversationStore } from './conversation-store.ts'
+import { ProjectEvents } from './events.ts'
 
 export interface FileReport {
   operationId: string; state: 'progress' | 'ready' | 'blocked' | 'failed'
@@ -14,7 +16,7 @@ export interface FileReport {
 export interface AcceptedReport extends FileReport { id: string; attemptId: string; lease: string; sessionId: string; projectId: string; ticketId: string; assignmentId: string; at: string }
 export interface GateDecision {
   id: string; operationId: string; reportId: string; projectId: string; ticketId: string; assignmentId: string; gate: string; targetVersion: string; conditionsVersion: number
-  judge: { actorId: string; source: 'authenticated-web'; generation: string }; conclusion: 'passed' | 'changes_required' | 'needs_judgment'; evidence: string; at: string
+  judge: { actorId: string; source: 'authenticated-web' | 'registered-worker'; generation: string; assignmentId?: string; attemptId?: string; lease?: string }; conclusion: 'passed' | 'changes_required' | 'needs_judgment'; evidence: string; at: string
 }
 /** Persists worker receipts and independently validates version-bound acceptance before completing work. */
 export class ReportAcceptance {
@@ -39,7 +41,17 @@ export class ReportAcceptance {
       }
       const report: AcceptedReport = { ...input, id: randomUUID(), attemptId: attempt.id, lease: attempt.lease, sessionId, projectId: attempt.projectId, ticketId: ticket.id, assignmentId: assignment.id, at: new Date().toISOString() }
       this.store.db.prepare('INSERT INTO worker_report VALUES (?,?,?,?)').run(report.id, attempt.id, input.operationId, JSON.stringify(report))
+      assignment.reportReceipt = { id: report.id, state: report.state, attemptId: report.attemptId, lease: report.lease, artifacts: report.artifacts }
       assignment.report = { state: input.state === 'ready' ? 'waiting' : input.state, summary: input.completed, at: report.at }
+      if (report.state === 'ready') {
+        for (const reviewer of activePlanAssignments(ticket).filter(item => item.contract?.proposal?.review?.target === assignment.contract?.assignmentKey && item.contract?.proposal?.review && item.contract.authorizationId === assignment.contract!.authorizationId)) {
+          const old = this.attempts.all().findLast(item => item.assignmentId === reviewer.id)
+          if (!old?.reviewTarget || old.reviewTarget.reportId === report.id) continue
+          reviewer.state = 'pending'; reviewer.waitingReason = 'retrying'
+          delete reviewer.report; delete reviewer.reportReceipt; delete reviewer.endedAt; delete reviewer.endedReason
+          old.status = 'settling'; this.attempts.save(old)
+        }
+      }
       this.aggregate(ticket, assignment, attempt, report)
       return report
     })
@@ -67,6 +79,39 @@ export class ReportAcceptance {
       return decision
     })
   }
+  decideWorker(sessionId: string, input: { operationId: string; reportId: string; conclusion: GateDecision['conclusion']; evidence: string }): GateDecision {
+    if (!input.operationId.trim() || !input.evidence.trim()) throw new Error('Judge operation and evidence required')
+    return this.store.atomic(() => {
+      const receipt = this.attempts.resolve(sessionId, true)
+      const replay = this.decisions(receipt.ticket.id).find(item => item.operationId === `judge:${receipt.attempt.id}:${input.operationId}`)
+      if (replay) {
+        if (replay.reportId !== input.reportId || replay.evidence !== input.evidence || replay.conclusion !== input.conclusion || replay.judge.attemptId !== receipt.attempt.id || replay.judge.lease !== receipt.attempt.lease) throw new Error('Judge operation conflict')
+        return replay
+      }
+      const judge = this.attempts.resolve(sessionId)
+      const registration = judge.assignment.contract!.proposal?.review, snapshot = judge.attempt.reviewTarget
+      if (!registration || !snapshot || input.reportId !== snapshot.reportId || snapshot.assignmentId === judge.assignment.id) throw new Error('Judge has no registered target snapshot')
+      const report = this.reports(judge.ticket.id).find(item => item.id === snapshot.reportId)
+      const target = judge.ticket.assignments.find(item => item.id === snapshot.assignmentId)
+      const targetAttempt = this.attempts.all().findLast(item => item.assignmentId === snapshot.assignmentId)
+      if (!report || report.state !== 'ready' || target?.contract?.assignmentKey !== registration.target || target.contract.authorizationId !== judge.assignment.contract!.authorizationId
+        || targetAttempt?.id !== snapshot.attemptId || targetAttempt.lease !== snapshot.lease || targetAttempt.fenced || targetAttempt.status === 'reconcile'
+        || this.reports(judge.ticket.id).findLast(item => item.assignmentId === target.id)?.id !== report.id
+        || registration.conditionsVersion !== snapshot.conditionsVersion || (target.contract.plan.acceptance?.version ?? target.contract.planRevision) !== snapshot.conditionsVersion) throw new Error('Stale or unauthorized judge target')
+      const operationId = `judge:${judge.attempt.id}:${input.operationId}`
+      const existing = this.decisions(judge.ticket.id).find(item => item.operationId === operationId)
+      if (existing) {
+        if (existing.reportId !== report.id || existing.evidence !== input.evidence || existing.conclusion !== input.conclusion) throw new Error('Judge operation conflict')
+        return existing
+      }
+      this.attempts.resolve(report.sessionId)
+      const decision: GateDecision = { id: randomUUID(), operationId, reportId: report.id, projectId: judge.attempt.projectId, ticketId: judge.ticket.id, assignmentId: target.id, gate: `completion:${target.id}`, targetVersion: this.target(report), conditionsVersion: snapshot.conditionsVersion,
+        judge: { actorId: sessionId, source: 'registered-worker', generation: snapshot.lease, assignmentId: judge.assignment.id, attemptId: judge.attempt.id, lease: judge.attempt.lease }, conclusion: input.conclusion, evidence: input.evidence, at: new Date().toISOString() }
+      this.store.db.prepare('INSERT INTO acceptance_decision VALUES (?,?,?,?)').run(decision.id, judge.ticket.id, operationId, JSON.stringify(decision))
+      this.aggregate(judge.ticket, target, targetAttempt, report, decision.at)
+      return decision
+    })
+  }
   private aggregate(ticket: Ticket, assignment: Assignment, attempt: Attempt, report: AcceptedReport, completionAt = report.at): void {
     let reason: string | undefined
     if (report.state !== 'ready') reason = report.state === 'progress' ? undefined : report.state
@@ -74,8 +119,9 @@ export class ReportAcceptance {
       const outputs = report.artifacts.map(ref => this.artifacts.read(attempt.projectId, ref.id, ref.contentVersion).output)
       if (assignment.contract!.plan.outputs.some(output => !outputs.includes(output))) reason = 'missing-artifacts'
       else if (report.unresolved.length) reason = 'unresolved-items'
-      else if (ticket.attention && !ticket.attention.resolvedAt) reason = 'unresolved-question'
-      else if (assignment.contract!.plan.acceptance?.mode !== 'registered-files') {
+      else if ((ticket.attentionQuestions?.some(question => question.binding?.assignmentId === assignment.id && !question.resolvedAt)
+        || (ticket.attention?.binding?.assignmentId === assignment.id && !ticket.attention.resolvedAt))) reason = 'unresolved-question'
+      else if (assignment.contract!.plan.acceptance?.mode !== 'registered-files' || activePlanAssignments(ticket).some(item => item.contract?.proposal?.review && item.contract.authorizationId === assignment.contract!.authorizationId && item.contract.proposal.review.target === assignment.contract!.assignmentKey)) {
         const decision = this.decisions(ticket.id).findLast(item => item.assignmentId === assignment.id && item.reportId === report.id && item.targetVersion === this.target(report)
           && item.conditionsVersion === (assignment.contract!.plan.acceptance?.version ?? assignment.contract!.planRevision) && item.judge.generation === attempt.lease)
         if (decision?.conclusion !== 'passed') reason = decision?.conclusion ?? 'semantic-review'
@@ -83,11 +129,19 @@ export class ReportAcceptance {
       if (!reason) {
         assignment.state = 'ended'; assignment.endedAt = completionAt; assignment.endedReason = 'accepted'; assignment.report = { state: 'ready', summary: report.completed, at: report.at }
         attempt.status = 'ended'; this.attempts.save(attempt)
-        if (ticket.assignments.filter(item => item.contract).every(item => item.state === 'ended' && item.endedReason === 'accepted')) ticket.ended = { at: completionAt, by: 'executor', outcome: 'completed' }
+        if (activePlanAssignments(ticket).every(item => item.state === 'ended' && item.endedReason === 'accepted')) ticket.ended = { at: completionAt, by: 'executor', outcome: 'completed' }
       }
     }
     assignment.waitingReason = reason as Assignment['waitingReason']
+    const retry = assignment.contract?.proposal?.retry
+    const retries = this.attempts.all().filter(item => item.assignmentId === assignment.id).length - 1
+    if ((reason === 'changes_required' || reason === 'failed') && retry?.on.includes(reason) && retries < retry.limit) {
+      assignment.state = 'pending'; assignment.startedAt = undefined
+      assignment.waitingReason = 'retrying'
+      attempt.status = 'settling'; attempt.error = `Registered retry pending native/job settlement: ${reason}`; this.attempts.save(attempt)
+    }
     ticket.updatedAt = new Date().toISOString(); this.store.tickets.save(ticket)
+    new ProjectEvents(this.store).append({ id: `report:${report.id}:${reason ?? 'accepted'}`, projectId: attempt.projectId, ticketId: ticket.id, assignmentId: assignment.id, kind: reason ? 'acceptance-changed' : 'report-recorded', version: report.id, operationId: report.operationId, at: report.at })
     // Durable return to the project conversation; no coordinator availability or generation is required.
     const owner = new ConversationStore(this.store).getOwner(attempt.projectId)
     if (owner && report.state !== 'progress') {
