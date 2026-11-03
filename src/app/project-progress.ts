@@ -1,7 +1,7 @@
 /** Read-only presentation of stored execution facts; never grants authority or advances work. */
 import { createHash } from 'node:crypto'
 import type { Assignment, Ticket } from '../core/model.ts'
-import { activePlanAssignments } from '../core/assignment-graphs.ts'
+import { activeAssignmentByKey, activePlanAssignments } from '../core/assignment-graphs.ts'
 import type { Artifact } from './artifact-store.ts'
 import type { Attempt } from './execution-attempts.ts'
 import type { AcceptedReport, GateDecision } from './report-acceptance.ts'
@@ -60,14 +60,20 @@ function assignmentProgress(ticket: Ticket, assignment: Assignment, facts: Facts
   const report = attempt && facts.reports.findLast(item => item.projectId === ticket.projectId && item.ticketId === ticket.id
     && item.assignmentId === assignment.id && item.attemptId === attempt.id && item.lease === attempt.lease)
   const target = contract.proposal?.review?.target
-     ? activePlanAssignments(ticket).find(item => item.contract?.assignmentKey === contract.proposal?.review?.target)
+     ? activeAssignmentByKey(ticket, contract.authorizationId, contract.proposal.review.target)
      : undefined
    const targetAttempt = target && facts.attempts.findLast(item => item.projectId === ticket.projectId && item.ticketId === ticket.id && item.assignmentId === target.id)
    const targetReport = targetAttempt && facts.reports.findLast(item => item.projectId === ticket.projectId && item.ticketId === ticket.id && item.assignmentId === target.id && item.attemptId === targetAttempt.id && item.lease === targetAttempt.lease)
-   const gateTargetVersion = targetReport ? createHash('sha256').update(JSON.stringify(targetReport.artifacts.map(ref => [ref.id, ref.contentVersion]))).digest('hex') : undefined
+   const targetArtifacts = targetReport?.artifacts.flatMap(ref => facts.artifacts.filter(item => item.id === ref.id && item.contentVersion === ref.contentVersion
+     && item.status === 'registered' && item.projectId === ticket.projectId && item.ticketId === ticket.id
+     && item.assignmentId === target?.id && item.attemptId === targetAttempt?.id && item.lease === targetAttempt?.lease)) ?? []
+   const gateTargetVersion = targetReport?.state === 'ready' && !targetAttempt?.fenced && targetAttempt?.status !== 'reconcile'
+     && targetArtifacts.length === targetReport.artifacts.length && target?.contract?.plan.outputs.every(output => targetArtifacts.some(item => item.output === output))
+     && (target.contract.plan.acceptance?.version ?? target.contract.planRevision) === contract.proposal?.review?.conditionsVersion
+     ? createHash('sha256').update(JSON.stringify(targetReport.artifacts.map(ref => [ref.id, ref.contentVersion]))).digest('hex') : undefined
    const gateDecision = targetReport && gateTargetVersion ? facts.decisions.findLast(item => item.projectId === ticket.projectId && item.ticketId === ticket.id
      && item.assignmentId === target.id && item.reportId === targetReport.id && item.gate === 'completion:' + target.id
-     && item.targetVersion === gateTargetVersion && item.conditionsVersion === contract.proposal?.review?.conditionsVersion) : undefined
+     && item.judge.generation === targetAttempt?.lease && item.targetVersion === gateTargetVersion && item.conditionsVersion === contract.proposal?.review?.conditionsVersion) : undefined
    const question = ticket.attentionQuestions?.find(item => item.binding?.assignmentId === assignment.id) ?? (ticket.attention?.binding?.assignmentId === assignment.id ? ticket.attention : undefined)
   const result: AssignmentProgress = {
     assignmentId: assignment.id, assignmentKey: contract.assignmentKey, title: contract.plan.goal.slice(0, 160), goal: contract.plan.goal,

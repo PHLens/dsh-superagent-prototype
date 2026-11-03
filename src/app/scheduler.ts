@@ -122,7 +122,7 @@ export interface ManagedBudgetHost {
   onUncertain?(ownerId: string, jobId: string): void
 }
 interface BudgetJob { id: string; owner?: string; status: string }
-interface JobFact { seq: number; type: string; data: { jobId?: string; toolCall?: { callId: string }; producerReported?: boolean } }
+interface JobFact { seq: number; type: string; data: { jobId?: string; owner?: string; toolCall?: { callId: string }; producerReported?: boolean } }
 interface JobSession { snapshotEvents(): readonly JobFact[] }
 interface JobRegistry {
   list(ownerId: string): readonly BudgetJob[]
@@ -207,7 +207,8 @@ export class ManagedBudgetHooks {
     }
     // A read failure propagates and preserves reservations: unknown is not an exit.
     const jobs = this.ctx.jobs.list(owner.ownerId).filter(job => job.owner === owner.ownerId)
-    for (const [jobId, ownerId] of this.acknowledged) if (ownerId === owner.ownerId && !jobs.some(job => job.id === jobId)) this.acknowledged.delete(jobId)
+    // Keep terminal evidence reconstructible from the native Session after JobView retention expires.
+    // A missing current view is not evidence that a previously unacknowledged producer exited.
     const tracked = new Set([...this.shells.values()].filter(row => row.owner.ownerId === owner.ownerId).flatMap(row => [...row.jobs]))
     const relevant = new Set([...jobs.filter(job => liveJob(job) || job.status === 'failed').map(job => job.id), ...tracked])
     // JobView omits invocation identity and producer acknowledgement. The original
@@ -222,7 +223,10 @@ export class ManagedBudgetHooks {
         if (event.seq <= cursor) continue
         this.factCursor.set(session, event.seq)
         const data = event.data
-        if (!data?.jobId || !relevant.has(data.jobId)) continue
+        if (!data?.jobId || (data.owner !== undefined && data.owner !== owner.ownerId)) continue
+        // Owned native Session facts survive JobView removal and observer reconstruction.
+        // Older adapters without owner metadata still require a currently tracked JobView.
+        if (data.owner !== owner.ownerId && !relevant.has(data.jobId)) continue
         if (event.type === 'job/registered') {
           if (data.toolCall) this.jobCalls.set(data.jobId, data.toolCall.callId)
           if (!this.jobSessions.has(data.jobId)) this.jobSessions.set(data.jobId, { ownerId: owner.ownerId, session })
@@ -255,7 +259,7 @@ export class ManagedBudgetHooks {
       if (row.owner.ownerId !== owner.ownerId || !row.bodyDone) continue
       const stillLive = [...row.jobs].some(jobId => this.uncertain.has(jobId) || occupied.some(job => job.id === jobId))
       if (!stillLive) {
-        for (const jobId of row.jobs) { this.jobCalls.delete(jobId); this.jobSessions.delete(jobId); if (jobs.find(job => job.id === jobId)?.status !== 'failed') this.acknowledged.delete(jobId) }
+        for (const jobId of row.jobs) { this.jobCalls.delete(jobId); this.jobSessions.delete(jobId) }
         this.shells.delete(id); row.lease.release()
       }
     }

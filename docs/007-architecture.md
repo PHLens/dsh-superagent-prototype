@@ -342,9 +342,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/project-store.ts` | SQLite project repository with stable ids; project lifecycle stays in the core service |
 | `src/app/conversation-store.ts` | Durable owned business conversation, input idempotency, per-project leases, mapping generations and prompt checkpoints |
 | `src/app/project-coordinator.ts` | Independent project discussion lanes, restart reconciliation, retry and coordinator lifecycle |
-| `src/app/project-progress.ts` | Root-owned project task progress projection helpers |
+| `src/app/project-progress.ts` | Read-only task progress projection; reviewer targets resolve within their authorization's current graph, with conclusions bound to the current attempt, report, registered artifacts and conditions |
 | `src/app/events.ts` | Durable transactional project event facts and coalesced consumption |
-| `src/app/scheduler.ts` | Project-aware model, worker and background scheduling status |
+| `src/app/scheduler.ts` | Project-aware model, worker and background scheduling status; owned native Session exit facts rebuild unknown physical occupancy even after JobView retention, and later positive acknowledgement releases it |
 | `src/core/dependencies.ts` | Assignment graph validation, readiness and dependency planning |
 | `src/core/assignment-graphs.ts` | Immutable authorized graph versions, current necessary work, scope and cost-slot validation, and fixed input lineage |
 | `src/app/project-plans.ts` | Authenticated project-plan adapter: persisted confirmation evidence, plan version anchoring, authorization and Assignment projection |
@@ -493,6 +493,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/t6-final-facts-boundaries.spec.ts` | Fresh retry fact isolation and stable Assignment pagination snapshots |
 | `tests/t6-final-exit-projection.spec.ts` | Unknown physical exit fencing, reviewer target projection and legacy worker budget admission |
 | `tests/t6-plugin-activation.spec.ts` | Real entry-point Cordis activation with the public `jobs` dependency available to managed budgeting |
+| `tests/t6-final-57cdecb-native-exit.spec.ts` | rc.5 Session settlement truth retained across JobView removal and observer reconstruction |
+| `tests/t6-final-57cdecb-regressions.spec.ts` | Same-key rerun authorization isolation and complete Assignment contentVersion pagination |
 | `tests/t6-feedback-recovery-review.spec.ts` | Durable feedback native receipts, commit rollback, generation replacement, lease revocation, backoff and coordinator error recovery |
 | `tests/t6-fixed-review-boundaries.spec.ts` | Independent Runtime/SQLite review boundaries for decomposition, physical settlement, reconciliation, judgment feedback and project fairness |
 | `tests/t6-integration-budget-preflight.spec.ts` | Runtime coordinator model sharing and single worker reservation across asynchronous preparation |
