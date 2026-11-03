@@ -210,6 +210,8 @@ export class ManagedBudgetHooks {
     // Keep terminal evidence reconstructible from the native Session after JobView retention expires.
     // A missing current view is not evidence that a previously unacknowledged producer exited.
     const tracked = new Set([...this.shells.values()].filter(row => row.owner.ownerId === owner.ownerId).flatMap(row => [...row.jobs]))
+    const previouslyUncertain = new Set([...this.uncertain].filter(([, ownerId]) => ownerId === owner.ownerId).map(([jobId]) => jobId))
+    const notifyUncertain = new Set<string>()
     const relevant = new Set([...jobs.filter(job => liveJob(job) || job.status === 'failed').map(job => job.id), ...tracked])
     // JobView omits invocation identity and producer acknowledgement. The original
     // Session can receive a settlement even after its Agent leaves the live registry.
@@ -234,15 +236,20 @@ export class ManagedBudgetHooks {
         if (event.type === 'job/settled' && data.producerReported === true) { this.acknowledged.set(data.jobId, owner.ownerId); this.uncertain.delete(data.jobId) }
         if (event.type === 'job/settled' && data.producerReported === false && !this.acknowledged.has(data.jobId)) {
           this.uncertain.set(data.jobId, owner.ownerId)
-          try { this.host.onUncertain?.(owner.ownerId, data.jobId) } catch { /* Unknown occupancy stays reserved. */ }
+          notifyUncertain.add(data.jobId)
         }
       }
     }
     for (const job of jobs) if (!liveJob(job) && (tracked.has(job.id) || job.status === 'failed') && !this.acknowledged.has(job.id)) {
       if (!this.uncertain.has(job.id)) {
         this.uncertain.set(job.id, owner.ownerId)
-        try { this.host.onUncertain?.(owner.ownerId, job.id) } catch { /* Unknown occupancy stays reserved. */ }
+        notifyUncertain.add(job.id)
       }
+    }
+    // Replay can contain both an old unknown receipt and its later verified exit.
+    // Notify only newly unknown resources after all readers and current views are folded.
+    for (const jobId of notifyUncertain) if (this.uncertain.has(jobId) && !this.acknowledged.has(jobId) && !previouslyUncertain.has(jobId)) {
+      try { this.host.onUncertain?.(owner.ownerId, jobId) } catch { /* Unknown occupancy stays reserved. */ }
     }
     const occupied = jobs.filter(job => liveJob(job) || this.uncertain.has(job.id))
     for (const [jobId, ownerId] of this.uncertain) if (ownerId === owner.ownerId && !occupied.some(job => job.id === jobId)) occupied.push({ id: jobId, owner: ownerId, status: 'unknown' })

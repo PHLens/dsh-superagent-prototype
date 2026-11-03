@@ -494,6 +494,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/t6-final-exit-projection.spec.ts` | Unknown physical exit fencing, reviewer target projection and legacy worker budget admission |
 | `tests/t6-plugin-activation.spec.ts` | Real entry-point Cordis activation with the public `jobs` dependency available to managed budgeting |
 | `tests/t6-final-57cdecb-native-exit.spec.ts` | rc.5 Session settlement truth retained across JobView removal and observer reconstruction |
+| `tests/t6-final-54906f-positive-notification.spec.ts` | Positive settlement replay folds prior unknown history before notifying current uncertainty |
 | `tests/t6-final-57cdecb-regressions.spec.ts` | Same-key rerun authorization isolation and complete Assignment contentVersion pagination |
 | `tests/t6-feedback-recovery-review.spec.ts` | Durable feedback native receipts, commit rollback, generation replacement, lease revocation, backoff and coordinator error recovery |
 | `tests/t6-fixed-review-boundaries.spec.ts` | Independent Runtime/SQLite review boundaries for decomposition, physical settlement, reconciliation, judgment feedback and project fairness |
