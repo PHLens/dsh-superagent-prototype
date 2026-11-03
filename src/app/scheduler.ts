@@ -262,6 +262,14 @@ export class ManagedBudgetHooks {
     const held = new Set([...this.shells.values()].filter(row => row.owner.ownerId === owner.ownerId).flatMap(row => [...row.jobs]))
     for (const [jobId, row] of this.jobSessions) if (row.ownerId === owner.ownerId && !held.has(jobId) && !jobs.some(job => job.id === jobId && liveJob(job))) { this.jobSessions.delete(jobId); this.jobCalls.delete(jobId) }
   }
+  /** Refresh native producer receipts before allowing a Runtime reconciliation to clear. */
+  ownerExitKnown(ownerId: string): boolean {
+    const owner = this.host.resolve(ownerId)
+    if (!owner) return false
+    this.syncOwner(owner)
+    return ![...this.uncertain.values()].includes(ownerId)
+      && ![...this.shells.values()].some(row => row.owner.ownerId === ownerId)
+  }
   /** The caller must independently certify physical exit, beyond a registry-forced failure record. */
   confirmOwnerExit(ownerId: string): void {
     for (const [id, row] of [...this.shells]) if (row.owner.ownerId === ownerId) {

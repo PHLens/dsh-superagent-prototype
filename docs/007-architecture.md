@@ -490,6 +490,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/project-facts.spec.ts` | Current report context, immutable artifact paging, project/task/actor/version fences |
 | `tests/t6-feedback-context-review.spec.ts` | Feedback context facts, bounded task coalescing, and read-tool availability |
 | `tests/t6-feedback-state-advance-review.spec.ts` | Safe feedback recovery after project state advancement and stale abandoned leases |
+| `tests/t6-final-facts-boundaries.spec.ts` | Fresh retry fact isolation and stable Assignment pagination snapshots |
+| `tests/t6-final-exit-projection.spec.ts` | Unknown physical exit fencing, reviewer target projection and legacy worker budget admission |
+| `tests/t6-plugin-activation.spec.ts` | Real entry-point Cordis activation with the public `jobs` dependency available to managed budgeting |
 | `tests/t6-feedback-recovery-review.spec.ts` | Durable feedback native receipts, commit rollback, generation replacement, lease revocation, backoff and coordinator error recovery |
 | `tests/t6-fixed-review-boundaries.spec.ts` | Independent Runtime/SQLite review boundaries for decomposition, physical settlement, reconciliation, judgment feedback and project fairness |
 | `tests/t6-integration-budget-preflight.spec.ts` | Runtime coordinator model sharing and single worker reservation across asynchronous preparation |

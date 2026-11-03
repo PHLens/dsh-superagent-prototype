@@ -2,6 +2,7 @@
 import { readFileSync, realpathSync } from 'node:fs'
 import { activePlanAssignments, currentAssignmentGraph, type Ticket } from '../core/index.ts'
 import type { Store } from './store.ts'
+import type { Attempt } from './execution-attempts.ts'
 import { digest, type Artifact } from './artifact-store.ts'
 import type { AcceptedReport, GateDecision } from './report-acceptance.ts'
 
@@ -16,7 +17,8 @@ export function assignmentFacts(store: Store, ticket: Ticket, input: { assignmen
   if (input.assignmentId && !all.length) throw new Error('Assignment is not in the current graph')
   const reports = rows<AcceptedReport>(store, 'worker_report', ticket.id), decisions = rows<GateDecision>(store, 'acceptance_decision', ticket.id)
   const assignments = all.slice(offset, offset + limit).map(a => {
-    const report = reports.find(r => r.id === a.reportReceipt?.id) ?? reports.findLast(r => r.assignmentId === a.id)
+    const attempt = store.db.prepare('SELECT value FROM execution_attempt ORDER BY rowid').all().map(row => JSON.parse(String(row.value)) as Attempt).findLast(item => item.projectId === ticket.projectId && item.ticketId === ticket.id && item.assignmentId === a.id)
+    const report = attempt && reports.findLast(r => r.assignmentId === a.id && r.attemptId === attempt.id && r.lease === attempt.lease)
     const decision = decisions.findLast(d => d.assignmentId === a.id && d.reportId === report?.id)
     return { assignmentId: a.id, key: a.contract?.assignmentKey, state: a.state, waitingReason: a.waitingReason,
       goal: preview(a.contract?.proposal?.goal ?? a.contract?.plan.goal ?? ''),
@@ -27,11 +29,11 @@ export function assignmentFacts(store: Store, ticket: Ticket, input: { assignmen
       unresolvedChoice: a.waitingReason === 'needs_judgment' ? 'Judge the current evidence against these conditions; coordinator reads do not pass this gate.' : a.waitingReason === 'blocked' ? 'Resolve the reported blockers within authorization or explain the required human choice.' : undefined }
   })
   return { ticketId: ticket.id, currentGraph: graph ? { id: graph.id, version: graph.version } : undefined, offset, total: all.length, next_offset: offset + assignments.length < all.length ? offset + assignments.length : null,
-    assignments, readMore: { tool: 'project_read_assignment_facts', ticket_id: ticket.id }, readExact: { tool: 'project_read_fact', ticket_id: ticket.id, kinds: ['report', 'decision', 'assignment', 'artifact'], note: 'Use exact ids above; artifact requires content_version. Text previews and arrays may be truncated. Page full records with offset/next_offset.' } }
+    assignments, readMore: { tool: 'project_read_assignment_facts', ticket_id: ticket.id }, readExact: { tool: 'project_read_fact', ticket_id: ticket.id, kinds: ['report', 'decision', 'assignment', 'artifact'], note: 'Use exact ids above; artifact requires content_version. Assignment pages return contentVersion; pass it as content_version on later pages and restart at offset 0 if stale. Text previews and arrays may be truncated. Page full records with offset/next_offset.' } }
 }
 export function readFact(store: Store, ticket: Ticket, input: { kind: 'report' | 'decision' | 'assignment' | 'artifact'; id: string; contentVersion?: string; offset?: number; limit?: number }) {
   let record: unknown
-  if (input.kind === 'assignment') record = ticket.assignments.find(a => a.id === input.id)
+  if (input.kind === 'assignment') record = activePlanAssignments(ticket).find(a => a.id === input.id)
   else if (input.kind === 'artifact') {
     const row = store.db.prepare('SELECT value FROM worker_artifact WHERE id=?').get(input.id)
     const artifact = row && JSON.parse(String(row.value)) as Artifact | undefined
@@ -45,6 +47,8 @@ export function readFact(store: Store, ticket: Ticket, input: { kind: 'report' |
   if (!record) throw new Error('Fact not found in this project task')
   const text = JSON.stringify(record), offset = input.offset ?? 0, limit = Math.min(12000, input.limit ?? 6000)
   if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1) throw new Error('Invalid fact page')
+  const contentVersion = input.kind === 'assignment' ? digest(text) : input.contentVersion
+  if (input.kind === 'assignment' && ((offset > 0 && !input.contentVersion) || (input.contentVersion && input.contentVersion !== contentVersion))) throw new Error('Stale assignment content version; restart from offset 0')
   const content = text.slice(offset, offset + limit)
-  return { ticketId: ticket.id, kind: input.kind, id: input.id, contentVersion: input.contentVersion, encoding: 'json', offset, totalChars: text.length, content, truncated: offset + content.length < text.length, next_offset: offset + content.length < text.length ? offset + content.length : null }
+  return { ticketId: ticket.id, kind: input.kind, id: input.id, contentVersion, encoding: 'json', offset, totalChars: text.length, content, truncated: offset + content.length < text.length, next_offset: offset + content.length < text.length ? offset + content.length : null }
 }

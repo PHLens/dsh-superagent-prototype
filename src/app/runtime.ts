@@ -178,18 +178,32 @@ export class Runtime extends Service implements SourceHost {
           if (related.some(report => report.artifacts.some(ref => { try { artifacts.read(attempt.projectId, ref.id, ref.contentVersion); return false } catch { return true } }))) return false
           return !artifacts.list(attempt.projectId, ticket.id).some(item => item.attemptId === attempt.id && item.lease === attempt.lease && item.status === 'writing')
         },
-        outboundUnknown: ticket => store.db.prepare("SELECT 1 FROM outbox WHERE json_extract(value, '$.ticketId') = ? AND json_extract(value, '$.reconciliation.state') = 'unknown' LIMIT 1").get(ticket.id) !== undefined,
+        ownerExitKnown: ownerId => this.budgetHooks?.ownerExitKnown(ownerId) ?? false,
+         outboundUnknown: ticket => store.db.prepare("SELECT 1 FROM outbox WHERE json_extract(value, '$.ticketId') = ? AND json_extract(value, '$.reconciliation.state') = 'unknown' LIMIT 1").get(ticket.id) !== undefined,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       const validateWorker = (ownerId: string, lease: string) => {
         const { attempt, ticket } = attempts.resolve(ownerId)
         if (this.lifetime.aborted || this.closing() || this.paused() || attempt.lease !== lease || ticket.lifecycle?.pause.intent === 'pause' || ticket.lifecycle?.stop.intent === 'stop') throw new Error('Managed owner authority changed')
       }
+      const legacyOwners = () => [
+        ...store.tickets.list().filter(ticket => !ticket.projectId).map(ticket => ({ ownerId: workerSessionId(ticket.id), projectId: 'legacy', validate: () => {
+          const current = store.tickets.get(ticket.id)
+          if (this.lifetime.aborted || this.closing() || this.paused() || !current || current.ended || current.lifecycle?.pause.intent === 'pause' || current.lifecycle?.stop.intent === 'stop') throw new Error('Legacy worker authority changed')
+        } }))
+      ]
       this.budgetHooks = new ManagedBudgetHooks(ctx, this.scheduler, {
         resolve: ownerId => {
           const attempt = attempts.all().findLast(item => item.sessionId === ownerId)
           if (!attempt) {
             const mapping = this.projectCoordinator.conversations.listMappings().find(item => item.sessionId === ownerId)
-            if (!mapping) return undefined
+            if (!mapping) {
+              const legacy = store.tickets.list().find(item => !item.projectId && workerSessionId(item.id) === ownerId)
+              if (!legacy) return undefined
+              return { ownerId, projectId: 'legacy', validate: () => {
+                const current = store.tickets.get(legacy.id)
+                if (this.lifetime.aborted || this.closing() || this.paused() || !current || current.ended || current.lifecycle?.pause.intent === 'pause' || current.lifecycle?.stop.intent === 'stop') throw new Error('Legacy worker authority changed')
+              } }
+            }
             return { ownerId, projectId: mapping.projectId, validate: () => {
               this.projectCoordinator.validateBudgetOwner(ownerId, mapping.projectId, mapping.generation)
               const current = this.projectCoordinator.conversations.currentMapping(mapping.projectId)
@@ -198,7 +212,7 @@ export class Runtime extends Service implements SourceHost {
           }
           return { ownerId, projectId: attempt.projectId, validate: () => validateWorker(ownerId, attempt.lease) }
         },
-        owners: () => [...attempts.all().filter(attempt => !!attempt.sessionId).map(attempt => ({ ownerId: attempt.sessionId, projectId: attempt.projectId, validate: () => {
+        owners: () => [...legacyOwners(), ...attempts.all().filter(attempt => !!attempt.sessionId).map(attempt => ({ ownerId: attempt.sessionId, projectId: attempt.projectId, validate: () => {
           validateWorker(attempt.sessionId, attempt.lease)
         } })), ...this.projectCoordinator.conversations.listMappings().map(mapping => ({ ownerId: mapping.sessionId, projectId: mapping.projectId, validate: () => this.projectCoordinator.validateBudgetOwner(mapping.sessionId, mapping.projectId, mapping.generation) }))],
         onUncertain: (ownerId, jobId) => {

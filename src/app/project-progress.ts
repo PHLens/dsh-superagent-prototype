@@ -59,7 +59,16 @@ function assignmentProgress(ticket: Ticket, assignment: Assignment, facts: Facts
   const nativeState = native === 'running' || native === 'idle' ? native : 'unknown'
   const report = attempt && facts.reports.findLast(item => item.projectId === ticket.projectId && item.ticketId === ticket.id
     && item.assignmentId === assignment.id && item.attemptId === attempt.id && item.lease === attempt.lease)
-  const question = ticket.attentionQuestions?.find(item => item.binding?.assignmentId === assignment.id) ?? (ticket.attention?.binding?.assignmentId === assignment.id ? ticket.attention : undefined)
+  const target = contract.proposal?.review?.target
+     ? activePlanAssignments(ticket).find(item => item.contract?.assignmentKey === contract.proposal?.review?.target)
+     : undefined
+   const targetAttempt = target && facts.attempts.findLast(item => item.projectId === ticket.projectId && item.ticketId === ticket.id && item.assignmentId === target.id)
+   const targetReport = targetAttempt && facts.reports.findLast(item => item.projectId === ticket.projectId && item.ticketId === ticket.id && item.assignmentId === target.id && item.attemptId === targetAttempt.id && item.lease === targetAttempt.lease)
+   const gateTargetVersion = targetReport ? createHash('sha256').update(JSON.stringify(targetReport.artifacts.map(ref => [ref.id, ref.contentVersion]))).digest('hex') : undefined
+   const gateDecision = targetReport && gateTargetVersion ? facts.decisions.findLast(item => item.projectId === ticket.projectId && item.ticketId === ticket.id
+     && item.assignmentId === target.id && item.reportId === targetReport.id && item.gate === 'completion:' + target.id
+     && item.targetVersion === gateTargetVersion && item.conditionsVersion === contract.proposal?.review?.conditionsVersion) : undefined
+   const question = ticket.attentionQuestions?.find(item => item.binding?.assignmentId === assignment.id) ?? (ticket.attention?.binding?.assignmentId === assignment.id ? ticket.attention : undefined)
   const result: AssignmentProgress = {
     assignmentId: assignment.id, assignmentKey: contract.assignmentKey, title: contract.plan.goal.slice(0, 160), goal: contract.plan.goal,
     state: assignment.state, waitingReason: assignment.waitingReason,
@@ -67,7 +76,7 @@ function assignmentProgress(ticket: Ticket, assignment: Assignment, facts: Facts
     dependencies: contract.inputs.flatMap(input => input.kind === 'dependency' ? [input.assignmentId] : []),
     ...(question ? { question: { id: question.id, version: question.version, question: question.question } } : {}),
     ...(assignment.budgetWait ? { budgetWait: assignment.budgetWait } : assignment.waitingReason === 'worker-slot' ? { budgetWait: 'worker-slot' as const } : {}),
-    ...(contract.proposal?.review ? { gate: { targetAssignmentId: assignment.id, conditionsVersion: contract.proposal?.review.conditionsVersion } } : {}),
+    ...(contract.proposal?.review ? { gate: { targetAssignmentId: target?.id ?? assignment.id, conditionsVersion: contract.proposal?.review.conditionsVersion, ...(gateDecision ? { conclusion: gateDecision.conclusion } : {}) } } : {}),
     authorizationId: contract.authorizationId, planRevision: contract.planRevision,
     attemptId: attempt?.id, attemptState: attempt?.status, phase: 'queued', nativeState,
     conditionsVersion: contract.plan.acceptance?.version ?? contract.planRevision,

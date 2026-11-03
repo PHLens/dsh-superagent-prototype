@@ -132,7 +132,7 @@ export function subagentRuntime(agents: Map<string, FakeAgent>) {
 }
 
 /** @param seed - writes to the database before the Runtime opens it, such as records an earlier version stored. */
-export async function startRuntime(seed?: (store: Store) => void) {
+export async function startRuntime(seed?: (store: Store) => void, pluginContext = false) {
   const directory = mkdtempSync(join(tmpdir(), 'orchestrator-host-'))
   const AGENT = join(directory, 'agent-gh'), BOT = join(directory, 'lark-bot')
   const repository = { default_branch: 'master', permissions: { push: true } }
@@ -256,7 +256,17 @@ export async function startRuntime(seed?: (store: Store) => void) {
   seeded.saveSettings(SettingsSchema.parse({ ...seeded.settings(), sources }))
   seed?.(seeded)
   seeded.close()
-  const runtime = new Runtime(ctx, testMachine({ stateDir: directory }), vi.fn())
+  let runtime!: Runtime
+  if (pluginContext) {
+    const { inject } = await import('../../src/index.ts')
+    for (const name of inject) if (!ctx.get(name)) ctx.reflect.provide(name, {})
+    const activation = Promise.withResolvers<void>()
+    await ctx.plugin({ name: 'entry-runtime-activation', inject, apply: async child => {
+      try { runtime = new Runtime(child, testMachine({ stateDir: directory }), vi.fn()); await runtime.ready; activation.resolve() }
+      catch (error) { activation.reject(error) }
+    } })
+    await activation.promise
+  } else runtime = new Runtime(ctx, testMachine({ stateDir: directory }), vi.fn())
   await runtime.ready
   runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
   const settings = runtime.store.settings()

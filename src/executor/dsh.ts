@@ -68,6 +68,8 @@ export interface ExecutorHost {
   evidenceReady?(ticket: Ticket, assignment: Assignment, attempt: Attempt): boolean
   /** Returns true when an outbound receipt has an unresolved external result for this ticket. */
   outboundUnknown?(ticket: Ticket): boolean
+  /** Verifies producer acknowledgements; terminal JobViews alone cannot certify physical exit. */
+  ownerExitKnown?(ownerId: string): boolean
   /** DSH Cordis context: agents and their events, and the subprocess service used to run prepare commands. */
   readonly context: Context
   /** Where the Executor reports what happened to Assignments and Inputs. */
@@ -266,6 +268,7 @@ export class DshExecutor implements Executor {
         // Read jobs after the await: a job registered while native state was being read is still active evidence.
         const jobs = runningJobs(this.host.context, ownerId)
         if (jobs.length) { state = 'unknown'; reason = 'owner-jobs-still-running'; break }
+         if (this.host.ownerExitKnown && !this.host.ownerExitKnown(ownerId)) { state = 'unknown'; reason = 'producer-exit-unacknowledged'; break }
         if ('error' in resolved && resolved.error.code !== 'session/not-found') { state = 'unknown'; reason = `session-error:${resolved.error.code}`; break }
         if ('agent' in resolved) {
           const agent = resolved.agent
