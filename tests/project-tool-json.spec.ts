@@ -7,13 +7,15 @@ import { pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { projectWorkerTools } from '../src/app/tools/executor.ts'
+import { CodeValidation, codeValidationOperation } from '../src/app/code-validation.ts'
+import type { Commands } from '../src/infra/commands.ts'
 import { projectTools } from '../src/app/tools/main.ts'
 import type { Tool } from '../src/app/tools/tool.ts'
 import { workerFixture } from './fixtures/project-worker.ts'
 
 const rcRoot = process.env.DSH_RC5_RUNTIME
 const suite = rcRoot ? describe : describe.skip
-async function nativeTools(definitions: Tool[]) {
+export async function nativeTools(definitions: Tool[]) {
   const req = createRequire(join(rcRoot!, 'package.json'))
   expect(req('@deepseek-ai/dsh-tools/package.json').version).toBe('0.2.1-rc.5')
   const { Context } = await import(pathToFileURL(req.resolve('@deepseek-ai/cordis')).href)
@@ -85,6 +87,25 @@ suite('project application results through actual rc.5 canonical output validati
       expect(JSON.parse(page.value.content).id).toBe(report.id)
       const foreign = await native.call('project_read_assignment_facts', { ticket_id: 'unowned-task' })
       expect(foreign.isError).toBe(true)
+    } finally { native.dispose(); f.store.close(); rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it.each([
+    ['passed', { status: 'passed', exitCode: 0, signal: undefined }],
+    ['failed', { status: 'failed', exitCode: 1, signal: undefined }],
+    ['aborted', { status: 'aborted', exitCode: 143, signal: 'SIGTERM' }],
+    ['unknown', { status: 'unknown', signal: undefined, error: 'process range remained occupied' }],
+  ] as const)('validates %s code receipts through rc.5 ToolRuntime', async (_label, outcome) => {
+    const dir = mkdtempSync(join(tmpdir(), 'code-validation-json-'))
+    const check = { command: 'python3', args: ['-c', 'print(1)'], profile: 'python-smoke', sourceVersion: 'src-v1', configVersion: 'cfg-v1' }
+    const f = workerFixture(dir, { version: 1, mode: 'registered-files', codeCheck: check }); f.prepare()
+    f.attempts.pinIdentity(f.attempt.id, { executionId: f.attempt.id, projectId: f.project.id, repositoryId: 'resource-1', repository: 'owner/repo', accountId: 'owner', accountCli: 'gh', gitAuthorName: 'Owner', gitAuthorEmail: 'owner@example.com', capturedAt: new Date().toISOString() })
+    const validation = new CodeValidation(f.store, f.attempts, { run: async () => ({ ...outcome, stdout: 'out\\n', stderr: '' }) })
+    const native = await nativeTools(projectWorkerTools(f.attempts, f.artifacts, f.reports, f.attempt.sessionId, undefined, undefined, validation, {} as Commands))
+    try {
+      const result = await native.call('project_validate_code', { operation_id: codeValidationOperation(f.attempt.id, 1) })
+      expect(result.isError).toBe(false)
+      expect(JSON.parse(JSON.stringify(result.value))).toMatchObject({ status: outcome.status, operationId: codeValidationOperation(f.attempt.id, 1) })
     } finally { native.dispose(); f.store.close(); rmSync(dir, { recursive: true, force: true }) }
   })
 })

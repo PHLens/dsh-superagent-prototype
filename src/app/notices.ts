@@ -89,6 +89,9 @@ export function followupNotice(store: Store, sources: SourceRegistry, triggerId:
   if (!trigger || !followupOwners(trigger, store).length) return undefined
   const tickets = disposition!.fanout.flatMap(id => {
     const ticket = store.tickets.get(id)
+    // Project Tickets have their own coordinator lane and are not ordinary ticket workers. Keep a mixed message's
+    // legitimate legacy recipients, but never claim a project Ticket's worker has it in the global Session.
+    if (ticket?.projectId) return []
     const context = disposition!.context?.includes(id) ? { context: true } : {}
     return ticket && liveTicket(ticket) ? [{ ticket_id: id, title: ticket.title, state: ticketCard(ticket).state, ...context }] : []
   })

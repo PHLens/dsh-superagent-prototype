@@ -11,6 +11,10 @@ export interface OutboxHost {
   readonly effects: Pick<Effects, 'enqueue' | 'cancel' | 'handle' | 'idle'>
   readonly sources: Pick<SourceRegistry, 'instance' | 'channelAllowed' | 'send'>
   readonly commands: Commands
+  /** Selects the execution-scoped Commands for a project channel; absence falls back to deployment-wide delivery. */
+  commandsFor?(message: OutboundMessage): Commands | undefined
+  /** Rechecks the live project/resource grant immediately before a project-scoped provider request. */
+  deliveryAuthorization?(message: OutboundMessage): 'authorized' | 'revoked'
   paused(): boolean
 }
 
@@ -45,7 +49,17 @@ export class Outbox implements OutboxPort {
     if (store.receipts.behind(id, FAILURES_BEFORE_ERROR)) throw new Later('An earlier message of this ticket to this conversation waits')
     if (!sources.channelAllowed(receipt.channel)) { store.receipts.settle(receipt, 'channelIgnored'); return }
     // A permanently unreachable target (such as a recalled message or deleted Issue) settles as `channelGone` so its receipt prevents retries.
-    const result = await sources.send(receipt, commands)
+    let selected = commands
+    try { selected = this.host.commandsFor?.(receipt) ?? commands }
+    catch {
+      // A project channel whose registered identity disappeared is a revoked target, never a reason
+      // to fall back to deployment-wide credentials. No provider request has started.
+      store.receipts.settle(receipt, 'channelGone'); return
+    }
+    // This intentionally re-reads the live grant after the delayed queue waited: revocation must be
+    // effective before the first provider request, and the receipt must never become `sent`.
+    if (this.host.deliveryAuthorization?.(receipt) === 'revoked') { store.receipts.settle(receipt, 'channelGone'); return }
+    const result = await sources.send(receipt, selected)
     if (result === 'waiting') throw new Later('The Source is not installed')
     if (result === 'sent') store.receipts.beginUnknown(receipt)
     try { store.receipts.settle(receipt, result === 'gone' ? 'channelGone' : 'sent') }

@@ -4,6 +4,7 @@ import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
 import { githubAccount, type Deployment } from '../deployment.ts'
+import type { ExecutionIdentity } from '../app/execution-environment.ts'
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
@@ -39,6 +40,7 @@ function ended(error: unknown): string {
   if (typeof code === 'number') return `exited with code ${code}`
   return typeof code === 'string' ? `could not run: ${code}` : 'failed'
 }
+export interface CommandResult { status: 'passed' | 'failed' | 'aborted' | 'unknown'; exitCode?: number; signal?: string; stdout: string; stderr: string; error?: string }
 export interface Tally { skipped: number }
 /** Parses array elements against a schema, skipping invalid items and incrementing `tally.skipped`. */
 export function validItems<T>(item: z.ZodType<T>, list: readonly unknown[], tally?: Tally): T[] {
@@ -62,15 +64,53 @@ export class Commands {
    * @param environment - variables overriding `process.env` for every command (such as isolated git settings).
    */
   constructor(private readonly resolved: () => Deployment, private readonly environment: Record<string, string | undefined>, private readonly signal: AbortSignal) {}
+  /** Freeze resolved CLI/repository and Git identity for a specific authorized execution. */
+  forExecution(identity: ExecutionIdentity): Commands {
+    if ((identity.accountCli === undefined) !== (identity.accountId === undefined)) throw new Error('Execution CLI and account identity must be supplied together')
+    const current = this.deployment
+    const snapshot: Deployment = { ...current, repository: identity.repository ?? '', github: identity.accountCli && identity.accountId ? { cli: identity.accountCli, login: identity.accountId, noreply: identity.gitAuthorEmail } : undefined }
+    return new Commands(() => snapshot, { ...this.environment, GIT_AUTHOR_NAME: identity.gitAuthorName, GIT_COMMITTER_NAME: identity.gitAuthorName, GIT_AUTHOR_EMAIL: identity.gitAuthorEmail, GIT_COMMITTER_EMAIL: identity.gitAuthorEmail }, this.signal)
+  }
   get deployment(): Deployment { return this.resolved() }
   get repository(): string { return this.deployment.repository }
+  /**
+   * Verifies with the trusted configured account CLI that the signed-in account can push to
+   * `repository`. The owner/repo string is never accepted merely because it parses.
+   */
+  async verifyRepository(repository: string, account: { cli: string; login: string }, signal?: AbortSignal): Promise<void> {
+    const env = { ...process.env, ...this.environment, GH_PROMPT_DISABLED: '1' }
+    const commandSignal = signal ? AbortSignal.any([this.signal, signal]) : this.signal
+    const run = async (args: string[]): Promise<string> => {
+      try {
+        const { stdout } = await exec(account.cli, args, { encoding: 'utf8', timeout: Math.min(TIMEOUT_MS, 30_000), signal: commandSignal,
+          env, maxBuffer: 1 << 20 })
+        return stdout
+      } catch (error) { throw commandError(error, account.cli) }
+    }
+    const login = (await run(['api', 'user', '--jq', '.login'])).trim()
+    if (login.toLowerCase() !== account.login.toLowerCase()) throw new Error('The configured GitHub CLI is signed in to a different account')
+    const [name, push] = (await run(['api', `repos/${repository}`, '--jq', '[.full_name, .permissions.push] | @tsv'])).trim().split('\t')
+    if (!name || name.toLowerCase() !== repository.toLowerCase()) throw new Error('GitHub repository verification returned a different repository')
+    if (push !== 'true') throw new Error('The configured GitHub account cannot push to this repository')
+  }
   withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal])) : this }
-  async run(program: string, args: string[], cwd?: string): Promise<string> {
+  async runResult(program: string, args: string[], cwd?: string): Promise<CommandResult> {
     try {
-      const { stdout } = await exec(program, args, { cwd, signal: this.signal, timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
+      const { stdout, stderr } = await exec(program, args, { cwd, signal: this.signal, timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
         env: { ...process.env, ...this.environment, GH_PROMPT_DISABLED: '1', LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
-      return stdout
-    } catch (error) { throw commandError(error, program) }
+      return { status: 'passed', exitCode: 0, stdout, stderr }
+    } catch (error) {
+      const value = error as { code?: unknown; signal?: string; killed?: boolean; stdout?: string; stderr?: string; name?: string }
+      const aborted = value.name === 'AbortError' || value.signal === 'SIGTERM' && this.signal.aborted
+      const unknown = value.code === 'UNKNOWN_EXIT' || value.code === 'ERR_CHILD_PROCESS_UNKNOWN'
+      return { status: aborted ? 'aborted' : unknown ? 'unknown' : 'failed', exitCode: typeof value.code === 'number' ? value.code : undefined, signal: value.signal, stdout: value.stdout ?? '', stderr: value.stderr ?? '', error: commandError(error, program).message }
+    }
+  }
+  async run(program: string, args: string[], cwd?: string): Promise<string> {
+    const result = await this.runResult(program, args, cwd)
+    if (result.status === 'aborted') { const error = new Error(result.error ?? 'The operation was aborted'); error.name = 'AbortError'; throw error }
+    if (result.status !== 'passed') throw new CliError(result.error ?? `${program} failed`, undefined, result.exitCode)
+    return result.stdout
   }
   /** Runs the agent's GitHub CLI and parses its JSON output; callers should prefer `api`, which is restricted to the configured repository and validates output. */
   async gh<T>(args: string[]): Promise<T> { return JSON.parse(await this.run(githubAccount(this.deployment).cli, args)) as T }

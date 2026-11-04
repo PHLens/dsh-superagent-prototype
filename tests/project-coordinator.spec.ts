@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -7,6 +7,7 @@ import type { Prompts } from '../src/app/prompts.ts'
 import { Store } from '../src/app/store.ts'
 import { Projects } from '../src/core/index.ts'
 import { ProjectCoordinator } from '../src/app/project-coordinator.ts'
+import { githubFollowId, githubNamespaceOf } from '../src/sources/github-namespace.ts'
 
 const mock = vi.hoisted(() => ({
   ProjectSessionInterrupted: class extends Error {
@@ -316,4 +317,48 @@ it('allows planning, repair and final reply inside 300s, but fences late work wi
     const prepared = await mock.prepare.mock.results.at(-2)?.value
     expect(prepared.cancel).toHaveBeenCalled()
   } finally { await vi.advanceTimersByTimeAsync(300_001); vi.useRealTimers() }
+})
+
+it('makes material writes retry-safe and lets owners publish a skill the catalog can actually serve', async () => {
+  const project = manager.create('alice', { name: 'Materials', goal: 'Register a real tree' })
+  const root = join(directory, 'tree')
+  mkdirSync(root)
+  const input = { type: 'directory' as const, path: root, purpose: 'context', maxBytes: 64_000 }
+  const created = await manager.registerResource('alice', project.id, input, 'register-1')
+  // A retry of the same client operation returns the original registration instead of a duplicate row.
+  expect(await manager.registerResource('alice', project.id, input, 'register-1')).toEqual(created)
+  expect(manager.materials('alice', project.id).resources).toHaveLength(1)
+  // The same operation id with a different payload is a conflict, not an overwrite.
+  await expect(manager.registerResource('alice', project.id, { ...input, purpose: 'code-source' }, 'register-1')).rejects.toThrow('Operation payload conflicts')
+  const knowledge = manager.saveKnowledge('alice', project.id, { kind: 'note', title: 'Finding', content: 'Registered content', source: { kind: 'import' } }, 'knowledge-1')
+  expect(manager.saveKnowledge('alice', project.id, { kind: 'note', title: 'Finding', content: 'Registered content', source: { kind: 'import' } }, 'knowledge-1')).toEqual(knowledge)
+  // Confirmation appends an immutable version; the same client operation must not duplicate it on retry.
+  const confirmed = manager.confirmKnowledge('alice', project.id, knowledge.id, 'confirm-1')
+  expect(manager.confirmKnowledge('alice', project.id, knowledge.id, 'confirm-1')).toEqual(confirmed)
+  expect(manager.materials('alice', project.id).knowledge.filter(item => item.state === 'confirmed')).toHaveLength(1)
+  // Revocation is idempotent and repeatable through the same receipt.
+  expect(manager.revokeResource('alice', project.id, created.id, 'revoke-1')).toEqual({ revoked: true })
+  expect(manager.revokeResource('alice', project.id, created.id, 'revoke-1')).toEqual({ revoked: true })
+
+  const skill = { name: 'materials-walkthrough', version: '1', description: 'How to walk registered material', body: '# Walkthrough\nRead a page, then continue with its snapshot.\n', roles: ['coordinator' as const], stages: ['planning'], resources: [], tools: [] }
+  const published = manager.publishSkill('alice', project.id, skill, 'skill-1')
+  expect(manager.publishSkill('alice', project.id, skill, 'skill-1')).toEqual(published)
+  // The catalog serves it to the role/stage that published it, so the loader has a real skill to load.
+  expect(manager.skills.candidates({ projectId: project.id, role: 'coordinator', stage: 'planning', resources: [], tools: [] }).map(item => item.name)).toContain('materials-walkthrough')
+  expect(() => manager.publishSkill('alice', project.id, { ...skill, body: '# Different' }, 'skill-2')).toThrow('Skill version already exists with different content')
+})
+
+
+it('resolves terminal notice repositories only from the matching registered resource identity', () => {
+  const project = manager.create('owner', { name: 'Repository notices', goal: 'Map exact PR scope' })
+  const resource = (name: string) => manager.resources.register({ projectId: project.id, type: 'repository', path: directory, purpose: name, maxBytes: 64_000 })
+  const first = resource('first'), second = resource('second')
+  manager.identities.register({ projectId: project.id, resourceId: first.id, repository: 'owner/a', accountId: 'agent', accountCli: '/bin/false', gitAuthorName: 'Agent', gitAuthorEmail: 'agent@example.com' })
+  manager.identities.register({ projectId: project.id, resourceId: second.id, repository: 'owner/b', accountId: 'agent', accountCli: '/bin/false', gitAuthorName: 'Agent', gitAuthorEmail: 'agent@example.com' })
+  const namespaceA = githubNamespaceOf({ projectId: project.id, repositoryId: first.id, accountId: 'agent', repository: 'owner/a' })!
+  const namespaceB = githubNamespaceOf({ projectId: project.id, repositoryId: second.id, accountId: 'agent', repository: 'owner/b' })!
+  expect(manager.pullRepositoryFor(project.id, githubFollowId(namespaceA, 41))).toBe('owner/a')
+  expect(manager.pullRepositoryFor(project.id, githubFollowId(namespaceB, 41))).toBe('owner/b')
+  manager.resources.revoke(project.id, first.id)
+  expect(manager.pullRepositoryFor(project.id, githubFollowId(namespaceA, 41))).toBeUndefined()
 })

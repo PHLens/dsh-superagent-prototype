@@ -211,6 +211,26 @@ export interface Decision {
   dismissed?: true
 }
 
+/** Server-approved command and immutable inputs required for a structured code-validation receipt. */
+export interface CodeCheck {
+  readonly command: string; readonly args: readonly string[]
+  readonly profile: string
+  /** Registered material the check runs on; the server fills these when it resolves the contract. */
+  readonly sourceResourceId?: string; readonly configResourceId?: string; readonly runtimeResourceId?: string
+  /** Exact captured content versions of that material, never registration metadata. */
+  readonly sourceVersion: string; readonly configVersion: string
+  /** Exact content version of the registered interpreter at review time. */
+  readonly runtimeVersion?: string
+}
+/** Server-resolved executable and registered material for one code check. */
+export interface CodeCheckBinding {
+  readonly sourceResourceId: string; readonly sourceVersion: string
+  readonly configResourceId: string; readonly configVersion: string
+  readonly runtimeResourceId?: string; readonly runtimeVersion?: string
+  readonly profile: string
+  /** Resolved command line, kept apart from the reviewed check identity. `{source}`/`{config}` name the staged trees. */
+  readonly argv: readonly string[]
+}
 /** A coordinator-proposed work package inside one confirmed scope. IDs are local to the plan. */
 export interface AssignmentProposal {
   readonly key: string
@@ -222,7 +242,7 @@ export interface AssignmentProposal {
   readonly dependencies: readonly string[]
   /** Each writer receives its own server-owned attempt directory. */
   readonly writeScope: 'isolated-directory'
-  readonly acceptance: { readonly version: number; readonly mode: 'registered-files' | 'human-review' }
+  readonly acceptance: { readonly version: number; readonly mode: 'registered-files' | 'human-review'; readonly codeCheck?: CodeCheck }
   readonly review?: { readonly target: string; readonly conditionsVersion: number }
   readonly retry?: { readonly on: readonly ('failed' | 'changes_required')[]; readonly limit: number }
 }
@@ -236,7 +256,7 @@ export interface PlanContent {
   readonly cost: string
   readonly completion: string
   /** Confirmed deterministic file checks, or an explicit independent human semantic gate. */
-  readonly acceptance?: { readonly version: number; readonly mode: 'registered-files' | 'human-review' }
+  readonly acceptance?: { readonly version: number; readonly mode: 'registered-files' | 'human-review'; readonly codeCheck?: CodeCheck }
   /** Exact registered project artifact versions approved with this plan. */
   readonly artifactInputs?: readonly { readonly artifactId: string; readonly contentVersion: string }[]
   /** Server-validated multi-worker decomposition proposed by the coordinator. */

@@ -47,8 +47,14 @@ export class Intake extends EnginePart {
       this.repo.threads.save(thread)
     }
     for (const [ticketId, { ticket, context: followed }] of reached) {
-      this.tickets.addInput(ticket, { id: key('input', ticketId, 'trigger', trigger.id), kind: 'trigger', triggerId: trigger.id, at,
+      const inputId = key('input', ticketId, 'trigger', trigger.id)
+      this.tickets.addInput(ticket, { id: inputId, kind: 'trigger', triggerId: trigger.id, at,
         ...trigger.human ? { human: true } : {}, ...followed ? { context: true } : {} })
+      // Saving a project Ticket's input is not delivery: its coordinator lane needs one durable fact in the same
+      // transaction. Context-only, filtered, unbound and non-human messages never reach this branch.
+      if (ticket.projectId && trigger.human && !followed && liveTicket(ticket)) {
+        this.options.projectFeedback?.({ projectId: ticket.projectId, ticketId, triggerId: trigger.id, inputId, at, threads: keys })
+      }
     }
     const fanout = [...reached.keys()], context = fanout.filter(id => reached.get(id)!.context)
     const disposition = { fanout, ...context.length ? { context } : {}, at }

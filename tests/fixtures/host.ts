@@ -164,7 +164,7 @@ export async function startRuntime(seed?: (store: Store) => void, pluginContext 
   /** Each Session's next step, which takes the messages that wait for one. */
   const steps = new Map<string, () => void>(), claims = new Map<string, () => void>()
   const tools = new Map<string, Map<string, RegisteredTool>>()
-  const guards = new Map<string, ((execution: { name: string; args: unknown }) => string | undefined)[]>()
+  const guards = new Map<string, ((execution: { name: string; arguments?: unknown; args: unknown }) => string | undefined)[]>()
   const workspaces = new Map<string, { id: string; path: string; sessionIds: string[] }>()
   const deliveries = vi.fn<(request: Delivery) => void>()
   let http!: HttpHandler
@@ -178,7 +178,7 @@ export async function startRuntime(seed?: (store: Store) => void, pluginContext 
       const register = (tool: RegisteredTool) => { sessionTools.set(tool.name, tool); return () => sessionTools.delete(tool.name) }
       guards.set(sessionId, [])
       agentCtx.reflect.provide('tools', { register, get: () => undefined, restrict: vi.fn(() => () => {}), guard: vi.fn(guard => { guards.get(sessionId)!.push(guard); return () => {} }) })
-      agentCtx.reflect.provide('skills', { register: () => () => {} })
+      agentCtx.reflect.provide('skills', { register: () => () => {}, registerProvider: () => () => {} })
       agentCtx.reflect.provide('systemPrompt', { section: () => () => {} })
       const inbox = { nextTurn: [] as UserMessage[], nextStep: [] as UserMessage[],
         // A pending message taken out, as DSH's inbox does by its id.
@@ -286,7 +286,7 @@ export async function startRuntime(seed?: (store: Store) => void, pluginContext 
   }
   const runGuardedTool = async (sessionId: string, name: string, args: unknown) => {
     for (const guard of guards.get(sessionId) ?? []) {
-      const refusal = await guard({ name, args })
+      const refusal = await guard({ name, arguments: args, args })
       if (refusal) throw new Error(refusal)
     }
     return runTool(sessionId, name, args)

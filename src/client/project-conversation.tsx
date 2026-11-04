@@ -6,6 +6,7 @@ import { useAction, usePanel, usePanelData } from './provider.tsx'
 import { errorText } from './text.ts'
 import { Hint, LoadState } from './widgets.tsx'
 import { TaskLifecycle } from './task-lifecycle.tsx'
+import { ProjectMaterials } from './project-materials.tsx'
 
 const budgetLabels = { 'global-budget': 'assignmentBudgetGlobal', 'project-fairness': 'assignmentBudgetFairness', 'worker-slot': 'executionWorkerSlot' } as const
 
@@ -93,6 +94,7 @@ export function ProjectConversation({ id }: { id: string }) {
   return <div className="dt-conversation">
     <div><Button size="sm" icon={<Icon name="chevron-left" />} onClick={() => navigate({ page: 'projects' })}>{t('tab.projects')}</Button></div>
     <header><h2>{data.project.name}</h2><p className="dt-hint">{t('projectGoalPrefix')}{data.project.goal}</p></header>
+    <ProjectMaterials id={id} readOnly={readOnly} />
     {state?.safeRestore && <Hint>{t('recoveryReadOnly')}</Hint>}
     {error && <LoadState error={error} loading={false} />}
     {data.coordinator?.status === 'error' && <div className="dt-banner dt-danger" role="alert">
@@ -153,6 +155,7 @@ export function ProjectConversation({ id }: { id: string }) {
               <dt>{t('planCost')}</dt><dd>{plan.cost}</dd>
               <dt>{t('planCompletion')}</dt><dd>{plan.completion}</dd>
               <dt>{t('acceptanceMode')}</dt><dd>{t(plan.acceptance?.mode === 'registered-files' ? 'registeredFiles' : 'humanReview')}</dd>
+               {plan.acceptance?.codeCheck && <><dt>Code validation</dt><dd>Profile: {plan.acceptance.codeCheck.profile}; command: {[plan.acceptance.codeCheck.command, ...plan.acceptance.codeCheck.args].join(' ')}; source: {plan.acceptance.codeCheck.sourceVersion}; config: {plan.acceptance.codeCheck.configVersion}; budget: {plan.cost}</dd></>}
             </dl>
             {!!plan.assignments?.length && <section aria-label={t('assignmentPlan')}>
               <h4>{t('assignmentPlan')}</h4>

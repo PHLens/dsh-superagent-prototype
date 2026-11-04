@@ -4,10 +4,12 @@
  * Provides default-path guardrails rather than an OS-level security boundary, as workers run under the operator's OS user.
  */
 import { lstat, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
-import { realpathSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { delimiter, join, resolve } from 'node:path'
 import type { SubprocessOutputReader, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { Deployment } from '../deployment.ts'
+import type { ExecutionIdentity } from '../app/execution-environment.ts'
 import { SetupError } from '../setup.ts'
 import { CliError } from './commands.ts'
 
@@ -18,6 +20,57 @@ const LEGACY_MARKERS = ['dsh-tag', 'dsh-go', 'dsh-freelancer'].map(name => `# Wr
 export const WORKER_COMMANDS: readonly string[] = ['gh', 'git', 'lark-cli']
 export const workerBin = (stateDir: string): string => join(stateDir, 'worker-bin')
 export const workerGitConfig = (stateDir: string): string => join(stateDir, 'worker-gitconfig')
+/** App-owned identity facts one execution's git and gh shims consult; never written by a worker. */
+export const executionIdentityDir = (stateDir: string, executionId: string): string => join(stateDir, 'executions', executionId)
+/** Completion marker naming every file and its SHA-256; the shims refuse a directory without it. */
+const IDENTITY_MARKER = '.complete.json'
+type IdentityFiles = { version: 1; executionId: string; files: Record<'git-name' | 'git-email' | 'gh-cli', string> }
+function identityBytes(identity: ExecutionIdentity): Record<'git-name' | 'git-email' | 'gh-cli', string> {
+  return { 'git-name': identity.gitAuthorName, 'git-email': identity.gitAuthorEmail, 'gh-cli': identity.accountCli! }
+}
+function verifyIdentityDirectory(dir: string, identity: ExecutionIdentity): boolean {
+  try {
+    const marker = JSON.parse(readFileSync(join(dir, IDENTITY_MARKER), 'utf8')) as IdentityFiles
+    if (marker.version !== 1 || marker.executionId !== identity.executionId) return false
+    for (const [name, value] of Object.entries(identityBytes(identity))) {
+      if (marker.files[name as keyof IdentityFiles['files']] !== createHash('sha256').update(value).digest('hex')) return false
+      if (readFileSync(join(dir, name), 'utf8') !== value) return false
+    }
+    return true
+  } catch { return false }
+}
+/**
+ * Atomically publishes the complete pinned identity files (or regenerates them for an existing
+ * Attempt). A crash leaves either the previous complete directory or no directory, never a partial
+ * one; preparation verifies the result before a shell can use it.
+ */
+export function writeExecutionIdentity(stateDir: string, identity: ExecutionIdentity): void {
+  // A non-repository execution has no shell identity; project attempts with one must be complete.
+  if (!identity.repositoryId) return
+  if (!identity.accountCli || !identity.accountId || !identity.repository || !identity.gitAuthorName.trim() || !identity.gitAuthorEmail.trim()) throw new Error('Execution identity files are incomplete')
+  const dir = executionIdentityDir(stateDir, identity.executionId), parent = join(stateDir, 'executions')
+  mkdirSync(parent, { recursive: true, mode: 0o700 })
+  if (verifyIdentityDirectory(dir, identity)) return
+  const files = identityBytes(identity)
+  const temporary = join(parent, `.identity-${identity.executionId}-${randomUUID()}`), trash = `${temporary}-old`
+  mkdirSync(temporary, { mode: 0o700 })
+  for (const [name, value] of Object.entries(files)) writeFileSync(join(temporary, name), value, { mode: 0o600 })
+  const marker: IdentityFiles = { version: 1, executionId: identity.executionId, files: Object.fromEntries(Object.entries(files).map(([name, value]) => [name, createHash('sha256').update(value).digest('hex')])) as IdentityFiles['files'] }
+  writeFileSync(join(temporary, IDENTITY_MARKER), JSON.stringify(marker), { mode: 0o600 })
+  try {
+    if (existsSync(dir)) { renameSync(dir, trash); renameSync(temporary, dir); rmSync(trash, { recursive: true, force: true }) }
+    else renameSync(temporary, dir)
+  } catch (error) {
+    rmSync(temporary, { recursive: true, force: true })
+    // A concurrent publication of the same pinned facts is the same result.
+    if (!verifyIdentityDirectory(dir, identity)) throw error
+  }
+}
+/** Preparation-time assertion that the published files match the Attempt's persisted identity. */
+export function verifyExecutionIdentity(stateDir: string, identity: ExecutionIdentity): void {
+  if (!identity.repositoryId) return
+  if (!verifyIdentityDirectory(executionIdentityDir(stateDir, identity.executionId), identity)) throw new Error('Execution identity files are missing or incomplete')
+}
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
 const gitQuote = (value: string): string => `"${value.replace(/[\\"]/g, char => `\\${char}`)}"`
 export const credentialHelper = (cli: string): string => `!${shellQuote(cli)} auth git-credential`
@@ -42,6 +95,10 @@ export const GIT_LOCATION: readonly string[] = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT
  * Returns environment variable overrides that strip ambient GitHub tokens, interactive prompts, the repository the host's own
  * environment may name, and operator git identity/config overrides.
  */
+export function agentVariablesForExecution(stateDir: string, identity: ExecutionIdentity): Record<string, string | undefined> {
+  return { ...agentVariables(stateDir), DSH_EXECUTION_ID: identity.executionId, DSH_REPOSITORY: identity.repository, DSH_GITHUB_ACCOUNT: identity.accountId, ...(identity.deliveryBranch ? { DSH_DELIVERY_BRANCH: identity.deliveryBranch } : {}), GIT_AUTHOR_NAME: identity.gitAuthorName, GIT_COMMITTER_NAME: identity.gitAuthorName, GIT_AUTHOR_EMAIL: identity.gitAuthorEmail, GIT_COMMITTER_EMAIL: identity.gitAuthorEmail }
+}
+
 export function agentVariables(stateDir: string): Record<string, string | undefined> {
   return {
     GH_TOKEN: undefined, GITHUB_TOKEN: undefined,
@@ -97,7 +154,47 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
   ].join('\n')
   const run = (program: string): string => `${withoutShims}\nexec ${shellQuote(program)} "$@"`
   const fail = (message: string): string => `echo ${shellQuote(message)} >&2\nexit 1`
-  await shim('gh', github ? run(github.cli) : fail('gh is unavailable: this installation has no GitHub resource.'))
+  // Per-execution facts live beside the deployment defaults; an execution without one uses the default.
+  const identity = `${shellQuote(join(stateDir, 'executions'))}/$DSH_EXECUTION_ID`
+  // The marker is not a presence check: every file's bytes must hash to the marker's recorded digest.
+  // A damaged, partial or externally edited directory fails closed; an app-side missing directory is
+  // atomically republished from the persisted Attempt before a shell call.
+  const identityComplete = `identity_ok() {
+  dir=$1; marker=$dir/.complete.json
+  [ -s "$marker" ] && [ -s "$dir/gh-cli" ] && [ -s "$dir/git-name" ] && [ -s "$dir/git-email" ] || return 1
+  text=$(cat "$marker") || return 1
+  case "$text" in
+    *'"version":1'*'"executionId":"'"$DSH_EXECUTION_ID"'"'*) ;;
+    *) return 1 ;;
+  esac
+  if command -v shasum >/dev/null 2>&1; then hasher=shasum; hasher_args='-a 256'
+  elif command -v sha256sum >/dev/null 2>&1; then hasher=sha256sum; hasher_args=''
+  else return 1; fi
+  for name in git-name git-email gh-cli; do
+    expected=$(printf '%s\\n' "$text" | sed -n 's/.*"'"$name"'":"\\([0-9a-f][0-9a-f]*\\)".*/\\1/p')
+    [ \${#expected} -eq 64 ] || return 1
+    actual=$($hasher $hasher_args "$dir/$name" | awk '{print $1}') || return 1
+    [ "$actual" = "$expected" ] || return 1
+  done
+  return 0
+}
+identity_ok ${identity}`
+  const gh = github ? `${withoutShims}
+if [ -n "\${DSH_EXECUTION_ID:-}" ]; then
+  ${identityComplete} || { echo 'The pinned execution identity files are missing, incomplete or corrupt.' >&2; exit 1; }
+  exec "$(cat ${identity}/gh-cli)" "$@"
+fi
+exec ${shellQuote(github.cli)} "$@"` : fail('gh is unavailable: this installation has no GitHub resource.')
+  await shim('gh', gh)
+  // Git identity and GitHub credentials follow the pinned execution, not whatever the operator's global config says.
+  await shim('git', `${withoutShims}
+if [ -n "\${DSH_EXECUTION_ID:-}" ]; then
+  ${identityComplete} || { echo 'The pinned execution identity files are missing, incomplete or corrupt.' >&2; exit 1; }
+  name=$(cat ${identity}/git-name); email=$(cat ${identity}/git-email); helper=$(cat ${identity}/gh-cli)
+  export GIT_AUTHOR_NAME=$name GIT_COMMITTER_NAME=$name GIT_AUTHOR_EMAIL=$email GIT_COMMITTER_EMAIL=$email
+  exec git -c user.name="$name" -c user.email="$email" -c "credential.https://github.com.helper=!'$helper' auth git-credential" "$@"
+fi
+exec git "$@"`)
   await shim('lark-cli', feishu ? run(feishu.cli) : fail('lark-cli is unavailable: this installation has no Feishu bot.'))
   for (const name of new Set(blockedCommands.filter(name => !WORKER_COMMANDS.includes(name)))) {
     await shim(name, fail(`${name} is blocked in this installation${github ? `; use gh, which acts as ${github.login}.` : '.'}`))

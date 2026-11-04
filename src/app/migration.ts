@@ -17,7 +17,7 @@ import type { SettingsVersion, Store } from './store.ts'
 import { Versions } from './versions.ts'
 import { KV, type Key } from '../kv.ts'
 
-export const SCHEMA_VERSION = 17
+export const SCHEMA_VERSION = 18
 /** The oldest database schema version this build can open and migrate directly. */
 export const OLDEST_SCHEMA = 10
 /** Returns an error message explaining why `version` cannot be opened: older schemas need a new state directory. */
@@ -49,6 +49,11 @@ export function migrateTo17(store: Store): void {
     }
     store.db.prepare('UPDATE ticket SET value=? WHERE id=?').run(JSON.stringify(ticket), ticket.id)
   }
+}
+
+/** T7 adds durable code-validation reservations inside the versioned store boundary. */
+export function migrateTo18(store: Store): void {
+  store.db.exec('CREATE TABLE IF NOT EXISTS code_validation (id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, operation_id TEXT NOT NULL, value TEXT NOT NULL, UNIQUE(attempt_id, operation_id))')
 }
 
 type Stored = Record<string, unknown>

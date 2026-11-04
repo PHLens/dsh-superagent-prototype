@@ -14,12 +14,12 @@ import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
-import { Engine, Projects, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
+import { Engine, Projects, key, reasonText, type EngineForSettings, type ProjectFeedbackFact, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
 import { allowedSender, settingsPolicy } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
 import type { Deployment, Machine } from '../deployment.ts'
-import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
+import { environmentOf, ticketEnvironment, type ExecutionIdentity, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
 import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
 import { ticketCard } from './cards.ts'
@@ -27,6 +27,9 @@ import { MasterAssessor } from './assessment.ts'
 import { KV } from '../kv.ts'
 import { Store } from './store.ts'
 import { ProjectCoordinator } from './project-coordinator.ts'
+import { ProjectEvents } from './events.ts'
+import { executionIdentityContributor } from './execution-identity.ts'
+import { WorkerCleanup } from './worker-cleanup.ts'
 import { ProjectScheduler, ManagedBudgetHooks } from './scheduler.ts'
 import { evalsHealth } from './views/overview.ts'
 import { TextCache } from './cache.ts'
@@ -37,6 +40,8 @@ import type { LinkTarget } from './views/records.ts'
 import { candidateCard, repliedTo, sourceLink, type LinkHost } from './links.ts'
 import { eventNotice, followupNotice } from './notices.ts'
 import { pullEndNotices } from '../sources/github-pull.ts'
+import { watch as watchGithub } from '../sources/github.ts'
+import { githubNamespaceOf, githubThreadNumber } from '../sources/github-namespace.ts'
 import { HealthBoard } from '../infra/health.ts'
 import { Outbox } from './outbox.ts'
 import { Passes } from './passes.ts'
@@ -92,6 +97,8 @@ export class Runtime extends Service implements SourceHost {
   private budgetHooks?: ManagedBudgetHooks
   private closingFlag = false
   private stopping?: Promise<void>
+  private workerCleanup?: WorkerCleanup
+  private readonly githubConsumers = new Map<string, { signature: string; controller: AbortController }>()
   private readonly sourceDeps: SourceContextDeps
   private readonly toolHost: MainToolsHost & ExecutorToolsHost
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
@@ -115,10 +122,13 @@ export class Runtime extends Service implements SourceHost {
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
       const feishu = () => setup.configured() && !!setup.deployment.feishu
       const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu)
+      const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)
       this.projectCoordinator = new ProjectCoordinator(ctx, store, this.projects, machine.stateDir, this.lifetime, prompts)
+      this.projectCoordinator.setRepositoryVerifier(({ repository, accountId, accountCli }, signal) => commands.verifyRepository(repository, { cli: accountCli, login: accountId }, signal))
+      this.projectCoordinator.setGithubContext(identity => this.contextForExecution(identity))
+      this.projectCoordinator.setResourceChange(() => this.syncGitHubConsumers())
       const masterId = this.masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
       store.set(KV.runtime.masterId, masterId)
-      const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)
       const board = this.board
       const effects = this.effects = new Effects(store, board)
       const sources = this.sources = new SourceRegistry(() => store.settings(), board, kind => {
@@ -134,10 +144,10 @@ export class Runtime extends Service implements SourceHost {
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
       const { attempts, artifacts, reports } = this.projectCoordinator
-      const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId, attempts,
+      const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId, attempts, reports, skillCatalog: this.projectCoordinator.skills, knowledge: this.projectCoordinator.knowledge, resources: this.projectCoordinator.resources,
         lifetime: this.lifetime,
         closing: () => this.closing(), environment,
-        tools: (agent, ticket) => attempts.bySession(agent.id) ? projectWorkerTools(attempts, artifacts, reports, engine, agent.id) : ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
+        tools: (agent, ticket) => attempts.bySession(agent.id) ? projectWorkerTools(attempts, artifacts, reports, engine, agent.id, this.projectCoordinator.resources, this.projectCoordinator.validation, this.commands) : ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       const databasePath = store.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file
       if (typeof databasePath !== 'string') throw new Error('Orchestrator database path is unavailable')
@@ -145,7 +155,8 @@ export class Runtime extends Service implements SourceHost {
         recoveryRoots: () => {
            const projects = join(machine.stateDir, 'projects')
            const workspaces = store.tickets.list().flatMap(ticket => ticket.execution?.directory && existsSync(ticket.execution.directory) ? [ticket.execution.directory] : [])
-           return { workspaces: [...new Set([projects, ...workspaces].filter(existsSync))], nativeState: [] }
+           const externalResources = this.projects.list().flatMap(project => this.projectCoordinator.resources.list(project.id)).filter(resource => !resource.revoked).map(resource => resource.path)
+           return { workspaces: [...new Set([projects, ...workspaces].filter(existsSync))], nativeState: [], externalResources: [...new Set(externalResources.filter(existsSync))] }
          },
         prepareMaterials: () => this.backupMaterials(), applicationFull: true, health: board.claim('backup'), lifetime: this.lifetime })
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
@@ -165,10 +176,18 @@ export class Runtime extends Service implements SourceHost {
             if (changed) store.tickets.save(ticket)
           }
         } })
-      this.projectCoordinator.setBudgetWaitResolver(projectId => {
+      // A read-only restore profile must never create, adopt, stop or rewrite native validation jobs.
+      if (!this.safeRestore) this.projectCoordinator.setScheduler(this.scheduler, this.ctx.get('jobs') as import('./native-validation-job.ts').ValidationNativeJobs)
+       this.projectCoordinator.setBudgetWaitResolver(projectId => {
         const mapping = this.projectCoordinator.conversations.currentMapping(projectId)
         return this.scheduler.status().find(row => row.kind === 'model' && row.state === 'queued' && row.projectId === projectId && row.ownerId === mapping?.sessionId)?.waitingReason
       })
+      // Retiring finished workers touches only the navigation surface; the restore profile never writes it.
+      this.workerCleanup = this.safeRestore ? undefined : new WorkerCleanup({ ctx, store, attempts, lifetime: this.lifetime,
+        closing: () => this.closing(), ownerExitKnown: ownerId => (this.budgetHooks?.ownerExitKnown(ownerId) ?? false) && this.projectCoordinator.validation.ownerExitKnown(ownerId) })
+      // Acceptance itself ends an Attempt without passing through the Executor, so ending is observed
+      // where it is written rather than at each caller.
+      attempts.onEnded(attemptId => { void this.workerCleanup?.consider(attemptId).catch(() => {}) })
       this.executor = new DshExecutor({ scheduler: this.scheduler, context: ctx, get engine() { return runtime.engine }, store, effects, attempts, masterId, health: board.claim('worker'), machine,
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         checkpointFiles: ticket => ticket.projectId ? artifacts.list(ticket.projectId, ticket.id).filter(item => item.status === 'registered').map(item => item.path) : [],
@@ -178,7 +197,9 @@ export class Runtime extends Service implements SourceHost {
           if (related.some(report => report.artifacts.some(ref => { try { artifacts.read(attempt.projectId, ref.id, ref.contentVersion); return false } catch { return true } }))) return false
           return !artifacts.list(attempt.projectId, ticket.id).some(item => item.attemptId === attempt.id && item.lease === attempt.lease && item.status === 'writing')
         },
-        ownerExitKnown: ownerId => this.budgetHooks?.ownerExitKnown(ownerId) ?? false,
+        ownerExitKnown: ownerId => (this.budgetHooks?.ownerExitKnown(ownerId) ?? false) && this.projectCoordinator.validation.ownerExitKnown(ownerId),
+        reconcileOwner: async ownerId => { await this.projectCoordinator.validation.reconcileOwner(ownerId); this.workerCleanup?.start() },
+        retireWorker: attemptId => { void this.workerCleanup?.consider(attemptId).catch(() => {}) },
          outboundUnknown: ticket => store.db.prepare("SELECT 1 FROM outbox WHERE json_extract(value, '$.ticketId') = ? AND json_extract(value, '$.reconciliation.state') = 'unknown' LIMIT 1").get(ticket.id) !== undefined,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       const validateWorker = (ownerId: string, lease: string) => {
@@ -230,11 +251,29 @@ export class Runtime extends Service implements SourceHost {
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
-      const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
+      const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused(), commandsFor: message => {
+          const address = message.channel.address
+          if (!address.projectId || !address.resourceId) return undefined
+          const identity = this.projectCoordinator.identities.pin(address.projectId, address.resourceId, `github-delivery:${message.id}`)
+          return this.commands.forExecution(identity)
+        }, deliveryAuthorization: message => {
+          const address = message.channel.address
+          if (message.channel.source !== 'github' || !address.projectId || !address.resourceId) return 'authorized'
+          try {
+            const resource = this.projectCoordinator.resources.get(address.projectId, address.resourceId)
+            if (resource.type !== 'repository') return 'revoked'
+            const identity = this.projectCoordinator.identities.pin(address.projectId, address.resourceId, `github-delivery:${message.id}`)
+            if (!identity.repository || !identity.accountId) return 'revoked'
+            if (address.repository && address.repository.toLowerCase() !== identity.repository.toLowerCase()) return 'revoked'
+            if (address.account && address.account.toLowerCase() !== identity.accountId.toLowerCase()) return 'revoked'
+            return 'authorized'
+          } catch { return 'revoked' }
+        } })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources)
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
-        outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
+        outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome),
+        projectFeedback: fact => this.recordProjectFeedback(fact), emit: event => {
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
           if (notice) sessions.notify(...notice)
@@ -247,22 +286,30 @@ export class Runtime extends Service implements SourceHost {
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
           if (ended && setup.configured()) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
-            for (const message of pullEndNotices(ended, request, setup.deployment.repository)) outbox.send(message)
+            const repositoryFor = (thread: string): string | undefined => ended.projectId
+              ? this.projectCoordinator.pullRepositoryFor(ended.projectId, thread)
+              : setup.deployment.repository
+            for (const message of pullEndNotices(ended, request, repositoryFor)) outbox.send(message)
           }
         } })
       // Update the `evals` health entry on every pass if an evaluation failed as unavailable within the last hour.
       const evals = board.claim('evals', { state: 'ready', detail: 'No unavailable Eval in the last hour' })
       const evaluateDue = () => { engine.evaluateDue(); evals.set(evalsHealth(store)) }
-      const passes = this.passes = new Passes({ engine: { receive: trigger => engine.receive(trigger), evaluateDue }, effects, projectPass: () => { this.budgetHooks?.sync(); this.scheduler.refresh(); this.projectCoordinator.pumpEvents(); return executor.dispatchProjects() },
+      const passes = this.passes = new Passes({ engine: { receive: trigger => engine.receive(trigger), evaluateDue }, effects, projectPass: () => { this.budgetHooks?.sync(); this.scheduler.refresh(); this.syncGitHubConsumers(); this.projectCoordinator.pumpEvents(); return executor.dispatchProjects() },
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
-        get githubProblem() { return setup.githubProblem }, get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => passes.receive(trigger) }
+        get githubProblem() { return setup.githubProblem }, get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
+        receive: trigger => passes.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, prompts, sessions, settings: this.settings, assessor, resources,
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
         quietly: run => { this.quiet++; try { return run() } finally { this.quiet-- } } }
       this.ready = this.initialize()
+      void this.ready.then(() => { this.syncGitHubConsumers() }).catch(() => {})
+      // A crash may commit a terminal Attempt without ever delivering onEnded. Recover those after
+      // startup is ready (restore and backup capture have settled), never during the commit itself.
+      void this.ready.then(() => { this.workerCleanup?.start() }).catch(() => {})
     } catch (error) {
       // Release the database and state lock if initialization fails so an in-process restart can reacquire them.
       try { opened?.close() } finally { release() }
@@ -273,6 +320,57 @@ export class Runtime extends Service implements SourceHost {
   /** Aborted when dsh-superagent stops or loses its state directory lock, cancelling running reads and subprocesses. */
   get lifetime(): AbortSignal { return this.stopped.signal }
   context(kind: { kind: string; health: readonly string[] }): SourceContext { return sourceContextOf(this.sourceDeps, kind) }
+  /**
+   * Builds a Source context from one persisted project/resource/Attempt identity. The Commands
+   * snapshot, deployment view, namespace, cursors and ticket/thread filters all belong to that
+   * execution; no shared Runtime namespace is mutated.
+   */
+  contextForExecution(identity: ExecutionIdentity): SourceContext {
+    const commands = this.commands.forExecution(identity), setup = this.setup
+    return sourceContextOf({
+      store: this.store, outbox: this.outbox, engine: this.engine, sources: this.sources, ready: this.ready,
+      commands, deployment: commands.deployment, configured: () => setup.configured(),
+      githubNamespace: githubNamespaceOf(identity),
+      get setupProblem() { return setup.problem ?? setup.githubProblem },
+      get githubProblem() { return setup.githubProblem },
+      get feishuProblem() { return setup.feishuProblem },
+      receive: trigger => this.passes.receive(trigger),
+    }, { kind: 'github', health: [] })
+  }
+  /** Starts/stops one project-facing poller per active registered repository resource. */
+  syncGitHubConsumers(): void {
+    if (this.safeRestore || this.closing() || !this.setup.configured()) return
+    const wanted = new Map<string, { identity: import('./execution-environment.ts').ExecutionIdentity; signature: string }>()
+    for (const project of this.projects.list()) for (const resource of this.projectCoordinator.resources.list(project.id)) {
+      if (resource.type !== 'repository' || resource.revoked) continue
+      let identity: import('./execution-environment.ts').ExecutionIdentity
+      try { identity = this.projectCoordinator.identities.pin(project.id, resource.id, `github-poll:${project.id}:${resource.id}`) }
+      catch { continue }
+      const signature = JSON.stringify([identity.repository, identity.accountId, identity.accountCli, identity.gitAuthorName, identity.gitAuthorEmail])
+      wanted.set(`${project.id}:${resource.id}`, { identity, signature })
+    }
+    for (const [key, live] of this.githubConsumers) {
+      if (!wanted.has(key)) { live.controller.abort(); this.githubConsumers.delete(key) }
+    }
+    for (const [key, value] of wanted) {
+      const existing = this.githubConsumers.get(key)
+      if (existing?.signature === value.signature) continue
+      existing?.controller.abort()
+      const controller = new AbortController()
+      this.githubConsumers.set(key, { signature: value.signature, controller })
+      void watchGithub(this.contextForExecution(value.identity), controller.signal, { silentHealth: true }).catch(() => {})
+    }
+  }
+  /** Registers the per-attempt DSH_* shell facts once the host's shell-env registry is available. */
+  private bindShellIdentity(): void {
+    if (this.shellIdentityBound) return
+    // Reflect, not property access: the shell-env registry is an optional host capability here.
+    const registry = (this.ctx as Context & { reflect?: { get(name: string, strict?: boolean): unknown } }).reflect?.get('shellEnv') as { register(contributor: unknown): () => void } | undefined
+    if (!registry) return
+    registry.register(executionIdentityContributor(this.projectCoordinator.attempts, this.projectCoordinator.resources))
+    this.shellIdentityBound = true
+  }
+  private shellIdentityBound = false
   /** Resolved deployment; throws while waiting for setup (`!configured()`). */
   get deployment(): Deployment { return this.setup.deployment }
   configured(): boolean { return this.setup.configured() }
@@ -297,6 +395,56 @@ export class Runtime extends Service implements SourceHost {
     return this.safeRestore ? Promise.resolve() : this.passes.pump()
   }
   sendReplies(): Promise<void> { return this.safeRestore ? Promise.resolve() : this.outbox.sent() }
+  /** Records the one durable project fact for a human Trigger that reached a live project Ticket. Called inside intake's transaction. */
+  private recordProjectFeedback(fact: ProjectFeedbackFact): void {
+    const ticket = this.store.tickets.get(fact.ticketId)
+    if (!ticket || ticket.projectId !== fact.projectId) throw new Error('Project feedback does not belong to its Ticket project')
+    const trigger = this.store.triggers.get(fact.triggerId)
+    if (!trigger) throw new Error('Project feedback Trigger is missing')
+    // A scoped Source records the project that owns its Channel. Never let a cross-project Trigger become this Task's
+    // feedback merely because an invalid subscription makes it reach the Ticket.
+    const addressProject = trigger.channel?.address?.projectId
+    if (typeof addressProject === 'string' && addressProject !== fact.projectId) return
+    const meta = trigger.meta
+    const numbers = new Set(trigger.threads.flatMap(thread => {
+      const number = githubThreadNumber(thread.id)
+      return number === undefined ? [] : [number]
+    }))
+    if (typeof meta.number === 'number') numbers.add(meta.number)
+    const repository = typeof trigger.channel?.address?.repository === 'string' ? trigger.channel.address.repository : undefined
+    // A Follow records only the Thread, not the Assignment that claimed it. The durable worker_report row does: its
+    // PR URL, assignment and Attempt are server-owned. Bind only when that evidence names this Task's report; never
+    // guess the latest Assignment, which may be unrelated and already retired.
+    const report = !numbers.size ? undefined : this.projectCoordinator.reports.reports(ticket.id).findLast(item => {
+      const match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)\/?$/.exec(item.prUrl ?? '')
+      return !!match && numbers.has(Number(match[2])) && (!repository || match[1]?.toLowerCase() === repository.toLowerCase())
+        && ticket.assignments.some(assignment => assignment.id === item.assignmentId)
+    })
+    const assignment = report ? ticket.assignments.find(item => item.id === report.assignmentId) : undefined
+    const attempt = report ? this.projectCoordinator.attempts.all().find(item => item.id === report.attemptId
+      && item.assignmentId === report.assignmentId && item.ticketId === ticket.id && item.projectId === ticket.projectId) : undefined
+    const resourceIds = [...new Set([...ticket.planRevisions?.at(-1)?.resources ?? [], ...(attempt?.identity?.repositoryId ? [attempt.identity.repositoryId] : [])])]
+    const budgetSlot = assignment && ticket.assignmentGraphs?.at(-1)?.nodes.find(node => node.assignmentId === assignment.id)?.budgetSlot
+    const boundary = { pause: ticket.lifecycle?.pause.intent ?? 'none', stop: ticket.lifecycle?.stop.intent ?? 'none' }
+    const text = trigger.text
+    new ProjectEvents(this.store).append({
+      id: `project-feedback:${fact.ticketId}:${fact.triggerId}`, projectId: fact.projectId, ticketId: fact.ticketId,
+      kind: 'project-feedback', version: fact.triggerId, operationId: fact.triggerId, at: fact.at,
+      scope: report ? 'assignment' : 'task',
+      ...(report ? { reportId: report.id, reportOperationId: report.operationId } : {}),
+      ...(assignment ? { assignmentId: assignment.id } : {}), ...(attempt ? { attemptId: attempt.id } : {}),
+      resourceIds, ...(assignment?.contract ? { authorizationId: assignment.contract.authorizationId } : {}), ...(budgetSlot ? { budgetSlot } : {}),
+      boundary, triggerId: fact.triggerId, inputId: fact.inputId,
+      feedback: { triggerId: fact.triggerId, inputId: fact.inputId, source: trigger.source, text: text.slice(0, 8_000),
+        textTruncated: text.length > 8_000, threadKeys: [...fact.threads], at: trigger.at,
+        ...(text.length > 8_000 ? { readExact: { tool: 'project_read_fact' as const, ticket_id: fact.ticketId, kind: 'input' as const, id: fact.inputId } } : {}),
+        actorId: trigger.actor.id,
+        ...(trigger.url ? { url: trigger.url } : {}),
+        ...(typeof meta.number === 'number' ? { number: meta.number } : {}),
+        ...(typeof meta.isPr === 'boolean' ? { isPr: meta.isPr } : {}),
+        ...(typeof meta.kind === 'string' ? { kind: meta.kind } : {}) },
+    })
+  }
   private closing(): boolean { return this.closingFlag }
   /** Hold evaluation, dispatch, and outbound delivery while paused or awaiting setup; sources still record incoming triggers. */
   private paused(): boolean { return this.safeRestore || !this.setup.configured() || this.store.settings().paused }
@@ -383,22 +531,23 @@ export class Runtime extends Service implements SourceHost {
       }
     }
     const workspaces = new Set<string>(), attachments = new Set<string>(), externalResources = new Set<string>()
-    for (const project of this.store.projects.list()) if (project.directory) workspaces.add(project.directory)
+    for (const project of this.store.projects.list()) {
+      if (project.directory) workspaces.add(project.directory)
+      // Only an explicit registered Resource grants backup authority. Draft plan text never does.
+      for (const resource of this.projectCoordinator.resources.list(project.id)) if (!resource.revoked) externalResources.add(resource.path)
+    }
     for (const ticket of this.store.tickets.list()) {
       if (ticket.execution?.directory) workspaces.add(ticket.execution.directory)
-      // Plan resources are declarative data until a separate authorization/registration
-      // contract grants backup authority; never read draft paths during capture.
-      for (const revision of ticket.planRevisions ?? []) for (const resource of revision.resources) if (resource.startsWith('/')) externalResources.add(resource)
       if (ticket.projectId) for (const artifact of this.projectCoordinator.artifacts.list(ticket.projectId, ticket.id)) attachments.add(artifact.path)
     }
     for (const attempt of this.projectCoordinator.attempts.all()) {
       for (const path of [attempt.root, attempt.cwd]) workspaces.add(path)
     }
     for (const mapping of this.projectCoordinator.conversations.listMappings()) workspaces.add(mapping.cwd)
-    for (const path of [...workspaces, ...attachments]) if (!existsSync(path)) throw new Error(`Required recovery material is missing: ${path}`)
+    for (const path of [...workspaces, ...attachments, ...externalResources]) if (!existsSync(path)) throw new Error(`Required recovery material is missing: ${path}`)
     const roots = { workspaces: [...workspaces], attachments: [...attachments], nativeState: [], externalResources: [...externalResources] }
     const capturedDb = this.recoveryDbToken()
-    const capturedFiles = this.recoveryFilesToken([...roots.workspaces, ...roots.attachments])
+    const capturedFiles = this.recoveryFilesToken([...roots.workspaces, ...roots.attachments, ...roots.externalResources])
     const capturedAttempts = JSON.stringify(this.projectCoordinator.attempts.all())
     const revisions = new Map(nativeSessions.map(session => [session.id, session.revision]))
     return {
@@ -411,7 +560,7 @@ export class Runtime extends Service implements SourceHost {
         if (this.executor.activeCount() > 0) throw new Error('Application writer jobs started during recovery capture')
         if (this.recoveryDbToken() !== capturedDb) throw new Error('Database changed during recovery capture')
         if (JSON.stringify(this.projectCoordinator.attempts.all()) !== capturedAttempts) throw new Error('Managed worker changed during recovery capture')
-        if (this.recoveryFilesToken([...roots.workspaces, ...roots.attachments]) !== capturedFiles) throw new Error('Recovery files changed during capture')
+        if (this.recoveryFilesToken([...roots.workspaces, ...roots.attachments, ...roots.externalResources]) !== capturedFiles) throw new Error('Recovery files changed during capture')
         const currentIds = this.managedBackupSessionIds()
         if (unusedMaster && !this.ctx.agents.get(this.masterId as SessionId) && !await this.ctx.sessionPersistence.stat(this.masterId as SessionId)) currentIds.delete(this.masterId)
         for (const id of currentIds) {
@@ -444,6 +593,9 @@ export class Runtime extends Service implements SourceHost {
         await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
         if (this.closing()) return
       }
+      this.projectCoordinator.setAccountProfile(this.setup.deployment.github
+        ? { cli: this.setup.deployment.github.cli, login: this.setup.deployment.github.login, repository: this.setup.deployment.repository } : undefined)
+      this.bindShellIdentity()
       this.projectCoordinator.start()
       this.executor.resume()
       this.passes.start()
@@ -461,7 +613,7 @@ export class Runtime extends Service implements SourceHost {
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem ?? setup.githubProblem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
-      checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, models: () => this.ctx.sessionController.modelCatalog() }
+      checkSetup: () => { setup.check() }, requestPass: () => { passes.request() }, syncGitHubConsumers: () => { runtime.syncGitHubConsumers() }, models: () => this.ctx.sessionController.modelCatalog() }
   }
   /** Idempotent stop; concurrent or repeated calls share the same shutdown promise. */
   stop(): Promise<void> { return this.stopping ??= this.shutdown() }
@@ -483,7 +635,9 @@ export class Runtime extends Service implements SourceHost {
       this.budgetHooks?.sync(); this.budgetHooks?.dispose()
       this.executor.dispose()
       this.sessions.dispose()
-      for (const dispose of this.disposers.reverse()) dispose()
+      for (const consumer of this.githubConsumers.values()) consumer.controller.abort()
+        this.githubConsumers.clear()
+        for (const dispose of this.disposers.reverse()) dispose()
       await this.ctx.sessionPersistence.flush()
       canRelease = true
     } finally {

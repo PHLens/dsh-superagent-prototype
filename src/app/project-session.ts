@@ -12,8 +12,13 @@ import { initializeRoleModel } from './role-models.ts'
 import type { Store } from './store.ts'
 import { ConversationStore } from './conversation-store.ts'
 import { projectTools, type ProjectToolsHost } from './tools/main.ts'
+import { SkillCatalog } from './skill-catalog.ts'
+import { bindManagedSkills, recordSkillLoad, type ManagedSkillSnapshot, type SkillLoadRecord } from './managed-skills.ts'
+import { managedSkillTools } from './tools/managed-skill.ts'
+import { plainJsonSchema } from './tools/tool.ts'
 
 export const PROJECT_PRESET = 'dsh-superagent-project'
+const SKILL_INJECTION_TIMEOUT_MS = 3_000
 export interface ProjectSessionMapping { sessionId: string; workspaceId: string; cwd: string; generation: number }
 export interface ProjectSessionReply { text: string; sessionId: string; turn: number; dshMessageId: string }
 /** A native input was consumed, but no completed turn exists to reconcile. */
@@ -26,9 +31,10 @@ export class ProjectSessionInterrupted extends Error {
 export class ProjectSessions {
   private readonly delivery: AgentDelivery
   private readonly bindings = new Map<Agent, (() => void)[]>()
+  private readonly skillBindings = new Map<string, { agent: Agent; fiber: ReturnType<Context['inject']>; child: Context; dispose: () => void }>()
   private readonly prompts = new Map<Agent, () => void>()
   private disposed = false
-  constructor(private readonly ctx: Context, private readonly store: Store, private readonly signal: AbortSignal) {
+  constructor(private readonly ctx: Context, private readonly store: Store, private readonly signal: AbortSignal, private readonly skillCatalog?: SkillCatalog, private readonly authorizeSkills?: (mapping: ProjectSessionMapping, projectId: string) => void) {
     this.delivery = new AgentDelivery(ctx)
   }
   async prepare(project: Project, mapping: ProjectSessionMapping): Promise<Agent> {
@@ -70,7 +76,7 @@ export class ProjectSessions {
       // Custom registrations remain available despite the inherited-tool restriction.
       const schema = z.object({ path: z.string().max(1024) })
       dispose.push(agent.ctx.tools.register({ name: 'project_read_file', description: 'Read up to 16000 characters of a UTF-8 file inside this project workspace. No writes or shell access.',
-        parameters: z.toJSONSchema(schema), output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+        parameters: plainJsonSchema(schema), output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
         execute: async args => {
           check()
           const { path } = schema.parse(args)
@@ -83,12 +89,44 @@ export class ProjectSessions {
           return { path: within, text }
         } }))
     }
+    await this.releaseSkills(agent.id)
+    const catalog = this.skillCatalog
+    if (catalog) {
+      const candidates = catalog.candidates({ projectId: project.id, role: 'coordinator', stage: 'planning' }), snapshots: ManagedSkillSnapshot[] = candidates.map(candidate => { const pin = catalog.pin([candidate])[0]; if (!pin) throw new Error('Skill candidate could not be pinned'); return { candidate, pin } })
+      if (snapshots.length) {
+        const authorizeSkills = () => { check(); if (!this.authorizeSkills) throw new Error('Coordinator has no active skill lease'); this.authorizeSkills(mapping, project.id); return { projectId: project.id, role: 'coordinator' as const, stage: 'planning' as const, resources: [], tools: [] } }
+        const recordLoad = (value: { id: string; name: string; version: string; bodyHash: string; offset: number; nextOffset: number | null }) => {
+          const loads = this.store.get<SkillLoadRecord[]>(`t7.skill-loads:${project.id}:${mapping.generation}` as never) ?? []
+          if (recordSkillLoad(loads, value, new Date().toISOString())) this.store.set(`t7.skill-loads:${project.id}:${mapping.generation}` as never, loads)
+        }
+        const binding = await this.bindSkillScope(agent, scope => {
+          check()
+          const disposers: (() => void)[] = []
+          try {
+            // The injected callback's child context owns the required skills service; the parent never becomes readable.
+            disposers.push(bindManagedSkills(agent, catalog, snapshots, authorizeSkills, scope.skills, recordLoad))
+            for (const item of managedSkillTools({ catalog, snapshots, authorize: authorizeSkills, onLoaded: recordLoad })) disposers.push(scope.tools.register({ name: item.name, description: item.description,
+              parameters: plainJsonSchema(item.schema), output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] }, execute: async args => item.execute(item.schema.parse(args), this.signal) }))
+          } catch (error) {
+            disposers.reverse().forEach(dispose => dispose())
+            throw error
+          }
+          return () => disposers.reverse().forEach(dispose => dispose())
+        })
+        try { check() } catch (error) {
+          try { binding.dispose() } catch (cause) { this.logSkillDisposal(cause) }
+          await binding.fiber.dispose().catch(cause => this.logSkillDisposal(cause))
+          throw error
+        }
+        this.skillBindings.set(agent.id, { agent, ...binding })
+      }
+    }
     return agent
   }
   /** Install project model tools for exactly one fenced turn. */
   installProjectTools(agent: Agent, host: ProjectToolsHost): () => void {
     const disposers = projectTools(host).map(item => agent.ctx.tools.register({ name: item.name, description: item.description,
-      parameters: z.toJSONSchema(item.schema), output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
+      parameters: plainJsonSchema(item.schema), output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
       execute: async args => item.execute(item.schema.parse(args), this.signal) }))
     return () => disposers.forEach(dispose => dispose())
   }
@@ -171,10 +209,49 @@ export class ProjectSessions {
     if (!reply) throw new Error('Coordinator turn has not completed')
     return { ...reply, sessionId: agent.id }
   }
+  /** Start and await one Cordis skill scope, binding only from inside its injected child context. */
+  private async bindSkillScope(agent: Agent, bind: (scope: Context) => () => void): Promise<{ fiber: ReturnType<Context['inject']>; child: Context; dispose: () => void }> {
+    let child: Context | undefined, dispose: (() => void) | undefined
+    // A reload reruns the callback; all callers retain this stable releaser so they release the current registration.
+    const release = () => { const current = dispose; dispose = undefined; current?.() }
+    const fiber = agent.ctx.inject(['skills'], scope => {
+      try { release() } catch (error) { this.logSkillDisposal(error) }
+      child = scope
+      dispose = bind(scope)
+    })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([Promise.resolve(fiber), new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Coordinator skills capability did not become available; reconciliation is required')), SKILL_INJECTION_TIMEOUT_MS)
+      })])
+      if (!child || !dispose) throw new Error('Coordinator skills capability is unavailable; reconciliation is required')
+    } catch (error) {
+      try { release() } catch (cause) { this.logSkillDisposal(cause) }
+      await fiber.dispose().catch(cause => this.logSkillDisposal(cause))
+      throw error
+    } finally { if (timer !== undefined) clearTimeout(timer) }
+    return { fiber, child, dispose: release }
+  }
+  /** Release a coordinator's managed provider, managed tools and injected skill scope before replacing it. */
+  private async releaseSkills(sessionId: string): Promise<void> {
+    const binding = this.skillBindings.get(sessionId)
+    if (!binding) return
+    this.skillBindings.delete(sessionId)
+    try { binding.dispose() } catch (error) { this.logSkillDisposal(error) }
+    try { await binding.fiber.dispose() } catch (error) { this.logSkillDisposal(error) }
+  }
+  private logSkillDisposal(error: unknown): void {
+    try { this.ctx.logger.warn('dsh-superagent could not release a coordinator skill scope: %s', String(error)) } catch { /* logger unavailable */ }
+  }
   dispose(): void {
     this.disposed = true
     for (const [agent, disposers] of this.bindings) { agent.cancel({ kind: 'user' }, { keepInbox: true }); disposers.forEach(dispose => dispose()) }
     this.bindings.clear()
+    for (const binding of this.skillBindings.values()) {
+      try { binding.dispose() } catch (error) { this.logSkillDisposal(error) }
+      void binding.fiber.dispose().catch(error => this.logSkillDisposal(error))
+    }
+    this.skillBindings.clear()
     for (const dispose of this.prompts.values()) dispose()
     this.prompts.clear()
   }

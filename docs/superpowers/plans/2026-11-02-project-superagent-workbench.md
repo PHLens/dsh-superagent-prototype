@@ -47,6 +47,7 @@ KORAM 是一个研究项目，其调研、代码、实验和写作共享项目�
 - 已登记流程由引擎自主推进，不等待 coordinator 对每份报告再次审批。coordinator 暂时不可用时，只等待需要新判断的步骤；其单写者约束不串行化 worker、报告接收或其他项目。
 - 按角色和阶段提供技能候选，正文按需读取并记录版本；技能不增加授权。不同执行者不自动继承完整历史或技能正文。
 - 应用逻辑隔离不等于 OS 沙箱。复用当前用户身份运行，不重新建设 Agent runtime 或跨机系统。
+- worker Session 和生成 workspace 是执行现场，不是用户需要管理的项目。每个 worker Session/workspace 归属一个 Attempt/Assignment；不等待整个 Task，而是在该 Assignment 已接受完成且所有登记成果、校验和语义门通过，或确认停止且物理退出后，应用才自动归档其 worker Session。只有 workspace 内全部 Session 已归档，且 `workspace.path === attempt.cwd === <state>/projects/<project>/executions/<attempt>` 时，才移除 workspace 登记而不是目录；保留日志、文件、Artifact、映射和恢复能力。待执行、运行中、暂停、未知、待核对、待复核、待恢复、可继续及 pinned Session 保持可见，混合或非应用生成 workspace 不改动。
 - 实现不部署现有服务、不改机器人凭证和当前运行状态。代码工作交付到 `dev` 的可审阅 PR；部署和迁移在最后的独立验收中处理。
 
 ## 3. 内部任务拆解的责任与接口
@@ -194,11 +195,16 @@ T7 可在 T2 后独立推进，T8 在 T6 的预算与身份合同可用后启用
 依赖：项目知识/浏览从 T2 开始；可执行资源接入依赖 T4，协作代码验收依赖 T6。
 
 - 改动：`src/app/resources.ts`、`src/app/cache.ts`、`src/app/prompts.ts`、`src/app/sessions.ts`、`src/app/execution-environment.ts`、`src/infra/commands.ts`、`src/infra/environment.ts`、GitHub source 模块和项目页面。新增 `src/app/knowledge-store.ts`、`src/app/skill-catalog.ts`。
-- 已确认知识带不可变版本和来源，手工编辑作为待核对材料；实际使用的规则/技能正文版本可恢复。候选按角色、阶段、资源和依赖筛选，正文读取再授权；真实宿主中核验全局技能和工具旁路的实际边界。
-- 资源按稳定 id 登记规范化路径，原位关联仓库/数据；受认证的浏览、预览和下载逐次检查 realpath、符号链接、当前权限和大小，缓存/分页绑定内容版本，撤销关联立即生效。
-- CLI/env/Git identity 按执行固定，项目设置不改写其他运行执行的全局环境。GitHub 身份贯穿 account/resource/repository/number、游标、缓存、报告、通知和反馈绑定。
-- 验证：`tests/project-knowledge.spec.ts`、`tests/skill-catalog.spec.ts`、`tests/project-resources.spec.ts`、`tests/multi-repository.spec.ts`。覆盖跨项目、同号 PR、同仓库多项目、技能越权、快照失效、文件越界和规则重启还原。
-- 可验收结果：KORAM 同一项目内完成调研与一个小型代码验证，交付可审阅变更及证据；成果能追溯到方案、来源、版本和配置。
+- 已确认知识带不可变版本和来源，手工编辑作为待核对材料；实际使用的规则/技能正文版本可恢复。技能发布明确区分实例共享与项目私有：版本唯一性、候选目录、pin 和每次正文读取都使用服务端解析的 scope、角色、阶段、资源与工具依赖筛选；项目私有技能不得被其他项目发现或读取，不同项目可独立发布同名同版本。旧记录迁移/归一化保留可确认的 project provenance；无法确认的旧私有记录不得扩大为共享。正文读取再授权；真实宿主中核验全局技能和工具旁路的实际边界。
+- 资源按稳定 id 登记规范化路径，原位关联仓库/数据；受认证的浏览、预览和下载逐次检查 realpath、符号链接、当前权限和大小，缓存/分页绑定内容版本，撤销关联立即生效。仓库身份由受信账号/CLI 在登记时核验，之后按项目/资源持久化；不能用“等于部署仓库”代替核验，也不能接收未经核验的 owner/repo 声明。可取消、受超时约束的仓库验证在短提交事务之外执行，提交时重新核对当前 owner/项目/profile 后原子保存 resource、identity 与 operation receipt；失败不得留下半个 grant。撤销后，已排队但尚未开始的 Delivery 在实际 provider 调用前重新检查 grant，不能发出或标记 sent。
+- CLI/env/Git identity 按执行固定，项目设置不改写其他运行执行的全局环境。GitHub 身份贯穿 account/resource/repository/number、游标、缓存、报告、通知、Delivery/回执和反馈绑定。
+- 人工 Trigger 经已绑定的项目 Task/PR/Thread 到达 live project Ticket 时，接收 Trigger、Ticket input 与稳定的项目级反馈事实必须在同一事务提交；该事实携带持久化的项目/Task/Trigger scope，唤醒对应项目 lane。即使当前必要 Assignment 已全部结束，feedback consumer 也必须读取范围事实并选择在既有授权内接续、保存新的待确认方案或进入持久待判断，不能交给已结束 lease、不得由全局 main Session 冒充处理，也不能把“仅保存 input”当作已送达。context-only、未绑定或跨 scope 的事件不得产生项目反馈。
+- worker report 的精确重放先按服务端 Session/Attempt 归属与 operation/payload 命中持久 receipt，并直接返回原结果；PR provider 读取、claim、资源授权和最新 Ticket 聚合只用于新 operation。同一 operation 的不同 payload 仍明确冲突，重放不得依赖成功响应之后仍可用 provider。
+- 每个项目/Assignment 消费者从持久化的项目/资源/Attempt 执行身份生成独立 Context 和执行级 Commands；禁止通过可变全局 namespace 在并发项目间切换。项目 consumer 只轮询已登记 Task/Assignment 的 PR 和 Thread 订阅；仓库级未绑定 intake 不能复制到每个引用同一仓库的项目。项目 PR 归属从持久化 Assignment/Attempt 交付合同解析，claim 与报告在同一事务中基于最新 Ticket 聚合，成功 Follow 不得被旧副本覆盖；存在 open Follow 时只结束 Assignment/Attempt，Task 继续等待既有 `followsDone`/外部关闭语义。真实 poller 发出的 Trigger/Thread/Channel、订阅 Thread 与 open Ticket 枚举过滤、同号 PR claim、项目报告中的 PR 绑定和反馈还原都必须携带该 scope；project watcher 的成功轮次不得因 scoped/no-op health sink 而报错，普通文件报告不依赖 GitHub。命名空间化 `state.keys(family)` 必须返回当前 scope 的 typed family 成员，不能因追加后缀而丢失枚举。
+- worker UI 清理：成功完成、停止后确认退出都调用同一幂等入口；启动和常规核对各启动一个重新计算的有界扫描周期，处理已持久化为终态但缺少完整清理事实的 Attempt，避免崩溃在“结束”和“请求清理”之间留下永久可见项。每个周期的候选批大小和并发数固定，耗尽后由后续 reconcile 或相关状态事件重新开周期。pause/stop 等任务级控制保持权威；question、continuation、acceptance 等分支级 hold 只阻塞其绑定的 Assignment/Attempt，其他已接受的完成分支照常清理。每次先在 DSH 原生状态中观察会话/工作区，再调用 `workspaceRegistry.archiveSession(sessionId)`，不传 `stopActivity` 强制停止；只有 `workspace.path === attempt.cwd === <state>/projects/<project>/executions/<attempt>` 且其中全部 Session 已归档时才删除 workspace 登记。重复、并发或重启重试不得产生第二次副作用。测试使用真实 attempt cwd 布局，正例覆盖接受完成和确认停止；边界用例覆盖待执行/运行中或 pending native inbox、任务级暂停、分支级 unknown/question、pinned、扫描耗尽后 reconcile、启动批并发上限，以及含其他可见 Session 的混合 workspace 后来全部归档；删除登记后目录、原生历史、Artifact 引用、映射和恢复数据仍存在。
+- 代码检查的 reviewed contract 同时固定 source、config 与 runtime Resource id 和内容版本；确认后任一内容变化都要求显式修订/检查点，不能到 admission 时静默重捕获。预约之后、producer 启动之前的 staging/materialization/identity/runner 错误都要落成可恢复的终态或已知未启动事实；部分 staging 可幂等重建，不能留下永久 `running` receipt。进程在 reservation commit 后、native job 登记前死亡时，重启恢复要枚举 orphan receipt：只有能证明从未登记 producer 才安全重试，存在 native/unknown 证据则保持核对，不能永久 running 或误判失败。执行身份文件由持久化 Attempt 原子重建/核对；每次 prepared Session 恢复和 shell 消费都验证完整 marker 与文件 bytes/hash，缺失、非空损坏或部分内容均修复或 fail closed，不能回退到部署账号或 Git 身份。
+- 验证：`tests/project-knowledge.spec.ts`、`tests/skill-catalog.spec.ts`、`tests/project-resources.spec.ts`、`tests/multi-repository.spec.ts`。覆盖跨项目、同号 PR、同仓库双项目未绑定事件不扇出、实际 Web 项目新 PR 报告与 Follow 持久化、open Follow 阻止 Task 提前结束、已接受 PR 后人工反馈的项目级唤醒且不回流全局 main Session、精确 PR 报告在 provider 不可用时仍返回 durable receipt 且不重复读取/claim、撤销后 queued Delivery、第二仓库经受信账号/CLI 验证后登记成功而未经核验的 owner/repo 被拒且长验证不占写事务、实际 poller/Trigger/Thread/Channel 与健康边界、scope 内 typed state family、项目私有与共享技能和旧 project: provenance 迁移、运行器内容版本、producer 前异常与进程死亡重开恢复、身份 marker/bytes 损坏、快照失效、文件越界和规则重启还原。项目页面用真实 coordinator/fetch 边界验证 committed-but-response-lost 的知识与资源提交：未变重试复用已冻结的 `{operationId, payload}`，取得明确结果或新意图后才释放并生成新 id；两类写入各测一次，不重不漏，并纳入常规 client suite。
+- 可验收结果：KORAM 同一项目内完成调研与一个小型代码验证，交付可审阅变更及证据；成果能追溯到方案、来源、版本和配置；完成后 DSH 导航不再保留已结束 worker 的生成 workspace 登记，同时原执行目录、原生 Session 历史、Artifact 引用、应用映射和恢复数据仍存在并可还原。
 
 ### T8 · 有记录的协助、复核与 subagent
 

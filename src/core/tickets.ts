@@ -10,6 +10,18 @@ import type { Replies } from './replies.ts'
 import { canRetry } from './stage.ts'
 
 const sameChannel = (a: ChannelRef, b: ChannelRef): boolean => JSON.stringify(a) === JSON.stringify(b)
+/**
+ * How a ticket that follows Threads is done with them: once no Thread it opened (`own`) is still
+ * open, or, when it opened none, once every one it follows closed. Undefined while it is not done.
+ * Kept pure so report aggregation uses the same completion rule as the Engine.
+ */
+export function followsDone(ticket: Pick<Ticket, 'follows'>): Follow['closed'] {
+  const follows = ticket.follows ?? []
+  const own = follows.filter(item => item.own)
+  const counted = own.length ? own : follows
+  if (!counted.length || counted.some(item => !item.closed)) return undefined
+  return counted.map(item => item.closed!).sort((a, b) => a.at.localeCompare(b.at)).at(-1)
+}
 /** Whether an Input is a message no person wrote, such as CI's, a bot's, or the main Session's note. */
 export const automatic = (input: TicketInput | undefined): boolean => input?.kind === 'note' || (input?.kind === 'trigger' && !input.human)
 /**
@@ -93,13 +105,7 @@ export class Tickets extends EnginePart {
    * How a ticket that follows Threads is done with them: once no Thread it opened (`own`) is still open, or, when it opened none,
    * once every one it follows closed. It ends as the latest close among those Threads did; undefined while it is not done.
    */
-  followsDone(ticket: Ticket): Follow['closed'] {
-    const follows = ticket.follows ?? []
-    const own = follows.filter(item => item.own)
-    const counted = own.length ? own : follows
-    if (!counted.length || counted.some(item => !item.closed)) return undefined
-    return counted.map(item => item.closed!).sort((a, b) => a.at.localeCompare(b.at)).at(-1)
-  }
+  followsDone(ticket: Ticket): Follow['closed'] { return followsDone(ticket) }
   /**
    * The Trigger to attach to a ticket, once the ticket may take it.
    * @throws UserError when the trigger or ticket is unknown, a ticket's worker still decides the trigger, a person stopped the ticket, or an ended ticket's Mandate no longer revalidates.

@@ -1,9 +1,11 @@
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterEach, beforeEach, expect, it } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { workerFixture } from './fixtures/project-worker.ts'
 import { projectWorkerTools } from '../src/app/tools/executor.ts'
+import { Engine } from '../src/core/engine.ts'
+import { githubNamespaceOf, githubThreadId } from '../src/sources/github-namespace.ts'
 import { PROJECT_WORKER_RULES } from '../src/app/prompts.ts'
 import { z } from 'zod'
 import type { FileReport } from '../src/app/report-acceptance.ts'
@@ -179,4 +181,118 @@ it('quarantines unknown prepare leftovers and symlink parents rather than adopti
   const otherRoot = join(directory, 'outside'); mkdirSync(otherRoot)
   const parent = join(f.attempt.root, 'artifacts'); symlinkSync(otherRoot, parent)
   expect(() => f!.artifacts.write(f!.attempt.sessionId, { operationId: 'x', output: 'note', name: 'x.md', content: 'x' })).toThrow()
+})
+
+it('validates and binds a reported PR inside the Attempt registered repository, idempotently', () => {
+  f = workerFixture(directory, { version: 1, mode: 'human-review' }); f.prepare()
+  f.attempts.pinIdentity(f.attempt.id, { executionId: f.attempt.id, projectId: f.project.id, repositoryId: 'resource-1', repository: 'acme/widgets', accountId: 'agent-bot', accountCli: '/bin/false', gitAuthorName: 'Agent', gitAuthorEmail: 'agent@example.com', deliveryBranch: 'fix', capturedAt: new Date().toISOString() })
+  const bindThread = vi.fn(), patch = vi.fn()
+  const github = { deployment: { repository: 'acme/widgets', github: { cli: '/bin/false', login: 'agent-bot', noreply: '' } }, githubNamespace: { projectId: f.project.id, resourceId: 'resource-1', account: 'agent-bot', repository: 'acme/widgets' },
+    tickets: { get: (id: string) => f!.store.tickets.get(id), open: () => f!.store.tickets.open(), bindThread, threadClosed: vi.fn() },
+    triggers: { get: () => ({ source: 'github', meta: { isPr: true, number: 7 } }) }, threads: { patch }, atomic: <T>(work: () => T): T => f!.store.atomic(work) } as unknown as import('../src/sources/host.ts').SourceContext
+  f.reports.setGithubContext(() => github)
+  const pull = { number: 7, title: 'Fix', state: 'open', html_url: 'https://github.com/acme/widgets/pull/7', user: { login: 'agent-bot' }, head: { sha: 'abc', ref: 'fix', repo: { full_name: 'acme/widgets' } } }
+  const input = { operationId: 'pr-report', state: 'ready' as const, completed: 'Opened the PR', evidence: ['Read the PR'], artifacts: [], unresolved: [], prUrl: pull.html_url }
+  const report = f.reports.submit(f.attempt.sessionId, input, pull)
+  expect(bindThread).toHaveBeenCalledWith(f.plan.ticketId, { source: 'github', id: '7' }, true)
+  expect(patch).toHaveBeenCalledWith(expect.stringMatching(/^github:[a-f0-9]{64}:7$/), expect.any(Object))
+  expect(f.reports.reports(f.plan.ticketId)[0]).toMatchObject({ id: report.id, prUrl: pull.html_url })
+  // A replay of the same report never claims or binds the PR a second time.
+  expect(f.reports.submit(f.attempt.sessionId, input, pull).id).toBe(report.id)
+  expect(bindThread).toHaveBeenCalledTimes(1)
+  // A foreign repository/URL is rejected inside the report transaction.
+  expect(() => f!.reports.submit(f!.attempt.sessionId, { ...input, operationId: 'foreign-report', prUrl: 'https://github.com/other/repo/pull/8' },
+    { ...pull, number: 8, html_url: 'https://github.com/other/repo/pull/8' })).toThrow('registered repository')
+  expect(f.reports.reports(f.plan.ticketId)).toHaveLength(1)
+})
+
+
+it('reports a real persisted PR claim, keeps an open Follow, then completes when that Follow closes', async () => {
+  f = workerFixture(directory, { version: 1, mode: 'registered-files' }); f.prepare()
+  f.attempts.pinIdentity(f.attempt.id, { executionId: f.attempt.id, projectId: f.project.id, repositoryId: 'resource-1', repository: 'acme/widgets',
+    accountId: 'agent-bot', accountCli: '/bin/false', gitAuthorName: 'Agent', gitAuthorEmail: 'agent@example.com', deliveryBranch: 'agent/project-real', capturedAt: new Date().toISOString() })
+  const namespace = githubNamespaceOf({ projectId: f.project.id, repositoryId: 'resource-1', accountId: 'agent-bot', repository: 'acme/widgets' })!
+  const threadKey = githubThreadId(namespace, 7)
+  const thread = { source: 'github' as const, id: threadKey.replace(/^github:/, '') }
+  const pull = { number: 7, title: 'Fix', state: 'open', html_url: 'https://github.com/acme/widgets/pull/7', user: { login: 'agent-bot' },
+    head: { sha: 'abc', ref: 'agent/project-real', repo: { full_name: 'acme/widgets' } } }
+  const commands = { withSignal: () => commands, api: async () => pull }
+  const engine = new Engine({ repo: f.store, scope: {}, policy: () => ({}), assessor: {}, executor: {}, outbox: {} } as never)
+  const bindThread = vi.fn((id: string, _ref: typeof thread, own: boolean) => engine.bindThread(id, thread, own))
+  const github = { deployment: { repository: 'acme/widgets', github: { cli: '/bin/false', login: 'agent-bot', noreply: '' } }, githubNamespace: namespace, commands,
+    tickets: { get: (id: string) => f!.store.tickets.get(id), open: () => f!.store.tickets.open(), bindThread,
+      threadClosed: (_ref: typeof thread, outcome: 'merged' | 'closed', at: string) => engine.threadClosed(thread, outcome, at) },
+    triggers: { get: () => ({ source: 'github', meta: { isPr: true, number: 7 } }) },
+    threads: { patch: (key: string, meta: unknown) => f!.store.threads.patchMeta(key, meta as never) },
+    atomic: <T>(work: () => T): T => f!.store.atomic(work) } as unknown as import('../src/sources/host.ts').SourceContext
+  f.reports.setGithubContext(() => github)
+  const artifact = f.write()
+  const input = { operationId: 'real-pr', state: 'ready' as const, completed: 'Opened the PR', evidence: ['Read the PR'], artifacts: [{ id: artifact.id, contentVersion: artifact.contentVersion }], unresolved: [], prUrl: pull.html_url }
+  const receipt = await reportThroughTool({ ...input, prUrl: pull.html_url })
+  const report = f.reports.reports(f.plan.ticketId)[0]!
+  expect(receipt).toMatchObject({ reportId: report.id, isCurrentReport: true })
+  const claimed = f.store.tickets.get(f.plan.ticketId)!
+  expect(claimed.ended).toBeUndefined()
+  expect(claimed.follows).toContainEqual(expect.objectContaining({ thread: threadKey, own: true }))
+  expect(claimed.follows?.find(item => item.thread === threadKey)).not.toHaveProperty('closed')
+  expect(f.store.threads.get(threadKey)?.subscriptions).toContain(f.plan.ticketId)
+  expect(f.reports.reports(f.plan.ticketId)[0]).toMatchObject({ id: report.id, prUrl: pull.html_url })
+  // The Executor reporting done does not end a Ticket that still follows its open PR.
+  engine.threadClosed(thread, 'merged', '2026-09-09T00:00:00Z')
+  expect(f.store.tickets.get(f.plan.ticketId)?.ended).toMatchObject({ by: 'executor', outcome: 'merged' })
+  expect(f.store.tickets.get(f.plan.ticketId)?.follows?.find(item => item.thread === threadKey)?.closed).toBeTruthy()
+})
+
+it('replays an exact committed PR report from its durable receipt when the provider is unavailable, without a read or claim', async () => {
+  f = workerFixture(directory, { version: 1, mode: 'registered-files' }); f.prepare()
+  f.attempts.pinIdentity(f.attempt.id, { executionId: f.attempt.id, projectId: f.project.id, repositoryId: 'resource-1', repository: 'acme/widgets',
+    accountId: 'agent-bot', accountCli: '/bin/false', gitAuthorName: 'Agent', gitAuthorEmail: 'agent@example.com', deliveryBranch: 'agent/project-replay', capturedAt: new Date().toISOString() })
+  const namespace = githubNamespaceOf({ projectId: f.project.id, repositoryId: 'resource-1', accountId: 'agent-bot', repository: 'acme/widgets' })!
+  const threadKey = githubThreadId(namespace, 8)
+  const thread = { source: 'github' as const, id: threadKey.replace(/^github:/, '') }
+  const pull = { number: 8, title: 'Fix', state: 'open', html_url: 'https://github.com/acme/widgets/pull/8', user: { login: 'agent-bot' },
+    head: { sha: 'abc', ref: 'agent/project-replay', repo: { full_name: 'acme/widgets' } } }
+  const commands = { withSignal: () => commands, api: vi.fn(async () => pull) }
+  const engine = new Engine({ repo: f.store, scope: {}, policy: () => ({}), assessor: {}, executor: {}, outbox: {} } as never)
+  const bindThread = vi.fn((id: string, _ref: typeof thread, own: boolean) => engine.bindThread(id, thread, own))
+  const github = { deployment: { repository: 'acme/widgets', github: { cli: '/bin/false', login: 'agent-bot', noreply: '' } }, githubNamespace: namespace, commands,
+    tickets: { get: (id: string) => f!.store.tickets.get(id), open: () => f!.store.tickets.open(), bindThread,
+      threadClosed: (_ref: typeof thread, outcome: 'merged' | 'closed', at: string) => engine.threadClosed(thread, outcome, at) },
+    triggers: { get: () => ({ source: 'github', meta: { isPr: true, number: 8 } }) },
+    threads: { patch: (key: string, meta: unknown) => f!.store.threads.patchMeta(key, meta as never) },
+    atomic: <T>(work: () => T): T => f!.store.atomic(work) } as unknown as import('../src/sources/host.ts').SourceContext
+  f.reports.setGithubContext(() => github)
+  const artifact = f.write()
+  const input: FileReport = { operationId: 'replay-pr', state: 'ready', completed: 'Opened the PR', evidence: ['Read the PR'],
+    artifacts: [{ id: artifact.id, contentVersion: artifact.contentVersion }], unresolved: [], prUrl: pull.html_url }
+  const first = await reportThroughTool(input) as { reportId: string; currentReportId: string }
+  expect(first).toMatchObject({ received: true, isCurrentReport: true })
+  expect(f.reports.reports(f.plan.ticketId)).toHaveLength(1)
+  expect(commands.api).toHaveBeenCalledTimes(1)
+  expect(bindThread).toHaveBeenCalledTimes(1)
+
+  // Losing the provider after the commit must not turn an exact retry into a provider read, a claim, or a second report.
+  commands.api.mockRejectedValue(new Error('provider unavailable'))
+  const replay = await reportThroughTool(input)
+  expect(replay).toMatchObject({ reportId: first.reportId, currentReportId: first.currentReportId, isCurrentReport: true })
+  expect(commands.api).toHaveBeenCalledTimes(1)
+  expect(bindThread).toHaveBeenCalledTimes(1)
+  expect(f.reports.reports(f.plan.ticketId)).toHaveLength(1)
+
+  // The same operation with changed content fails explicitly before the provider is read.
+  await expect(reportThroughTool({ ...input, completed: 'Changed content' })).rejects.toThrow('Report operation id conflict')
+  expect(commands.api).toHaveBeenCalledTimes(1)
+  // A genuinely new operation still takes the full validation path, which now fails at the unavailable provider.
+  await expect(reportThroughTool({ ...input, operationId: 'replay-pr-2' })).rejects.toThrow('provider unavailable')
+  expect(commands.api).toHaveBeenCalledTimes(2)
+  expect(f.reports.reports(f.plan.ticketId)).toHaveLength(1)
+
+  // An exact committed receipt also survives authorization revocation; it must not be reauthorized or re-read.
+  const revoked = f.store.tickets.get(f.plan.ticketId)!
+  revoked.authorizations![0]!.revokedAt = new Date().toISOString()
+  f.store.tickets.save(revoked)
+  const afterRevocation = await reportThroughTool(input)
+  expect(afterRevocation).toMatchObject({ reportId: first.reportId, currentReportId: first.currentReportId, isCurrentReport: true })
+  expect(commands.api).toHaveBeenCalledTimes(2)
+  expect(f.reports.reports(f.plan.ticketId)).toHaveLength(1)
 })

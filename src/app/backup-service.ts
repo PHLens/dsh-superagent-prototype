@@ -35,6 +35,9 @@ function completeApplicationPoint(manifest: RecoveryManifest, applicationFull = 
   if (!manifest.coverage) return false
   return manifest.coverage.kind === 'application-full' && new Set(ids).size === ids.length
     && ids.length === manifest.nativeSessions?.length && ids.every(id => manifest.nativeSessions.some(session => session.id === id))
+    && (manifest.boundaries.externalResources ?? []).every(source => manifest.mappings.some(mapping => mapping.source === source
+      || (mapping.kind === 'directory' && source.startsWith(`${mapping.source}/`))))
+    && !(manifest.excluded ?? []).some(item => (manifest.boundaries.externalResources ?? []).some(source => item.path === source || item.path.startsWith(`${source}/`)))
     && !!manifest.relocations?.some(mapping => mapping.path === '.')
 }
 

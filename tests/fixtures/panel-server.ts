@@ -22,6 +22,8 @@ import { githubKind } from '../../src/sources/github.ts'
 import type { Health } from '../../src/sources/host.ts'
 import type { SourceKind } from '../../src/sources/kind.ts'
 import { testDeployment } from './deployment.ts'
+import type { KnowledgeVersion } from '../../src/app/knowledge-store.ts'
+import type { Resource } from '../../src/app/project-resources.ts'
 
 export const MEMBER = 'ou_alice'
 const ALLOWED: Record<string, { id: string; name?: string }[]> = { feishu: [{ id: MEMBER, name: 'Alice' }], github: [{ id: 'alice' }] }
@@ -109,6 +111,11 @@ export interface PanelServer {
   pending: number
   form?: ConfigForm<Record<string, unknown>> | undefined
   opened: string[]
+  materials: { knowledge: KnowledgeVersion[]; resources: Resource[] }
+  knowledgeOperations: Record<string, KnowledgeVersion>
+  resourceOperations: Record<string, Resource>
+  loseKnowledgeResponse: boolean
+  loseResourceResponse: boolean
   dropped: DroppedReply[]
   failing: Extract<Problem, { kind: 'outgoing' }>['outgoing'][]
 }
@@ -253,6 +260,7 @@ function initial(): PanelServer {
   return {
     backupPoints: [],
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
+    materials: { knowledge: [], resources: [] }, knowledgeOperations: {}, resourceOperations: {}, loseKnowledgeResponse: false, loseResourceResponse: false,
     projects: [{ id: 'p1', name: 'Demo project', goal: 'A durable goal', createdAt: '2026-09-23T00:00:00Z', updatedAt: '2026-09-23T00:00:00Z' }],
     conversations: { p1: { project: { id: 'p1', name: 'Demo project', goal: 'A durable goal', createdAt: '2026-09-23T00:00:00Z', updatedAt: '2026-09-23T00:00:00Z' }, messages: [], tasks: [] } },
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
@@ -284,7 +292,7 @@ function initial(): PanelServer {
 }
 
 /** A refusal response carrying the host's HTTP status code and JSON error body. Returned by route handlers when a request is rejected. */
-class Refusal { constructor(readonly status: 400 | 404 | 409 | 500, readonly body: Record<string, unknown>) {} }
+class Refusal { constructor(readonly status: 400 | 404 | 409 | 500 | 503, readonly body: Record<string, unknown>) {} }
 const refuse = (status: Refusal['status'], error: string, more: Record<string, unknown> = {}) => new Refusal(status, { error, ...more })
 type Query<K extends keyof Api> = Api[K] extends { query?: infer Q } ? keyof NonNullable<Q> & string : never
 type Body<K extends keyof Api> = Api[K] extends { body: infer B } ? B : undefined
@@ -298,6 +306,33 @@ const ticketOf = (id: string) =>
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
+  'GET projects/:id/materials': { answer: () => server.materials },
+  'POST projects/:id/knowledge': { body: true, answer: ({ params, body }) => {
+    const { operationId, ...fields } = body
+    const prior = operationId ? server.knowledgeOperations[operationId] : undefined
+    if (prior) return prior
+    const version = server.materials.knowledge.filter(item => item.kind === fields.kind && item.title === fields.title).length + 1
+    const value: KnowledgeVersion = { ...fields, id: `k${server.materials.knowledge.length + 1}`, projectId: params.id, version, state: 'proposed', contentHash: 'fixture-hash', createdAt: new Date().toISOString() }
+    server.materials.knowledge.push(value)
+    if (operationId) server.knowledgeOperations[operationId] = value
+    if (server.loseKnowledgeResponse) { server.loseKnowledgeResponse = false; return refuse(503, 'The response was lost after the commit') }
+    return value
+  } },
+  'POST projects/:id/knowledge/:knowledgeId/confirm': { answer: () => refuse(404, 'Unknown fixture knowledge') },
+  'POST projects/:id/resources': { body: true, answer: ({ params, body }) => {
+    const { operationId, ...fields } = body
+    const prior = operationId ? server.resourceOperations[operationId] : undefined
+    if (prior) return prior
+    const value: Resource = { ...fields, id: `r${server.materials.resources.length + 1}`, projectId: params.id, revoked: false, version: 'fixture-version', createdAt: new Date().toISOString() }
+    server.materials.resources.push(value)
+    if (operationId) server.resourceOperations[operationId] = value
+    if (server.loseResourceResponse) { server.loseResourceResponse = false; return refuse(503, 'The response was lost after the commit') }
+    return value
+  } },
+  'POST projects/:id/resources/:resourceId/revoke': { body: true, answer: () => refuse(404, 'Unknown fixture resource') },
+  'POST projects/:id/skills': { body: true, answer: () => refuse(409, 'Fixture skill publication disabled') },
+  'POST projects/:id/resources/:resourceId/browse': { body: true, answer: () => refuse(404, 'Unknown fixture resource') },
+  'GET projects/:id/resources/:resourceId/preview': { answer: () => refuse(404, 'Unknown fixture resource') },
   'GET projects': { answer: () => ({ projects: server.projects }) },
   'POST projects': { body: true, answer: ({ body }) => {
     const project = { id: `p${server.projects.length + 1}`, ...body, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }

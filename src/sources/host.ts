@@ -4,6 +4,8 @@ import type { Commands } from '../infra/commands.ts'
 import type { Deployment } from '../deployment.ts'
 import type { SourceRegistry } from './registry.ts'
 import type { SetupProblem } from '../setup.ts'
+import type { GitHubNamespace } from './github-namespace.ts'
+import type { ExecutionIdentity } from '../app/execution-environment.ts'
 import type { Family, Key } from '../kv.ts'
 import { fill } from '../infra/text.ts'
 
@@ -24,12 +26,16 @@ export interface SourceHost {
   readonly sources: SourceRegistry
   /** Returns the context for one Source kind; its `report` writes only the health entries declared by the kind. */
   context(kind: { kind: string; health: readonly string[] }): SourceContext
+  /** A context pinned to one persisted project/resource/Attempt execution identity and its Commands. */
+  contextForExecution?(identity: ExecutionIdentity): SourceContext
 }
 /** Display label, URL, and facts (`null` removes a fact) that a Source publishes on a Thread. */
 export interface ThreadDescription { label?: string; url?: string; facts?: Record<string, ThreadFact | null> }
 /** Application capabilities exposed to a Source kind for reading state, ingesting triggers, managing threads/tickets, and reporting health. */
 export interface SourceContext {
   readonly deployment: Deployment
+  /** Present only for explicit project consumers; deployment-wide polling has no project namespace. */
+  readonly githubNamespace?: GitHubNamespace
   readonly commands: Commands
   readonly ready: Promise<void>
   /** True when this Source's resource is resolved and ready; polling and delivery require this capability. */
