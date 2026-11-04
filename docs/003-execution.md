@@ -46,6 +46,8 @@ Stopping or restarting the plugin inside the DeepSeek Harness process uses the s
 
 Worker subagents, including nested ones, use DeepSeek Harness's `standard` preset with the worker's permissions. They retain only the worker's allowed work tools, and lose those tools when the Ticket ends. Under `standard`, a shell command moves to the background after 60 seconds. A subagent's jobs are killed when it ends.
 
+Managed project file workers are stricter. Their native `subagent` start capability stays disabled until the host proves child scope, stop, result delivery and restart behavior. Any recorded temporary child carries the parent Attempt/lease and the intersection of its resource/tool and role/stage skill grants; an unrecorded child receives no application tools. Its terminal result must be processed before the parent can complete. Long-lived help or review remains an ordinary Assignment on the same project Task.
+
 ### Preparing a Ticket directory
 
 Before the first Assignment, if the Ticket directory does not exist, the prepare command runs once with `sh` in the execution root. It has ten minutes to finish. Without a prepare command, the worker starts in an empty directory.

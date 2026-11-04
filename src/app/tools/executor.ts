@@ -15,6 +15,7 @@ import type { ProjectResources } from '../project-resources.ts'
 import { codeValidationOperation, type CodeValidation } from '../code-validation.ts'
 import type { Commands } from '../../infra/commands.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
+import type { Delegations } from '../delegations.ts'
 
 export interface ExecutorToolsHost {
   readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'>
@@ -26,7 +27,7 @@ export interface ExecutorToolsHost {
   sendReplies(): Promise<void>
 }
 
-export function projectWorkerTools(attempts: ExecutionAttempts, artifacts: ArtifactStore, reports: ReportAcceptance, engineOrSession: Pick<EngineForExecutor, 'report'> | string, maybeSessionId?: string, resources?: ProjectResources, validation?: CodeValidation, commands?: Commands): Tool[] {
+export function projectWorkerTools(attempts: ExecutionAttempts, artifacts: ArtifactStore, reports: ReportAcceptance, engineOrSession: Pick<EngineForExecutor, 'report'> | string, maybeSessionId?: string, resources?: ProjectResources, validation?: CodeValidation, commands?: Commands, delegations?: Delegations): Tool[] {
   const sessionId = typeof engineOrSession === 'string' ? engineOrSession : maybeSessionId!
   // The resource authority that governs this session is bound here so every consumer of the same
   // Attempts set — including skill body loads — re-checks it against the live grant.
@@ -67,6 +68,11 @@ export function projectWorkerTools(attempts: ExecutionAttempts, artifacts: Artif
     return { question }
   }) }))
   if (attempts.bySession(sessionId)?.reviewTarget) tools.push(tool({ name: 'project_worker_decide', description: 'Submit an independent version-bound judgment for your server-registered review target. A ready review report is not a gate decision. Read reviewTarget in context; use changes_required or needs_judgment when the content does not satisfy its conditions.', schema: z.object({ operation_id: z.string().min(1), report_id: z.string().min(1), conclusion: z.enum(['passed', 'changes_required', 'needs_judgment']), evidence: z.string().min(1) }).strict(), execute: async args => reports.decideWorker(sessionId, { operationId: args.operation_id, reportId: args.report_id, conclusion: args.conclusion, evidence: args.evidence }) }))
+  if (delegations && attempts.bySession(sessionId)) tools.push(tool({ name: 'project_process_delegation', description: 'Consume one settled result from a server-recorded local child of this exact parent execution. This records result processing but never starts a child or completes the Assignment by itself. Reuse operation_id only for the same processing receipt.', schema: z.object({ child_session_id: z.string().min(1).max(256), operation_id: z.string().min(1).max(256) }).strict(), execute: async args => {
+    const result = delegations.process(sessionId, args.child_session_id, args.operation_id)
+    return { delegationId: result.id, childSessionId: result.childSessionId, state: result.state, resultProcessing: result.resultProcessing,
+      result: result.result }
+  } }))
   return [...tools,
     tool({ name: 'project_worker_context', description: 'Read the immutable authorized plan, saved originalMessage for the original request language, pinned inputs and registered artifacts. Identity and originalMessage come only from this native Session Assignment authorization, never conversation history.', schema: z.object({}).strict(), execute: async () => {
       const { attempt, assignment, ticket } = attempts.resolve(sessionId)
@@ -75,6 +81,10 @@ export function projectWorkerTools(attempts: ExecutionAttempts, artifacts: Artif
         ...(attempt.identity ? { identity: { executionId: attempt.identity.executionId, repository: attempt.identity.repository, accountId: attempt.identity.accountId, ...(attempt.identity.deliveryBranch ? { deliveryBranch: attempt.identity.deliveryBranch } : {}) } } : {}),
         ...(authorization?.originalMessage ? { originalMessage: authorization.originalMessage } : {}),
         ...(attempt.reviewTarget ? { reviewTarget: attempt.reviewTarget } : {}),
+        ...(delegations ? { delegations: delegations.contextForAttempt(attempt.id) } : {}),
+        ...(delegations ? { promotedDelegations: delegations.promotedForAssignment(assignment.id).slice(-8).map(item => ({ id: item.id, label: item.label,
+          scope: item.scope, ...(item.result ? { result: { stopReason: item.result.stopReason, text: item.result.text.slice(0, 4_000),
+            totalChars: item.result.totalChars, truncated: item.result.text.length < item.result.totalChars } } : {}) })) } : {}),
         outputs: artifacts.view(attempt.projectId).filter(item => item.ticketId === attempt.ticketId),
         ...(attempt.context ? { context: attempt.context } : {}) }
     } }),
@@ -103,6 +113,7 @@ export function projectWorkerTools(attempts: ExecutionAttempts, artifacts: Artif
         const steps: Record<string, string> = {
           'missing-artifacts': 'Write and register every required output, then submit a new report with exact artifact versions. Preserve any real unresolved work/content blockers.',
           'unresolved-items': 'Resolve the actual work/content blockers and submit an updated report with a new operation_id. Keep every remaining blocker in unresolved; never clear it merely to finish. Independent acceptance is managed separately by the application.',
+          'delegation-pending': 'Wait for every required local delegation result, process it through the application, then continue. A child result never completes the parent Assignment by itself.',
           'semantic-review': 'Await the application independent authenticated review of the current report and exact artifact/conditions versions. This review is not an unresolved work item; receipt alone does not complete the task.',
           changes_required: 'Address the independent review feedback, register revised artifacts and submit a new ready report. The new report requires a new independent review. Preserve real blockers.',
           needs_judgment: 'Await further independent judgment of the current version. Preserve real work/content blockers and do not claim completion.',

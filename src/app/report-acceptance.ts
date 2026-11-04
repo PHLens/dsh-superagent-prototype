@@ -13,6 +13,7 @@ import { CodeValidation, codeValidationOperation } from './code-validation.ts'
 import { claimPull, readPull, type Pull } from '../sources/github-pull.ts'
 import type { SourceContext } from '../sources/host.ts'
 import { sameName } from '../infra/text.ts'
+import type { Delegations } from './delegations.ts'
 
 export interface FileReport {
   operationId: string; state: 'progress' | 'ready' | 'blocked' | 'failed'
@@ -26,7 +27,9 @@ export interface GateDecision {
 /** Persists worker receipts and independently validates version-bound acceptance before completing work. */
 export class ReportAcceptance {
   private githubFor?: (identity: import('./execution-environment.ts').ExecutionIdentity) => SourceContext
+  private delegations?: Pick<Delegations, 'blocking'>
   constructor(readonly store: Store, readonly attempts: ExecutionAttempts, readonly artifacts: ArtifactStore, readonly validation?: CodeValidation) {}
+  setDelegations(delegations: Pick<Delegations, 'blocking'>): void { this.delegations = delegations }
   /** Project reports validate and bind a PR only inside the Attempt's execution context. */
   setGithubContext(create: (identity: import('./execution-environment.ts').ExecutionIdentity) => SourceContext): void { this.githubFor = create }
   /** Reads the claimed PR under the Attempt's registered account/repository before the report transaction. */
@@ -180,6 +183,20 @@ export class ReportAcceptance {
       return decision
     })
   }
+  /** Re-evaluate a durable ready receipt after an external prerequisite such as a local delegation is processed. */
+  reaggregate(sessionId: string): void {
+    this.store.atomic(() => {
+      const { attempt, ticket, assignment } = this.attempts.resolve(sessionId)
+      if (this.delegations?.blocking(attempt.id).length) return
+      const receipt = assignment.reportReceipt
+      if (!receipt || receipt.state !== 'ready' || receipt.attemptId !== attempt.id || receipt.lease !== attempt.lease) return
+      const row = this.store.db.prepare('SELECT value FROM worker_report WHERE id=? AND attempt_id=?').get(receipt.id, attempt.id) as { value?: string } | undefined
+      if (!row?.value) return
+      const report = JSON.parse(row.value) as AcceptedReport
+      if (report.state !== 'ready' || report.lease !== attempt.lease) return
+      this.aggregate(ticket, assignment, attempt, report)
+    })
+  }
   private aggregate(ticket: Ticket, assignment: Assignment, attempt: Attempt, report: AcceptedReport, completionAt = report.at): void {
     let reason: string | undefined
     if (report.state !== 'ready') reason = report.state === 'progress' ? undefined : report.state
@@ -191,6 +208,7 @@ export class ReportAcceptance {
          if (!this.validation) reason = 'missing-code-validation'
          else { try { this.validation.requirePassed(attempt.id, attempt.lease, assignment.contract!.plan.acceptance.codeCheck, codeValidationOperation(attempt.id, assignment.contract!.planRevision)) } catch { reason = 'missing-code-validation' } }
        }
+      if (!reason && this.delegations?.blocking(attempt.id).length) reason = 'delegation-pending'
       if (!reason && (ticket.attentionQuestions?.some(question => question.binding?.assignmentId === assignment.id && !question.resolvedAt)
         || (ticket.attention?.binding?.assignmentId === assignment.id && !ticket.attention.resolvedAt))) reason = 'unresolved-question'
       if (!reason && (assignment.contract!.plan.acceptance?.mode !== 'registered-files' || activePlanAssignments(ticket).some(item => item.contract?.proposal?.review && item.contract.authorizationId === assignment.contract!.authorizationId && item.contract.proposal.review.target === assignment.contract!.assignmentKey))) {
@@ -226,7 +244,7 @@ export class ReportAcceptance {
     if (owner && report.state !== 'progress') {
       const id = `worker-result:${report.id}:${reason ?? 'accepted'}`
       const reasons: Record<string, string> = {
-        'missing-artifacts': '必要文件尚未全部提交', 'unresolved-items': '仍有未解决的工作事项', 'unresolved-question': '仍有未回答的问题',
+        'missing-artifacts': '必要文件尚未全部提交', 'unresolved-items': '仍有未解决的工作事项', 'unresolved-question': '仍有未回答的问题', 'delegation-pending': '必要子任务结果尚未收齐和处理',
         'semantic-review': '等待独立语义复核', changes_required: '独立复核要求修改', needs_judgment: '等待进一步独立判断',
         blocked: '执行遇到阻碍', failed: '执行失败，等待处理',
       }

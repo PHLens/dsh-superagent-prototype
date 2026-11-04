@@ -139,6 +139,7 @@ const TEXT = {
   executionWait: ['执行状态：{reason}', 'Execution status: {reason}'],
   executionDone: ['已完成', 'Completed'],
   executionUnresolved: ['仍有未解决的工作事项', 'Unfinished work remains'],
+  executionDelegationPending: ['等待必要子任务结果', 'Waiting for required delegated results'],
   executionSemanticReview: ['等待独立语义复核', 'Waiting for independent semantic review'],
   executionMissingArtifacts: ['必要文件尚未全部提交', 'Required files have not all been submitted'],
   executionChangesRequired: ['独立复核要求修改', 'Independent review requires changes'],

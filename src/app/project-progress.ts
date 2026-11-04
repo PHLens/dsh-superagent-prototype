@@ -7,7 +7,7 @@ import type { Attempt } from './execution-attempts.ts'
 import type { AcceptedReport, GateDecision } from './report-acceptance.ts'
 
 export type ProjectWorkPhase = 'awaiting-confirmation' | 'queued' | 'preparing' | 'retrying' | 'running' | 'worker-idle'
-  | 'semantic-review' | 'changes_required' | 'needs_judgment' | 'missing-artifacts' | 'unresolved-items'
+  | 'semantic-review' | 'changes_required' | 'needs_judgment' | 'missing-artifacts' | 'unresolved-items' | 'delegation-pending'
   | 'failed' | 'blocked' | 'unknown' | 'authorization-revoked' | 'completed' | 'ended'
 export interface AssignmentProgress {
   assignmentId: string
@@ -103,6 +103,7 @@ function assignmentProgress(ticket: Ticket, assignment: Assignment, facts: Facts
       result.phase = 'missing-artifacts'; return result
     }
     if (report.unresolved.length) { result.phase = 'unresolved-items'; return result }
+    if (result.waitingReason === 'delegation-pending') { result.phase = 'delegation-pending'; return result }
     if (contract.plan.acceptance?.mode !== 'registered-files') {
       const targetVersion = createHash('sha256').update(JSON.stringify(report.artifacts.map(ref => [ref.id, ref.contentVersion]))).digest('hex')
       const decision = facts.decisions.findLast(item => item.projectId === ticket.projectId && item.ticketId === ticket.id
@@ -127,7 +128,7 @@ export function projectProgress(ticket: Ticket, facts: Facts): ProjectProgress {
   const assignments = activePlanAssignments(ticket).map(item => assignmentProgress(ticket, item, facts))
   const active = assignments.filter(item => !['completed', 'ended'].includes(item.phase))
   const priority: ProjectWorkPhase[] = ['running', 'unknown', 'failed', 'blocked', 'needs_judgment', 'changes_required',
-    'missing-artifacts', 'unresolved-items', 'semantic-review', 'authorization-revoked', 'retrying', 'preparing', 'queued', 'worker-idle']
+    'missing-artifacts', 'unresolved-items', 'delegation-pending', 'semantic-review', 'authorization-revoked', 'retrying', 'preparing', 'queued', 'worker-idle']
   const workPhase: ProjectWorkPhase = ticket.ended ? ticket.ended.outcome === 'completed' ? 'completed' : 'ended'
     : priority.find(phase => active.some(item => item.phase === phase)) ?? (assignments.length ? 'unknown' : 'awaiting-confirmation')
   const lifecycle = ticket.lifecycle

@@ -10,7 +10,7 @@ import { realpathSync } from 'node:fs'
 import { isDeepStrictEqual } from 'node:util'
 import { ExecutionAttempts } from './execution-attempts.ts'
 import type { ReportAcceptance } from './report-acceptance.ts'
-import { PROJECT_WORKER_RULES } from './prompts.ts'
+import { PROJECT_DELEGATION_RULES, PROJECT_WORKER_RULES } from './prompts.ts'
 import { z } from 'zod'
 import { key, liveTicket, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
@@ -29,6 +29,7 @@ import { bindManagedSkills, recordSkillLoad, type ManagedSkillSnapshot, type OnS
 import { managedSkillTools, MANAGED_SKILL_TOOL_NAMES } from './tools/managed-skill.ts'
 import { KV } from '../kv.ts'
 import { plainJsonSchema, type RegisterTool, type Tool } from './tools/tool.ts'
+import type { Delegations } from './delegations.ts'
 
 /** Host dependencies used by `Sessions`. */
 export interface SessionsHost {
@@ -47,6 +48,8 @@ export interface SessionsHost {
   readonly reports?: Pick<ReportAcceptance, 'hasReceipt'>
   /** Live registered-resource grants; pinned skill requirements are re-checked against them. */
   readonly resources?: Pick<import('./project-resources.ts').ProjectResources, 'granted'>
+  /** Durable parent-owned native delegation records; absent leaves legacy child handling unchanged. */
+  readonly delegations?: Delegations
   readonly lifetime: AbortSignal
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
@@ -67,12 +70,14 @@ declare module '@deepseek-ai/cordis' {
   interface Events {
     /** DSH's agent preset registry selected `agentPreset` for a Session. */
     'agent-preset/selected'(sessionId: string, agentPreset: string): void
+    'subagent/start'(info: { id: string; runId: string; provider: string; local: boolean }): void
+    'subagent/end'(info: { id: string; runId: string; provider: string; local: boolean; stopReason: string; lastAssistantMessage?: readonly unknown[]; diagnostic?: string }): void
   }
 }
 /** Increment when the managed file-tool contract changes incompatibly; absent versions are the original T4 v1. */
 const PROJECT_WORKER_TOOL_VERSION = 1
 const SKILL_INJECTION_TIMEOUT_MS = 3_000
-export const PROJECT_WORKER_TOOLS = ['project_worker_context', 'project_read_input', 'project_read_resource', 'project_validate_code', 'project_write_artifact', 'project_worker_report', 'project_worker_request_question', 'project_worker_decide', ...MANAGED_SKILL_TOOL_NAMES] as const
+export const PROJECT_WORKER_TOOLS = ['project_worker_context', 'project_read_input', 'project_read_resource', 'project_validate_code', 'project_write_artifact', 'project_worker_report', 'project_worker_request_question', 'project_worker_decide', 'project_process_delegation', ...MANAGED_SKILL_TOOL_NAMES] as const
 /**
  * The DSH tools an Executor Session works with: files, search, the shell and its jobs, the web, skills, its todo list and
  * subagents. It gets no other tool the profile has, whenever it was registered: none that asks or shows a person something,
@@ -140,6 +145,14 @@ export class Sessions {
       this.updateModelHealth()
     })
     ctx.on('agent/created', async ({ agent }) => { await this.decorate(agent); return undefined })
+    ctx.on('subagent/start', info => {
+      const parent = ctx.agents.get(info.id as SessionId)?.session.header.parentSession
+      if (parent) this.host.delegations?.observeStart(parent, info)
+    })
+    ctx.on('subagent/end', info => {
+      const record = this.host.delegations?.byChildSession(info.id)
+      if (record) this.host.delegations?.observeEnd(record.parentSessionId, info)
+    })
     // Opening a Session in DSH's Web UI before its first turn may select the default preset for it: select ours again. After
     // its first turn DSH refuses any selection, which leaves it as it is.
     ctx.inject(['agentPresets'], child => {
@@ -262,7 +275,15 @@ export class Sessions {
     const host = this.host
     const master = agent.id === host.masterId
     const ticket = master ? undefined : this.ticketOf(agent)
-    if (!master && !ticket) { this.limitSubagent(agent); return }
+    if (!master && !ticket) {
+      const delegation = host.delegations?.byChildSession(agent.id)
+      if (delegation) { await this.decorateDelegation(agent, delegation.id); return }
+      if (host.delegations && this.managedAncestor(agent)) {
+        this.bindings.set(agent, { disposers: [agent.ctx.tools.restrict({ allow: [] }), agent.ctx.tools.guard(() => 'Subagent has no application delegation record')], subagent: true })
+        return
+      }
+      this.limitSubagent(agent); return
+    }
     const binding: SessionBinding = { disposers: [] }
     this.bindings.set(agent, binding)
     const managed = this.host.attempts?.bySession(agent.id)
@@ -311,7 +332,8 @@ export class Sessions {
       binding.disposers.push(agent.ctx.tools.restrict({ allow: inherited.filter(name => pinned.tools.includes(name)) }), agent.ctx.tools.guard(execution => {
         // Receipt-capable services distinguish exact historical replay from strictly authorized new writes. A durable
         // report operation may reach its receipt after authorization/resource revocation; a new operation may not.
-        const receiptCapable = execution.name === 'project_worker_report' || execution.name === 'project_write_artifact' || execution.name === 'project_worker_request_question' || execution.name === 'project_worker_decide'
+        const receiptCapable = execution.name === 'project_worker_report' || execution.name === 'project_write_artifact' || execution.name === 'project_worker_request_question'
+          || execution.name === 'project_worker_decide' || execution.name === 'project_process_delegation'
         const argumentsValue = execution.arguments ?? (execution as { args?: unknown }).args
         const operationId = execution.name === 'project_worker_report' && argumentsValue && typeof argumentsValue === 'object'
           ? (argumentsValue as { operation_id?: unknown }).operation_id : undefined
@@ -442,8 +464,76 @@ export class Sessions {
       parent = this.ctx.agents.get(parent)?.session.header.parentSession
     }
     const ticketId = parent === undefined ? undefined : ticketOfSession(parent)
-    if (ticketId === undefined || !this.host.store.tickets.get(ticketId)) return
+    if (ticketId === undefined || !this.host.store.tickets.get(ticketId)) {
+      if (this.host.delegations && agent.session.header.origin === 'subagent') {
+        this.bindings.set(agent, { disposers: [agent.ctx.tools.restrict({ allow: [] }), agent.ctx.tools.guard(() => 'Subagent ancestry is unknown or outside a managed project')], subagent: true })
+      }
+      return
+    }
     this.bindings.set(agent, { disposers: this.workOnly(agent, ticketId), subagent: true })
+  }
+  /** The exact first managed Attempt in a direct Session ancestry. Unknown or broken ancestry grants nothing. */
+  private managedAncestor(agent: Agent): string | undefined {
+    let parent = agent.session.header.parentSession
+    for (let depth = 0; parent !== undefined && depth < 8; depth++) {
+      if (this.host.attempts?.bySession(parent)) return parent
+      const child = this.host.delegations?.byChildSession(parent)
+      if (child) { parent = child.parentSessionId as SessionId; continue }
+      parent = this.ctx.agents.get(parent)?.session.header.parentSession
+    }
+    return undefined
+  }
+  /** A recorded child receives the intersection persisted by Delegations, not whichever preset tools happen to exist later. */
+  private async decorateDelegation(agent: Agent, delegationId: string): Promise<void> {
+    const delegations = this.host.delegations!
+    const binding: SessionBinding = { disposers: [] }
+    this.bindings.set(agent, binding)
+    const deny = (reason: string): void => {
+      binding.disposers.push(agent.ctx.tools.restrict({ allow: [] }), agent.ctx.tools.guard(() => reason))
+    }
+    const authorize = () => {
+      const record = delegations.get(delegationId)
+      if (!record || agent.session.header.parentSession !== record.parentSessionId
+        || agent.session.header.parentSession !== this.managedAncestor(agent)) throw new Error('Delegation ancestry is unknown or no longer the recorded parent')
+      return delegations.authorizeChild(agent.id).delegation
+    }
+    let record
+    try { record = authorize() } catch (error) { deny(String(error)); return }
+    const parentScope = scopeParentOf(agent)
+    const inherited = record.scope.tools.filter(name => agent.ctx.tools.get(name, parentScope))
+    const managedNames = new Set<string>(MANAGED_SKILL_TOOL_NAMES)
+    const missing = record.scope.tools.filter(name => !inherited.includes(name) && !managedNames.has(name))
+    if (missing.length) { deny(`Delegated tools unavailable in the native child: ${missing.join(', ')}`); return }
+    if (this.host.skillCatalog && record.scope.skills.length) {
+      const authorizeSkills = () => {
+        const current = authorize()
+        return { projectId: current.projectId, role: current.scope.role, stage: current.scope.stage,
+          resources: current.scope.resources.filter(id => this.host.resources?.granted(current.projectId, id) ?? true), tools: current.scope.tools }
+      }
+      const sessionId = agent.id
+      const delegateRecordSkillLoad = (target: string, value: { id: string; name: string; version: string; bodyHash: string; offset: number; nextOffset: number | null }) => {
+        // The callback can run during provider replay; key it by the exact child rather than a mutable parent variable.
+        delegations.recordSkillLoad(target, value)
+      }
+      try { await this.bindManagedSkillScope(agent, binding, this.host.skillCatalog, record.scope.skills, authorizeSkills, value => delegateRecordSkillLoad(sessionId, value)) }
+      catch (error) { deny(String(error)); return }
+      if (this.bindings.get(agent) !== binding) return
+    }
+    const managed = MANAGED_SKILL_TOOL_NAMES.filter(name => record.scope.tools.includes(name))
+    if (managed.length && this.host.skillCatalog) {
+      const allowed = new Set<string>(managed)
+      const snapshots = record.scope.skills, register = this.registerTool(agent, binding)
+      const authorizeSkills = () => { const current = authorize(); return { projectId: current.projectId, role: current.scope.role, stage: current.scope.stage, resources: current.scope.resources, tools: current.scope.tools } }
+      for (const item of managedSkillTools({ catalog: this.host.skillCatalog, snapshots, authorize: authorizeSkills,
+        onLoaded: value => delegations.recordSkillLoad(agent.id, value) })) {
+        if (!allowed.has(item.name)) continue
+        register(item.name, item.description, item.schema, item.execute)
+      }
+    }
+    binding.disposers.push(agent.ctx.tools.restrict({ allow: inherited }), agent.ctx.tools.guard(execution => {
+      try { const current = authorize(); return current.scope.tools.includes(execution.name) ? undefined : 'Tool is outside the recorded delegation scope' } catch (error) { return String(error) }
+    }), agent.ctx.systemPrompt.section({ name: 'project-delegation', order: 9999, interpolate: false, complete: true,
+      text: `[dsh-superagent delegated role: ${record.scope.role}/${record.scope.stage}]\n${PROJECT_DELEGATION_RULES}\n\nTask: ${record.context.prompt}` }))
   }
   /** Register the skills of a prompt version in the agent's skill scope, in place of an earlier version's. */
   private bindSkills(binding: SessionBinding, version: PromptVersion): void {

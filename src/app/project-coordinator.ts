@@ -33,6 +33,7 @@ import { resolveCodeCheck } from './code-check.ts'
 import type { ProjectScheduler } from './scheduler.ts'
 import type { Resource } from './project-resources.ts'
 import { validationJobPersistence, type ValidationJobOptions, type ValidationNativeJobs } from './native-validation-job.ts'
+import { Delegations } from './delegations.ts'
 
 /** Serializes durable project inputs across independent DSH coordinator Sessions. */
 export class ProjectCoordinator {
@@ -44,6 +45,7 @@ export class ProjectCoordinator {
   readonly validation: CodeValidation
   readonly artifacts: ArtifactStore
   readonly reports: ReportAcceptance
+  readonly delegations: Delegations
   readonly conversations: ConversationStore
   readonly plans: ProjectPlans
   private readonly sessions: ProjectSessions
@@ -186,8 +188,14 @@ export class ProjectCoordinator {
       if (combinedSignal.aborted) return { status: 'aborted', exitCode: outcome.exitCode ?? undefined, signal: outcome.signal ?? undefined, stdout, stderr, physicalExit: true as const, error: 'Validation cancelled' }
       return { status: outcome.exitCode === 0 && outcome.signal === null ? 'passed' : 'failed', exitCode: outcome.exitCode ?? undefined, signal: outcome.signal ?? undefined, stdout, stderr, physicalExit: true as const }
     } }, undefined, (sessionId) => this.authorizeValidation(sessionId), this.resources)
-         this.artifacts = new ArtifactStore(store, this.attempts)
+    this.artifacts = new ArtifactStore(store, this.attempts)
     this.reports = new ReportAcceptance(store, this.attempts, this.artifacts, this.validation)
+    this.delegations = new Delegations(store, this.attempts, this.skills, { onChanged: attemptId => {
+      const attempt = this.attempts.all().find(item => item.id === attemptId)
+      if (!attempt) return
+      try { this.reports.reaggregate(attempt.sessionId) } catch { /* A stopped or stale parent is reconciled on resume. */ }
+    } })
+    this.reports.setDelegations(this.delegations)
     this.conversations = new ConversationStore(store)
     this.plans = new ProjectPlans(store, projects, this.conversations, (projectId, plan, check) => this.resolveCheck(projectId, plan.resources, check).check)
     this.sessions = new ProjectSessions(ctx, store, signal, this.skills, (mapping, projectId) => { this.validateBudgetOwner(mapping.sessionId, projectId, mapping.generation) })
@@ -495,7 +503,10 @@ export class ProjectCoordinator {
       events.completeFeedback(batch)
     })
   }
-  start(): void { for (const owner of this.conversations.listOwners()) this.wake(owner.projectId, owner.actorId) }
+  start(): void {
+    void this.delegations.reconcile().catch(() => { /* A restart reconciliation remains fail-closed in the durable record. */ })
+    for (const owner of this.conversations.listOwners()) this.wake(owner.projectId, owner.actorId)
+  }
   private wake(projectId: string, actorId: string): void {
     if (this.stopped || this.signal.aborted || this.running.has(projectId)) return
     void this.schedule(projectId, actorId, async () => {

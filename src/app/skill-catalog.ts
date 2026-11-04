@@ -11,6 +11,13 @@ export interface SkillRecord {
 }
 export interface SkillCandidate { id: string; name: string; version: string; description: string; roles: SkillRole[]; stages: string[]; resources: string[]; tools: string[] }
 export interface SkillPin { name: string; version: string; bodyHash: string }
+export interface DelegatedSkillScope {
+  role: Exclude<SkillRole, 'coordinator'>
+  stage: string
+  resources: string[]
+  tools: string[]
+  skills: { candidate: SkillCandidate; pin: SkillPin }[]
+}
 
 const digest = (body: string) => createHash('sha256').update(body).digest('hex')
 /**
@@ -34,6 +41,12 @@ export function normalizeSkillRecord(value: SkillRecord): SkillRecord {
 }
 const normalize = normalizeSkillRecord
 const allowed = (value: string) => /^[a-z][a-z0-9-]*$/.test(value)
+const distinct = (values: readonly string[] | undefined, label: string): string[] => {
+  if (!values?.length) return []
+  const result = [...new Set(values)]
+  if (result.some(value => typeof value !== 'string' || !value.trim() || value.length > 256)) throw new Error(`${label} scope is invalid`)
+  return result
+}
 
 /** Stores skill bodies independently of live sources and authorizes each pinned load. */
 export class SkillCatalog {
@@ -57,6 +70,25 @@ export class SkillCatalog {
       // A project's own skill shadows a global skill with the same name for direct /name loads.
       .sort((left, right) => Number(left.scope !== 'project') - Number(right.scope !== 'project'))
       .map(({ id, name, version, description, roles, stages, resources: requiredResources, tools: requiredTools }) => ({ id, name, version, description, roles, stages, resources: requiredResources, tools: requiredTools }))
+  }
+  /**
+   * A temporary child receives only the exact parent resource/tool grant plus the skills matching its role and stage.
+   * The coordinator role is never delegable: project discussion remains the single fenced semantic writer.
+   */
+  delegationScope(input: {
+    projectId: string; parentResources: readonly string[]; parentTools: readonly string[]; role: Exclude<SkillRole, 'coordinator'>
+    stage: string; resources?: readonly string[]; tools?: readonly string[]
+  }): DelegatedSkillScope {
+    if (!input.stage.trim() || input.stage.length > 120) throw new Error('Delegated skill stage is invalid')
+    const parentResources = distinct(input.parentResources, 'Parent resource'), parentTools = distinct(input.parentTools, 'Parent tool')
+    const resources = distinct(input.resources, 'Delegated resource'), tools = distinct(input.tools, 'Delegated tool')
+    const outsideResources = resources.filter(value => !parentResources.includes(value))
+    const outsideTools = tools.filter(value => !parentTools.includes(value))
+    if (outsideResources.length) throw new Error(`Delegated resources exceed the parent grant: ${outsideResources.join(', ')}`)
+    if (outsideTools.length) throw new Error(`Delegated tools exceed the parent grant: ${outsideTools.join(', ')}`)
+    const candidates = this.candidates({ projectId: input.projectId, role: input.role, stage: input.stage, resources, tools })
+    const pins = this.pin(candidates)
+    return { role: input.role, stage: input.stage, resources, tools, skills: candidates.map((candidate, index) => ({ candidate, pin: pins[index]! })) }
   }
   pin(candidates: readonly SkillCandidate[]): SkillPin[] { return candidates.map(item => { const value = this.get(item.id); if (!value || !value.enabled || value.name !== item.name || value.version !== item.version) throw new Error('Skill candidate changed'); return { name: item.name, version: item.version, bodyHash: digest(value.body) } }) }
   body(id: string, authorization: { projectId?: string; role: SkillRole; stage: string; pin?: SkillPin; resources?: readonly string[]; tools?: readonly string[] }): string {
