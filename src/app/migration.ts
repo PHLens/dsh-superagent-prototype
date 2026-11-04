@@ -1,5 +1,5 @@
 /**
- * Migrates schema 10 records to their schema 11 shapes; schema 12 adds project storage and schema 13 adds owned conversations and coordinator mappings without reassigning legacy records.
+ * Migrates schema 10 records through the current T1–T8 storage boundaries without reassigning legacy records.
  * Databases older than schema 10 are rejected: this version cannot migrate them.
  */
 import { basename } from 'node:path'
@@ -16,8 +16,9 @@ import { promptsNotice, settingsNotice, subscriptionNotice } from './notices.ts'
 import type { SettingsVersion, Store } from './store.ts'
 import { Versions } from './versions.ts'
 import { KV, type Key } from '../kv.ts'
+import { DELEGATION_SCHEMA_SQL } from './delegations.ts'
 
-export const SCHEMA_VERSION = 18
+export const SCHEMA_VERSION = 19
 /** The oldest database schema version this build can open and migrate directly. */
 export const OLDEST_SCHEMA = 10
 /** Returns an error message explaining why `version` cannot be opened: older schemas need a new state directory. */
@@ -54,6 +55,11 @@ export function migrateTo17(store: Store): void {
 /** T7 adds durable code-validation reservations inside the versioned store boundary. */
 export function migrateTo18(store: Store): void {
   store.db.exec('CREATE TABLE IF NOT EXISTS code_validation (id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, operation_id TEXT NOT NULL, value TEXT NOT NULL, UNIQUE(attempt_id, operation_id))')
+}
+
+/** T8 adds the durable local-delegation audit and result-processing gate. */
+export function migrateTo19(store: Store): void {
+  store.db.exec(DELEGATION_SCHEMA_SQL)
 }
 
 type Stored = Record<string, unknown>

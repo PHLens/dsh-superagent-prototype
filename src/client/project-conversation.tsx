@@ -13,13 +13,13 @@ const budgetLabels = { 'global-budget': 'assignmentBudgetGlobal', 'project-fairn
 const executionReasons = {
   'executor-unavailable': 'planWaitingExecutor', 'worker-slot': 'executionWorkerSlot', 'preparation-reconciliation': 'executionPreparation',
   'worker-running': 'executionRunning', 'worker-idle': 'executionIdle', 'semantic-review': 'executionSemanticReview',
-  'missing-artifacts': 'executionMissingArtifacts', 'unresolved-items': 'executionUnresolved', changes_required: 'executionChangesRequired',
+  'missing-artifacts': 'executionMissingArtifacts', 'unresolved-items': 'executionUnresolved', 'delegation-pending': 'executionDelegationPending', changes_required: 'executionChangesRequired',
   needs_judgment: 'executionNeedsJudgment', failed: 'executionFailed', blocked: 'executionBlocked', dependency: 'executionDependency', 'processing-paused': 'executionPaused',
 } as const
 const progressLabels = {
   'awaiting-confirmation': 'taskAwaitingConfirmation', queued: 'taskQueued', preparing: 'taskPreparing', retrying: 'taskRetrying',
   running: 'executionRunning', 'worker-idle': 'executionIdle', 'semantic-review': 'executionSemanticReview',
-  'missing-artifacts': 'executionMissingArtifacts', 'unresolved-items': 'executionUnresolved', changes_required: 'executionChangesRequired',
+  'missing-artifacts': 'executionMissingArtifacts', 'unresolved-items': 'executionUnresolved', 'delegation-pending': 'executionDelegationPending', changes_required: 'executionChangesRequired',
   needs_judgment: 'executionNeedsJudgment', failed: 'executionFailed', blocked: 'executionBlocked', unknown: 'taskNeedsCheck',
   'authorization-revoked': 'planRevoked', completed: 'executionDone', ended: 'taskEnded',
 } as const

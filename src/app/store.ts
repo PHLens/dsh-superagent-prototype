@@ -7,7 +7,7 @@ import { key, threadKey, validateTicketOwnership, type ChannelRef, type Decision
   type ThreadFacts, type Ticket, type Trigger, type TriggerDisposition } from '../core/index.ts'
 import { KV, type Family, type Key } from '../kv.ts'
 import { SettingsSchema, type Settings, type SettingsOrigin, type SettingsSave } from '../policy.ts'
-import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, migrateTo16, migrateTo17, migrateTo18, tooOld } from './migration.ts'
+import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, migrateTo16, migrateTo17, migrateTo18, migrateTo19, tooOld } from './migration.ts'
 import { Versions } from './versions.ts'
 import { storeReads } from './store-read.ts'
 import { projectRepository } from './project-store.ts'
@@ -60,7 +60,7 @@ export class Store implements Repositories {
   /**
    * Opens or creates the SQLite database at `path`, snapshotting supported older schemas before a transactional migration.
    * @param report - Receives errors thrown by `afterCommit` callbacks without failing the committed transaction.
-   * @throws When the database schema is older than `OLDEST_SCHEMA` (10), newer than `SCHEMA_VERSION` (12), or when migration fails; in every case the database file is left unchanged and the SQLite handle is closed so a later attempt in the same process can open it.
+   * @throws When the database schema is older than `OLDEST_SCHEMA`, newer than `SCHEMA_VERSION`, or when migration fails; in every case the database file is left unchanged and the SQLite handle is closed so a later attempt in the same process can open it.
    */
   constructor(path: string, private readonly report: (error: unknown) => void = () => {}) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
@@ -116,7 +116,8 @@ export class Store implements Repositories {
           if (version === 10) migrateTo11(this)
           if (version !== undefined && version < 16) migrateTo16(this)
           if (version !== undefined && version < 17) migrateTo17(this)
-           if (version !== undefined && version < 18) migrateTo18(this)
+          if (version !== undefined && version < 18) migrateTo18(this)
+          if (version === undefined || version < 19) migrateTo19(this)
           if (version !== SCHEMA_VERSION) this.set(KV.store.schema, SCHEMA_VERSION)
         })
       } catch (error) {

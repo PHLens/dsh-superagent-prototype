@@ -145,9 +145,10 @@ export class Runtime extends Service implements SourceHost {
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
       const { attempts, artifacts, reports } = this.projectCoordinator
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId, attempts, reports, skillCatalog: this.projectCoordinator.skills, knowledge: this.projectCoordinator.knowledge, resources: this.projectCoordinator.resources,
+        delegations: this.projectCoordinator.delegations,
         lifetime: this.lifetime,
         closing: () => this.closing(), environment,
-        tools: (agent, ticket) => attempts.bySession(agent.id) ? projectWorkerTools(attempts, artifacts, reports, engine, agent.id, this.projectCoordinator.resources, this.projectCoordinator.validation, this.commands) : ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
+        tools: (agent, ticket) => attempts.bySession(agent.id) ? projectWorkerTools(attempts, artifacts, reports, engine, agent.id, this.projectCoordinator.resources, this.projectCoordinator.validation, this.commands, this.projectCoordinator.delegations) : ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       const databasePath = store.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file
       if (typeof databasePath !== 'string') throw new Error('Orchestrator database path is unavailable')
@@ -192,6 +193,8 @@ export class Runtime extends Service implements SourceHost {
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
         checkpointFiles: ticket => ticket.projectId ? artifacts.list(ticket.projectId, ticket.id).filter(item => item.status === 'registered').map(item => item.path) : [],
         reportReady: (ticket, assignment, attempt) => reports.reports(ticket.id).some(report => report.attemptId === attempt.id && report.lease === attempt.lease && report.assignmentId === assignment.id && report.state === 'ready'),
+        reaggregateProject: attempt => { try { reports.reaggregate(attempt.sessionId) } catch { /* Stale, paused or damaged state remains held by its durable report. */ } },
+        delegationResultsPending: attempt => this.projectCoordinator.delegations.pendingResults(attempt.id).length > 0,
         evidenceReady: (ticket, assignment, attempt) => {
           const related = reports.reports(ticket.id).filter(report => report.attemptId === attempt.id && report.lease === attempt.lease && report.assignmentId === assignment.id)
           if (related.some(report => report.artifacts.some(ref => { try { artifacts.read(attempt.projectId, ref.id, ref.contentVersion); return false } catch { return true } }))) return false
@@ -206,6 +209,28 @@ export class Runtime extends Service implements SourceHost {
         const { attempt, ticket } = attempts.resolve(ownerId)
         if (this.lifetime.aborted || this.closing() || this.paused() || attempt.lease !== lease || ticket.lifecycle?.pause.intent === 'pause' || ticket.lifecycle?.stop.intent === 'stop') throw new Error('Managed owner authority changed')
       }
+      const managedAncestorOf = (ownerId: string) => {
+        let parent = this.ctx.agents.get(ownerId as SessionId)?.session.header.parentSession
+        for (let depth = 0; parent !== undefined && depth < 8; depth++) {
+          const parentAttempt = attempts.bySession(parent)
+          if (parentAttempt) return parentAttempt
+          const child = this.projectCoordinator.delegations.byChildSession(parent)
+          if (child) return attempts.bySession(child.parentSessionId)
+          parent = this.ctx.agents.get(parent)?.session.header.parentSession
+        }
+        return undefined
+      }
+      const legacyAncestorOf = (ownerId: string) => {
+        let parent = this.ctx.agents.get(ownerId as SessionId)?.session.header.parentSession
+        for (let depth = 0; parent !== undefined && depth < 8; depth++) {
+          const ticket = store.tickets.list().find(item => !item.projectId && workerSessionId(item.id) === parent)
+          if (ticket) return ticket
+          const child = this.projectCoordinator.delegations.byChildSession(parent)
+          if (child) parent = child.parentSessionId as SessionId
+          else parent = this.ctx.agents.get(parent)?.session.header.parentSession
+        }
+        return undefined
+      }
       const legacyOwners = () => [
         ...store.tickets.list().filter(ticket => !ticket.projectId).map(ticket => ({ ownerId: workerSessionId(ticket.id), projectId: 'legacy', validate: () => {
           const current = store.tickets.get(ticket.id)
@@ -214,14 +239,30 @@ export class Runtime extends Service implements SourceHost {
       ]
       this.budgetHooks = new ManagedBudgetHooks(ctx, this.scheduler, {
         resolve: ownerId => {
+          const delegated = this.projectCoordinator.delegations.byChildSession(ownerId)
+          if (delegated) return { ownerId, projectId: delegated.projectId, validate: () => {
+            const current = this.projectCoordinator.delegations.byChildSession(ownerId)
+            if (!current || !['requested', 'starting', 'running'].includes(current.state)) throw new Error('Delegation authority changed')
+            this.projectCoordinator.delegations.authorizeChild(ownerId)
+          } }
+          const unrecordedParent = managedAncestorOf(ownerId)
+          if (unrecordedParent) return { ownerId, projectId: unrecordedParent.projectId, validate: () => {
+            throw new Error('Subagent has no recorded delegation budget owner')
+          } }
           const attempt = attempts.all().findLast(item => item.sessionId === ownerId)
           if (!attempt) {
             const mapping = this.projectCoordinator.conversations.listMappings().find(item => item.sessionId === ownerId)
             if (!mapping) {
               const legacy = store.tickets.list().find(item => !item.projectId && workerSessionId(item.id) === ownerId)
-              if (!legacy) return undefined
+              const legacyTicket = legacy ?? legacyAncestorOf(ownerId)
+              if (!legacyTicket) {
+                if (this.ctx.agents.get(ownerId as SessionId)?.session.header.origin === 'subagent') return { ownerId, projectId: 'unknown-subagent', validate: () => {
+                  throw new Error('Subagent ancestry is unknown or has no recorded delegation budget owner')
+                } }
+                return undefined
+              }
               return { ownerId, projectId: 'legacy', validate: () => {
-                const current = store.tickets.get(legacy.id)
+                const current = store.tickets.get(legacyTicket.id)
                 if (this.lifetime.aborted || this.closing() || this.paused() || !current || current.ended || current.lifecycle?.pause.intent === 'pause' || current.lifecycle?.stop.intent === 'stop') throw new Error('Legacy worker authority changed')
               } }
             }
@@ -235,7 +276,10 @@ export class Runtime extends Service implements SourceHost {
         },
         owners: () => [...legacyOwners(), ...attempts.all().filter(attempt => !!attempt.sessionId).map(attempt => ({ ownerId: attempt.sessionId, projectId: attempt.projectId, validate: () => {
           validateWorker(attempt.sessionId, attempt.lease)
-        } })), ...this.projectCoordinator.conversations.listMappings().map(mapping => ({ ownerId: mapping.sessionId, projectId: mapping.projectId, validate: () => this.projectCoordinator.validateBudgetOwner(mapping.sessionId, mapping.projectId, mapping.generation) }))],
+        } })), ...this.projectCoordinator.delegations.activeChildSessions().map(childSessionId => {
+          const delegation = this.projectCoordinator.delegations.byChildSession(childSessionId)!
+          return { ownerId: childSessionId, projectId: delegation.projectId, validate: () => this.projectCoordinator.delegations.authorizeChild(childSessionId) }
+        }), ...this.projectCoordinator.conversations.listMappings().map(mapping => ({ ownerId: mapping.sessionId, projectId: mapping.projectId, validate: () => this.projectCoordinator.validateBudgetOwner(mapping.sessionId, mapping.projectId, mapping.generation) }))],
         onUncertain: (ownerId, jobId) => {
           const attempt = attempts.all().findLast(item => item.sessionId === ownerId)
           if (!attempt) {
@@ -452,6 +496,7 @@ export class Runtime extends Service implements SourceHost {
     const ids = new Set<string>([this.masterId])
     for (const ticket of this.store.tickets.list()) if (!ticket.projectId) ids.add(workerSessionId(ticket.id))
     for (const attempt of this.projectCoordinator.attempts.all()) ids.add(attempt.sessionId)
+    for (const sessionId of this.projectCoordinator.delegations.childSessions()) ids.add(sessionId)
     for (const row of this.store.db.prepare('SELECT session_id FROM conversation_mapping').all() as { session_id: string }[]) ids.add(row.session_id)
     return ids
   }
@@ -623,7 +668,7 @@ export class Runtime extends Service implements SourceHost {
     try {
       this.assessor.stop()
       const ids = [this.masterId, ...this.store.tickets.list().filter(ticket => !ticket.projectId).map(ticket => workerSessionId(ticket.id)),
-        ...this.projectCoordinator.attempts.all().map(attempt => attempt.sessionId)]
+        ...this.projectCoordinator.attempts.all().map(attempt => attempt.sessionId), ...this.projectCoordinator.delegations.activeChildSessions()]
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
       for (const agent of agents) agent.cancel({ kind: 'user' }, { keepInbox: true })
       // Startup may still be unwinding a cancelled probe or write; it must finish before environment restoration and DB/lock release.

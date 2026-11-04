@@ -370,7 +370,7 @@ export interface Assignment {
   /** Present for T3 assignments only; these wait for the T4 project executor. */
   contract?: PlanAssignmentContract
   budgetWait?: 'global-budget' | 'project-fairness'
-  waitingReason?: 'executor-unavailable' | 'worker-slot' | 'preparation-reconciliation' | 'worker-running' | 'worker-idle' | 'semantic-review' | 'missing-artifacts' | 'unresolved-items' | 'changes_required' | 'needs_judgment' | 'failed' | 'blocked' | 'dependency' | 'processing-paused' | 'retrying' | 'global-budget' | 'project-fairness'
+  waitingReason?: 'executor-unavailable' | 'worker-slot' | 'preparation-reconciliation' | 'worker-running' | 'worker-idle' | 'semantic-review' | 'missing-artifacts' | 'unresolved-items' | 'delegation-pending' | 'changes_required' | 'needs_judgment' | 'failed' | 'blocked' | 'dependency' | 'processing-paused' | 'retrying' | 'global-budget' | 'project-fairness'
   createdAt: string
   startedAt?: string
   endedAt?: string

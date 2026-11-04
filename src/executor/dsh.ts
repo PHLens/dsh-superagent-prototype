@@ -64,6 +64,10 @@ export interface ExecutorHost {
   readonly masterId?: string
   checkpointFiles?(ticket: Ticket): readonly string[]
   reportReady?(ticket: Ticket, assignment: Assignment, attempt: Attempt): boolean
+  /** Reapplies deterministic completion gates after a prerequisite such as a processed delegation changed. */
+  reaggregateProject?(attempt: Attempt): void
+  /** Whether a settled required delegation still needs its parent worker's processing receipt. */
+  delegationResultsPending?(attempt: Attempt): boolean
   /** Verifies durable artifact bytes and writing-journal state for a reported attempt. */
   evidenceReady?(ticket: Ticket, assignment: Assignment, attempt: Attempt): boolean
   /** Returns true when an outbound receipt has an unresolved external result for this ticket. */
@@ -480,7 +484,13 @@ export class DshExecutor implements Executor {
       attempt.status = 'ended'; attempt.fenced = true; attempts.save(attempt); this.host.retireWorker?.(attempt.id)
       this.projectObserved.delete(attempt.id)
     }
-    for (const ticket of this.host.store.tickets.list().filter(item => item.projectId && !item.ended)) {
+    for (const snapshot of this.host.store.tickets.list().filter(item => item.projectId && !item.ended)) {
+      for (const assignment of activePlanAssignments(snapshot).filter(item => item.waitingReason === 'delegation-pending')) {
+        const attempt = attempts.all().findLast(item => item.assignmentId === assignment.id && item.ticketId === snapshot.id)
+        if (attempt) this.host.reaggregateProject?.(attempt)
+      }
+      const ticket = this.host.store.tickets.get(snapshot.id) ?? snapshot
+      if (ticket.ended) continue
       if (this.held(ticket) || this.stopping.has(ticket.id)) continue
       for (const assignment of activePlanAssignments(ticket).filter(item => item.state !== 'ended')) {
         const orphanedLiveOwner = attempts.all().some(item => item.ticketId !== ticket.id && !this.host.context.agents.get(item.sessionId as SessionId) && runningJobs(this.host.context, item.sessionId).length > 0)
@@ -500,6 +510,10 @@ export class DshExecutor implements Executor {
             .then(() => { this.projectObserved.add(existing.id); this.host.engine.observeTicket(ticket.id, 'running', 'worker-resumed') })
             .finally(() => { this.slots.free(assignment.id) })
           this.track(ticket.id, work)
+          continue
+        }
+        if (existing && this.host.reportReady?.(ticket, assignment, existing) && assignment.waitingReason === 'delegation-pending') {
+          if (this.host.delegationResultsPending?.(existing)) this.wakeProjectDelegationResults(ticket, existing)
           continue
         }
         if (existing && this.projectObserved.has(existing.id) && assignment.waitingReason !== 'retrying') {
@@ -526,6 +540,27 @@ export class DshExecutor implements Executor {
   }
   private readonly workerBudgets = new Map<string, BudgetLease>()
   private readonly pendingWorkerBudgets = new Map<string, BudgetLease>()
+  /** Wake a restored parent only for terminal results that still need an explicit processing receipt; never redo its work. */
+  private wakeProjectDelegationResults(ticket: Ticket, attempt: Attempt): void {
+    const agent = this.host.context.agents.get(attempt.sessionId as SessionId)
+    if (agent && agent.status !== 'idle') return
+    if (!this.host.scheduler) { try { this.slots.reserve(attempt.assignmentId, 'wake') } catch { return } }
+    const requestId = `project-delegation-results:${attempt.id}:${attempt.lease}`
+    const work = this.admitWake(attempt, requestId, () => {
+      const current = this.host.store.tickets.get(ticket.id)
+      const assignment = current?.assignments.find(item => item.id === attempt.assignmentId)
+      if (!current || current.ended || this.held(current) || assignment?.waitingReason !== 'delegation-pending'
+        || !this.host.delegationResultsPending?.(attempt)) throw new Error('Delegation result processing authority changed')
+    }, async () => {
+      const restored = await this.host.sessions.ensure(attempt.sessionId, attempt.cwd, `Project worker: ${ticket.title}`, 'worker')
+      this.host.attempts?.resolve(restored.id)
+      if (!await this.host.sessions.holds(restored.id, requestId)) await this.host.sessions.prompt(restored.id, requestId,
+        'Required local delegation results are recorded but not processed. Read project_worker_context and call project_process_delegation once for each pending result with a stable operation_id, then follow currentStatus. Do not redo completed outputs.', 'queue',
+        () => { this.host.attempts?.resolve(restored.id) })
+    }).then(() => { this.projectObserved.add(attempt.id); this.host.engine.observeTicket(ticket.id, 'running', 'delegation-result-processing') })
+      .finally(() => { if (!this.host.scheduler) this.slots.free(attempt.assignmentId) })
+    this.track(ticket.id, work)
+  }
   private async admitWake(attempt: Attempt, requestId: string, validate: () => void, run: () => Promise<unknown>): Promise<void> {
     const scheduler = this.host.scheduler
     if (!scheduler) { await run(); return }
