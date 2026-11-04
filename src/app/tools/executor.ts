@@ -16,6 +16,7 @@ import { codeValidationOperation, type CodeValidation } from '../code-validation
 import type { Commands } from '../../infra/commands.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 import type { Delegations } from '../delegations.ts'
+import { ProjectEvents } from '../events.ts'
 
 export interface ExecutorToolsHost {
   readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'>
@@ -65,6 +66,9 @@ export function projectWorkerTools(attempts: ExecutionAttempts, artifacts: Artif
     assignment.report = { state: 'progress', summary: `Waiting for owner answer: ${args.question}`, at }
     ticket.updatedAt = at
     attempts.store.tickets.save(ticket)
+    new ProjectEvents(attempts.store).append({ id: `attention:${question.id}:recorded`, projectId: ticket.projectId!, ticketId: ticket.id,
+      assignmentId: assignment.id, attemptId: attempt.id, kind: 'attention-changed', version: question.id,
+      operationId: args.operation_id, at })
     return { question }
   }) }))
   if (attempts.bySession(sessionId)?.reviewTarget) tools.push(tool({ name: 'project_worker_decide', description: 'Submit an independent version-bound judgment for your server-registered review target. A ready review report is not a gate decision. Read reviewTarget in context; use changes_required or needs_judgment when the content does not satisfy its conditions.', schema: z.object({ operation_id: z.string().min(1), report_id: z.string().min(1), conclusion: z.enum(['passed', 'changes_required', 'needs_judgment']), evidence: z.string().min(1) }).strict(), execute: async args => reports.decideWorker(sessionId, { operationId: args.operation_id, reportId: args.report_id, conclusion: args.conclusion, evidence: args.evidence }) }))

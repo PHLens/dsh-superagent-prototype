@@ -30,6 +30,15 @@ it('saves this machine\'s settings in the Deployment settings through DSH\'s con
   expect(field<HTMLInputElement>(zh.deploymentContextTimeout).value).toBe('20000')
 })
 
+it('saves one exact Tailscale Serve origin as a string configuration value', async () => {
+  const { form: editable, mutations } = fakeForm()
+  server.form = editable
+  at({ page: 'settings', query: { group: 'deployment' } }); await mount()
+  await type(field<HTMLInputElement>(zh.deploymentPublicOrigin), 'https://research-machine.example-tailnet.ts.net')
+  await click(zh.save)
+  expect(mutations).toEqual([{ revision: 1, ops: [{ op: 'set', path: ['publicOrigin'], value: 'https://research-machine.example-tailnet.ts.net' }] }])
+})
+
 it('keeps a refused Deployment change as a draft, and shows the settings read-only without a writable form', async () => {
   const refusing = fakeForm(true, false)
   server.form = refusing.form

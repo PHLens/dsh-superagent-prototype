@@ -11,6 +11,7 @@ import type { Machine } from '../deployment.ts'
 import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
 import type { Settings } from '../policy.ts'
 import type { Store } from '../app/store.ts'
+import { appendProjectEvent } from '../app/events.ts'
 import type { ExecutionAttempts, Attempt } from '../app/execution-attempts.ts'
 import type { ProjectScheduler, BudgetLease } from '../app/scheduler.ts'
 import { Later, type Effects } from '../app/effects.ts'
@@ -83,7 +84,7 @@ export interface ExecutorHost {
   /** Where the Executor reports what happened to Assignments and Inputs. */
   readonly engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed' | 'report'
     | 'assignmentInterrupted' | 'observeTicket' | 'checkpointTicket'>
-  readonly store: Pick<Store, 'tickets' | 'triggers' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
+  readonly store: Pick<Store, 'db' | 'tickets' | 'triggers' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
   /** Durable effect queue through which launches and input deliveries run. */
   readonly effects: Pick<Effects, 'enqueue' | 'handle'>
   /** The `worker` health entry, which reports whether background worker event handling failed. */
@@ -234,6 +235,22 @@ export class DshExecutor implements Executor {
   private held(ticket: Ticket): boolean {
     return ticket.lifecycle?.pause.intent === 'pause' || ticket.lifecycle?.stop.intent === 'stop'
   }
+  private recordReconcile(ticket: Ticket, state: 'clear' | 'unknown', observedAt: string, operationId: string, reason?: string): void {
+    if (!ticket.projectId) return
+    appendProjectEvent(this.host.store.db, { id: `reconcile:${ticket.id}:${operationId}`, projectId: ticket.projectId,
+      ticketId: ticket.id, kind: 'reconcile', version: `${operationId}:${state}`, operationId, at: observedAt,
+      reconciliation: { state, ...(reason ? { reason } : {}) } })
+  }
+  private startAssignment(ticketId: string, assignmentId: string): void {
+    this.host.store.atomic(() => {
+      this.host.engine.assignmentStarted(ticketId, assignmentId)
+      const ticket = this.host.store.tickets.get(ticketId), assignment = ticket?.assignments.find(item => item.id === assignmentId)
+      if (!ticket?.projectId || !assignment) return
+      appendProjectEvent(this.host.store.db, { id: `assignment:${ticketId}:${assignmentId}:started`, projectId: ticket.projectId,
+        ticketId, assignmentId, kind: 'task-changed', version: assignmentId, operationId: `assignment-started:${ticketId}:${assignmentId}`,
+        at: assignment.startedAt ?? ticket.updatedAt })
+    })
+  }
   /** Deterministic server-owned recovery check; callers cannot submit an outcome. */
   async reconcileTicket(ticketId: string, operationId: string): Promise<{ state: 'checking' | 'clear' | 'unknown'; operationId: string }> {
     if (!operationId.trim()) throw new Error('Reconciliation operation id is required')
@@ -261,13 +278,16 @@ export class DshExecutor implements Executor {
     initial.lifecycle = { ...(lifecycle ?? { pause: { intent: 'none', state: 'running', at: startedAt }, stop: { intent: 'none', state: 'running', at: startedAt }, observed: { state: 'unknown', at: startedAt } }), reconciliation: checking }
     this.host.store.tickets.save(initial)
     const persistUnknown = (reason: string): void => {
-      const current = this.host.store.tickets.get(ticketId)
-      if (!current || current.lifecycle?.reconciliation?.operationId !== operationId) return
-      const observedAt = now()
-      current.lifecycle.reconciliation = { ...checking, state: 'unknown', observedAt, reason }
-      const history = current.lifecycle.reconciliationHistory ?? []
-      current.lifecycle.reconciliationHistory = [...history.filter(item => item.operationId !== operationId), { ...checking, state: 'unknown', observedAt, reason }]
-      this.host.store.tickets.save(current)
+      this.host.store.atomic(() => {
+        const current = this.host.store.tickets.get(ticketId)
+        if (!current || current.lifecycle?.reconciliation?.operationId !== operationId) return
+        const observedAt = now()
+        current.lifecycle.reconciliation = { ...checking, state: 'unknown', observedAt, reason }
+        const history = current.lifecycle.reconciliationHistory ?? []
+        current.lifecycle.reconciliationHistory = [...history.filter(item => item.operationId !== operationId), { ...checking, state: 'unknown', observedAt, reason }]
+        this.host.store.tickets.save(current)
+        this.recordReconcile(current, 'unknown', observedAt, operationId, reason)
+      })
     }
     try {
       let state: 'clear' | 'unknown' = 'clear', reason: string | undefined
@@ -307,15 +327,18 @@ export class DshExecutor implements Executor {
         && JSON.stringify(currentScope) === JSON.stringify(ownerIds) && JSON.stringify(currentLeases) === JSON.stringify(attemptLeases)
       if (!unchanged) { persistUnknown('reconciliation-facts-changed'); return { state: 'unknown', operationId } }
       const observedAt = now()
-      current!.lifecycle!.reconciliation = { ...checking, state, observedAt, ...(reason ? { reason } : {}) }
-      if (state === 'clear') for (const branch of scopedAttempts) {
-        if (branch.status === 'reconcile' && branch.prepare) { branch.status = 'prepared'; this.host.attempts!.save(branch) }
-        // Recovery is where a restart finds Attempts that finished before it stopped.
-        this.host.retireWorker?.(branch.id)
-      }
-      const history = current!.lifecycle!.reconciliationHistory ?? []
-      current!.lifecycle!.reconciliationHistory = [...history.filter(item => item.operationId !== operationId), { ...checking, state, observedAt, ...(reason ? { reason } : {}) }]
-      this.host.store.tickets.save(current!)
+      this.host.store.atomic(() => {
+        current!.lifecycle!.reconciliation = { ...checking, state, observedAt, ...(reason ? { reason } : {}) }
+        if (state === 'clear') for (const branch of scopedAttempts) {
+          if (branch.status === 'reconcile' && branch.prepare) { branch.status = 'prepared'; this.host.attempts!.save(branch) }
+          // Recovery is where a restart finds Attempts that finished before it stopped.
+          this.host.retireWorker?.(branch.id)
+        }
+        const history = current!.lifecycle!.reconciliationHistory ?? []
+        current!.lifecycle!.reconciliationHistory = [...history.filter(item => item.operationId !== operationId), { ...checking, state, observedAt, ...(reason ? { reason } : {}) }]
+        this.host.store.tickets.save(current!)
+        this.recordReconcile(current!, state, observedAt, operationId, reason)
+      })
       if (state === 'clear' && current!.lifecycle) this.host.engine.observeTicket(ticketId, current!.lifecycle.stop.intent === 'stop' ? 'exited' : 'idle', 'reconciled')
       return { state, operationId }
     } catch (error) {
@@ -965,8 +988,8 @@ export class DshExecutor implements Executor {
     const requestId = later ? `assignment:${ticket.id}:${assignment.id}` : first
     await this.host.sessions.prompt(sessionId, requestId, text, 'queue',
       () => { if (!current()) throw new Error('Launch authorization changed before worker delivery') },
-      () => { this.host.engine.assignmentStarted(ticket.id, assignment.id) })
-    this.host.engine.assignmentStarted(ticket.id, assignment.id)
+      () => this.startAssignment(ticket.id, assignment.id))
+    this.startAssignment(ticket.id, assignment.id)
   }
   /** Returns the stored ticket for `agent` when it is a worker session, or undefined otherwise. */
   private ticketOf(agent: Agent): Ticket | undefined {

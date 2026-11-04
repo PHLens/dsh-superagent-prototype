@@ -18,7 +18,7 @@ import { Versions } from './versions.ts'
 import { KV, type Key } from '../kv.ts'
 import { DELEGATION_SCHEMA_SQL } from './delegations.ts'
 
-export const SCHEMA_VERSION = 19
+export const SCHEMA_VERSION = 20
 /** The oldest database schema version this build can open and migrate directly. */
 export const OLDEST_SCHEMA = 10
 /** Returns an error message explaining why `version` cannot be opened: older schemas need a new state directory. */
@@ -60,6 +60,18 @@ export function migrateTo18(store: Store): void {
 /** T8 adds the durable local-delegation audit and result-processing gate. */
 export function migrateTo19(store: Store): void {
   store.db.exec(DELEGATION_SCHEMA_SQL)
+}
+
+/** T9 adds a durable monotonic sequence to project facts for resumable clients. */
+export function migrateTo20(store: Store): void {
+  const columns = new Set(store.db.prepare("SELECT name FROM pragma_table_xinfo('project_event')").all().map(row => String(row.name)))
+  if (!columns.has('sequence')) store.db.exec('ALTER TABLE project_event ADD COLUMN sequence INTEGER')
+  const rows = store.db.prepare('SELECT id FROM project_event ORDER BY rowid').all() as { id: string }[]
+  const update = store.db.prepare('UPDATE project_event SET sequence=? WHERE id=? AND sequence IS NULL')
+  for (const [index, row] of rows.entries()) update.run(index + 1, row.id)
+  store.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS project_event_sequence ON project_event(sequence);
+    INSERT OR IGNORE INTO project_event_counter (singleton,value) VALUES (1,0);
+    UPDATE project_event_counter SET value=MAX(value,COALESCE((SELECT MAX(sequence) FROM project_event),0)) WHERE singleton=1`)
 }
 
 type Stored = Record<string, unknown>

@@ -181,6 +181,10 @@ Temporary local help is an audit edge from one live managed worker Attempt to on
 
 Recorded child model calls use the parent project's model budget. Child tools and managed skills are installed from the recorded intersection and reauthorized on use; an unrecorded descendant of a managed worker receives no application tools. A settled child can be promoted to an already-authorized open Assignment on the same Task, whose worker context receives the processed result as prior evidence. Native start remains disabled unless a real host proves local spawn, authority and skill inheritance, pause/stop propagation, result delivery and restart reconciliation; formal assistance and review continue through ordinary Assignments in the same Task.
 
+The T9 project home reads a server-owned projection: actionable plan confirmations, questions, semantic reviews and coordinator failures come before project cards. Each card distinguishes user pause, branch attention, running work and coordinator availability, and carries the last checked time. Project and task locations are encoded in the URL fragment, while `history.state` carries the explicit back stack and `sessionStorage` supplies tab-local refresh memory. Browser back, forward, refresh and new tabs therefore keep project ownership; task deep links scroll to the referenced task.
+
+Project facts carry a dedicated durable counter and a unique monotonic sequence, so pruning a retained event cannot cause a cursor value to be reused. Transactional producers record normalized conversation messages, initial and revised Assignments, Task lifecycle and Attention changes, Artifact registration, Delivery transitions, coordinator health/recovery and reconciliation outcomes; a project-level fact uses `projectId` with an empty `ticketId` as its aggregate key. The authenticated event endpoint returns facts after an exact sequence/id cursor, isolates projects, and returns an authoritative conversation snapshot when a cursor is unknown or expired. A small SSE route streams pages through the loopback DSH login boundary; the client deduplicates ids and keeps ordinary polling active as the reconnect fallback. Reports shown under a task link to the matching normalized result message in the project conversation rather than creating a second history. Tailscale remains a loopback proxy: DSH Web receives the same exact public root and trusted Host through launch configuration, the optional plugin `publicOrigin` must be one exact HTTPS origin, Host and Origin checks accept no wildcard or forwarded-host claim, and Funnel remains disabled.
+
 ### Effects
 
 `Effects` (`src/app/effects.ts`) is the durable side-effect queue. A command calls `enqueue(kind, key, payload)` inside its transaction; execution begins only after commit.
@@ -348,7 +352,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/project-coordinator.ts` | Independent project discussion lanes, restart reconciliation, retry and coordinator lifecycle |
 | `src/app/delegations.ts` | Durable optional local-child audit records, parent/role scope intersection, model-budget ownership, idempotent result processing and promotion to an existing Task Assignment |
 | `src/app/project-progress.ts` | Read-only task progress projection; reviewer targets resolve within their authorization's current graph, with conclusions bound to the current attempt, report, registered artifacts and conditions |
-| `src/app/events.ts` | Durable transactional project event facts, including bounded project feedback with an authorized exact-input read pointer, and coalesced consumption |
+| `src/app/events.ts` | Durable transactional project facts with monotonic sequence/id cursors, bounded project feedback and exact-input read pointers, plus coalesced feedback consumption |
 | `src/app/scheduler.ts` | Project-aware model, worker and background scheduling status; owned native Session exit facts rebuild unknown physical occupancy even after JobView retention, and later positive acknowledgement releases it |
 | `src/core/dependencies.ts` | Assignment graph validation, readiness and dependency planning |
 | `src/core/assignment-graphs.ts` | Immutable authorized graph versions, current necessary work, scope and cost-slot validation, and fixed input lineage |
@@ -427,13 +431,13 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
-| `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
+| `src/client/app.tsx` | The panel shell with URL-backed project/task navigation, browser history restoration, header, search, glossary and tabs |
 | `src/client/project-home.tsx` | Owned project list and the name-and-goal creation form |
 | `src/client/project-conversation.tsx` | Persistent project discussion, input status, draft distinction and retry |
 | `src/client/project-materials.tsx` | Project knowledge proposals and registered resource browsing/revocation |
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
-| `src/client/api.ts` | Calls and polls of the management API, typed by `src/app/api.ts`, and the Decision filters of the Eval status |
-| `src/client/route.ts` | The tabs, the settings groups, the typed routes that `parseRoute` reads, and the route memory with the settings group opened last |
+| `src/client/api.ts` | Typed management calls, polling, project event stream/cursor reconnect, deduplication and polling fallback |
+| `src/client/route.ts` | Tabs, settings groups, typed routes, URL fragment round-tripping, browser history and tab-local route memory |
 | `src/client/overview.tsx` | The overview |
 | `src/client/source.tsx`, `trigger.tsx`, `eval.tsx`, `execution.tsx` | One file per stage: its status, and its settings where it has some |
 | `src/client/thread.tsx`, `ticket.tsx` | The record pages: a Thread with its timeline, and a Ticket with its authorization, Inputs and Assignments |
@@ -532,6 +536,9 @@ Project context and fact tools omit absent optional properties from their return
 | `tests/project-worker-runtime.spec.ts` | Registered native tools with Session guards, shared worker slots, completed confirmation replay/explicit rerun through the coordinator, and one transactional project-feedback fact for a scoped human PR follow-up after accepted work, with no false global follow_up |
 | `tests/project-collaboration.spec.ts` | Parent-bound local delegation lifecycle, independent child identity, result-processing completion gate, restart replay, pause/stop refusal and Assignment promotion without duplicate work |
 | `tests/subagent-scope.spec.ts` | Parent authorization and role-scope intersection, recorded-only child tools, unknown-child denial and runtime child model-budget attribution |
+| `tests/project-events.spec.ts` | Transactional message/Assignment/Artifact/Delivery/health producers, monotonic project cursors, isolation, stale-cursor snapshots, actionable home ordering and task-to-conversation message references |
+| `tests/project-navigation.spec.tsx` | URL deep links, browser back, project/task focus, offline preservation, pending-first home status and event-cursor reconnect |
+| `tests/tailscale-acceptance.spec.ts` | Exact HTTPS Tailscale Serve origin, Host/Origin rejection, loopback retention, authenticated project-fact streaming and immutable Artifact download |
 | `tests/project-knowledge.spec.ts` | Immutable knowledge provenance, confirmation history, project isolation and reopen restoration |
 | `tests/project-resources.spec.ts` | Registered resource containment, bounded reads, revocation, paging, symlink and version boundaries, and admission-only bounded content capture |
 | `tests/code-validation.spec.ts` | Required code-check receipts block completion until the structured attempt-bound result exists, a replaced lease or cancelled producer never persists a pass, and a process-death running reservation without a native record is recovered for the same operation |
@@ -622,7 +629,7 @@ Read caches use bounded in-memory `TextCache` instances and are lost on restart.
 
 Nothing deletes old records yet, so these grow without bound: the `trigger`, `disposition` and `decision` rows; ended Tickets and their Threads; the outbox's receipts; and in `kv`, every saved settings revision and prompt version, the prompt revisions each Session worked under, and the Sources' records per Thread and per Issue or pull request.
 
-`SCHEMA_VERSION` only increases (currently 19). A newer database refuses to start; schema 10 remains the oldest supported migration boundary. Before upgrading an existing database, Store creates a consistent SQLite snapshot, including committed WAL pages, under `<database>.snapshots/`. A failed snapshot prevents migration; a failed migration rolls back its DDL and records. Schema 10 records receive their legacy shape conversion once; schema 11 records retain their shape. Schema 12 adds project storage without assigning legacy Tickets, Mandates or Effects to projects. Schema 13 adds owned conversation messages, coordinator mapping generations, state leases and prompt checkpoints; it does not assign owners to legacy projects. Schema 19 adds the local-delegation audit and result-processing gate, so schema-18 binaries refuse a database whose completion semantics they cannot enforce. Recovery snapshots are retained for manual recovery; T1 does not implement scheduled backup or automatic restore.
+`SCHEMA_VERSION` only increases (currently 20). A newer database refuses to start; schema 10 remains the oldest supported migration boundary. Before upgrading an existing database, Store creates a consistent SQLite snapshot, including committed WAL pages, under `<database>.snapshots/`. A failed snapshot prevents migration; a failed migration rolls back its DDL and records. Schema 10 records receive their legacy shape conversion once; schema 11 records retain their shape. Schema 12 adds project storage without assigning legacy Tickets, Mandates or Effects to projects. Schema 13 adds owned conversation messages, coordinator mapping generations, state leases and prompt checkpoints; it does not assign owners to legacy projects. Schema 19 adds the local-delegation audit and result-processing gate, so schema-18 binaries refuse a database whose completion semantics they cannot enforce. Schema 20 adds monotonic project-event sequence numbers for resumable clients. Recovery snapshots are retained for manual recovery; T1 does not implement scheduled backup or automatic restore.
 
 ## Model-facing interfaces
 

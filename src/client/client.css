@@ -1,11 +1,22 @@
 /* Panel layout and local UI controls styled with DSH `--dsw-alias-*` design tokens; one rule per line. */
 .dt-page { box-sizing: border-box; height: 100%; overflow: auto; scrollbar-gutter: stable; scroll-padding: 48px 0 72px; container-type: inline-size; padding: 28px clamp(24px, 4vw, 48px) 0; color: var(--dsw-alias-label-primary); }
 .dt-projects { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); }
+.dt-project-pending { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); }
+.dt-project-pending .dt-project-card { border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary) 45%, var(--dsw-alias-border-l3)); }
 .dt-project-card { cursor: pointer; text-align: start; width: 100%; min-width: 0; display: flex; flex-direction: column; gap: 8px; padding: 16px; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: 12px; color: inherit; background: var(--dsw-alias-bg-layer-2); overflow-wrap: anywhere; }
+.dt-project-card:hover { border-color: var(--dsw-alias-brand-primary); }
 .dt-project-card strong { font-size: 16px; }
 .dt-form label { display: flex; flex-direction: column; gap: 6px; }
 .dt-conversation, .dt-conversation-history, .dt-conversation-compose { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .dt-conversation h2 { margin: 8px 0; font-size: 22px; overflow-wrap: anywhere; }
+.dt-project-live { display: flex; flex-wrap: wrap; gap: 8px 20px; margin: 12px 0 0; }
+.dt-project-live div { display: flex; gap: 6px; align-items: baseline; }
+.dt-project-live dt { color: var(--dsw-alias-label-tertiary); font-size: 12px; }
+.dt-project-live dd { margin: 0; font-size: 13px; }
+.dt-section-nav { position: sticky; top: 0; z-index: 2; display: flex; gap: 4px; padding: 6px; border: 0.5px solid var(--dsw-alias-border-l3); border-radius: 12px; background: color-mix(in srgb, var(--dsw-alias-bg-layer-1) 92%, transparent); backdrop-filter: blur(12px); }
+.dt-section-nav button { flex: 1 1 0; min-width: 0; padding: 7px 10px; border: 0; border-radius: 8px; color: var(--dsw-alias-label-secondary); background: transparent; font: inherit; font-size: 13px; cursor: pointer; }
+.dt-section-nav button:hover { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-interactive-bg-hover); }
+.dt-conversation-plan:target { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 4px; }
 .dt-conversation-message { border: 0.5px solid var(--dsw-alias-border-l3); padding: 16px; border-radius: 12px; overflow-wrap: anywhere; }
 .dt-conversation-user { background: var(--dsw-alias-interactive-bg-hover); }
 .dt-conversation-text { white-space: pre-wrap; line-height: 1.6; margin-top: 8px; }
@@ -198,6 +209,12 @@ div.dt-preview-head { color: var(--dsw-alias-label-secondary); }
   .dt-grid3, .dt-prompt { grid-template-columns: 1fr; }
   .dt-search { width: 100%; }
   .dt-filters .dt-search { margin-left: 0; }
+  .dt-section-nav { position: static; overflow-x: auto; }
+  .dt-section-nav button { flex: 0 0 auto; }
+  .dt-project-live { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dt-project-live div { flex-direction: column; gap: 1px; }
+  .dt-conversation-compose textarea, .dt-conversation-compose input { font-size: 16px; }
+  .dt-conversation-message, .dt-assignment, .dt-project-card { padding: 14px; }
 }
 /* Local UI primitive styles (see controls.tsx). */
 .dt-btn { display: inline-flex; align-items: center; justify-content: center; gap: 4px; border: none; border-radius: 18px; cursor: pointer; font: inherit; font-size: 14px; line-height: 22px; color: var(--dsw-alias-label-primary); background: transparent; padding: 0 14px; white-space: nowrap; }

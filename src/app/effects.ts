@@ -7,6 +7,7 @@ export class Later extends Error {}
 export const FAILURES_BEFORE_ERROR = 3
 import type { HealthBoard, HealthEntry } from '../infra/health.ts'
 import type { Store } from './store.ts'
+import type { ProjectEvent } from './events.ts'
 
 export interface EffectPayloads {
   /** Build an Eval's candidate card and relay it to the main Session; the key is the Eval ID. */
@@ -21,6 +22,8 @@ export interface EffectPayloads {
   notice: { value: Record<string, unknown>; summary: string }
   /** Send a message for a Channel through its Source; the key is the message ID, whose receipt the Outbox keeps. */
   reply: Record<string, never>
+  /** Persist a project fact after an external boundary whose business receipt must commit first. */
+  'project-event': ProjectEvent
 }
 export type EffectKind = keyof EffectPayloads
 interface Handler<K extends EffectKind> {

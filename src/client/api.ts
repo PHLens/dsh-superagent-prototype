@@ -97,6 +97,91 @@ export function usePoll<T>(load: () => Promise<T>, deps: readonly unknown[], int
   return { data: state.data, error: state.error, reload }
 }
 
+type ProjectEventPage = ApiResponse<'GET projects/:id/events'>
+type ProjectEventCursor = { sequence: number; id?: string }
+function consumeProjectEventPage(page: ProjectEventPage, seen: Set<string>) {
+  if (page.reset) seen.clear()
+  const fresh = page.events.filter(item => !seen.has(item.event.id))
+  for (const item of fresh) seen.add(item.event.id)
+  const keep = [...seen].slice(-1000)
+  seen.clear(); for (const id of keep) seen.add(id)
+  return { fresh: fresh.length, snapshot: page.reset, cursor: { sequence: page.cursor, ...(page.cursorId ? { id: page.cursorId } : {}) } as ProjectEventCursor }
+}
+/** Resume a project's durable fact cursor over authenticated streaming, deduplicating pages and polling as the fallback. */
+export function useProjectEvents(projectId: string, call: Call, onChange: (snapshot: boolean) => void, intervalMs = 1000) {
+  const storageKey = `dsh-superagent/project-event-cursor/${projectId}`
+  const [cursor, setCursor] = useState<ProjectEventCursor>(() => {
+    try {
+      const raw = sessionStorage.getItem(storageKey), value = raw ? JSON.parse(raw) as { sequence?: unknown; id?: unknown } : undefined
+      const sequence = Number(value?.sequence)
+      return Number.isSafeInteger(sequence) && sequence >= 0 ? { sequence, ...(typeof value?.id === 'string' ? { id: value.id } : {}) } : { sequence: 0 }
+    } catch { return { sequence: 0 } }
+  })
+  const seen = useRef(new Set<string>())
+  const lastReset = useRef<string>()
+  const consumer = useRef(onChange)
+  consumer.current = onChange
+  const cursorRef = useRef(cursor)
+  cursorRef.current = cursor
+  const apply = (page: ProjectEventPage) => {
+    const resetKey = page.reset ? `${page.cursor}:${page.events[0]?.event.id ?? ''}:${page.events.at(-1)?.event.id ?? ''}` : undefined
+    if (resetKey && lastReset.current === resetKey) return
+    if (resetKey) lastReset.current = resetKey
+    const result = consumeProjectEventPage(page, seen.current)
+    if (result.fresh || result.snapshot) {
+      try { sessionStorage.setItem(storageKey, JSON.stringify(result.cursor)) } catch { /* Cursor memory is optional. */ }
+      setCursor(result.cursor)
+      cursorRef.current = result.cursor
+      consumer.current(result.snapshot)
+    }
+  }
+  const applyRef = useRef(apply)
+  applyRef.current = apply
+  const [transport, setTransport] = useState<'connecting' | 'streaming' | 'polling'>('connecting')
+  const { data, error, reload } = usePoll(() => call('GET projects/:id/events', { id: projectId, query: { after: cursor.sequence,
+    ...(cursor.id ? { afterId: cursor.id } : {}), limit: 200 } }), [call, projectId, cursor.sequence, cursor.id], intervalMs)
+  useEffect(() => {
+    if (!data) return
+    applyRef.current(data)
+    // The effect consumes each page once even though `data` stays stable between requests.
+  }, [data])
+  useEffect(() => {
+    let active = true, retry: ReturnType<typeof setTimeout> | undefined
+    const controller = new AbortController()
+    const connect = async () => {
+      try {
+        const cursor = cursorRef.current, query = new URLSearchParams({ after: String(cursor.sequence), limit: '200' })
+        if (cursor.id) query.set('afterId', cursor.id)
+        const response = await fetch(`/orchestrator/api/projects/${encodeURIComponent(projectId)}/events/stream?${query}`, {
+          signal: controller.signal, headers: { accept: 'text/event-stream', 'x-orchestrator-request': '1' } })
+        if (!response.ok || !response.body) throw new Error(`Project event stream unavailable (${response.status})`)
+        setTransport('streaming')
+        const reader = response.body.getReader(), decoder = new TextDecoder()
+        let buffer = ''
+        while (active) {
+          const { value, done } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          for (;;) {
+            const end = buffer.indexOf('\n\n')
+            if (end < 0) break
+            const block = buffer.slice(0, end); buffer = buffer.slice(end + 2)
+            const data = block.split('\n').find(line => line.startsWith('data: '))?.slice(6)
+            if (!data) continue
+            applyRef.current(JSON.parse(data) as ProjectEventPage)
+          }
+        }
+      } catch (failure) {
+        if (active && !(failure instanceof DOMException && failure.name === 'AbortError')) setTransport('polling')
+      }
+      if (active) retry = setTimeout(() => { setTransport('connecting'); void connect() }, 5000)
+    }
+    void connect()
+    return () => { active = false; controller.abort(); if (retry) clearTimeout(retry) }
+  }, [projectId])
+  return { cursor, error, reload, transport }
+}
+
 export const DECISION_FILTERS = ['work', 'stop', 'ignore', 'unavailable', 'all'] as const
 export type DecisionFilter = typeof DECISION_FILTERS[number]
 export const DECISION_KINDS: Readonly<Record<DecisionFilter, string>> = { work: 'accept,reopen', stop: 'stop', ignore: 'ignore',

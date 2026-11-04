@@ -1,6 +1,7 @@
 /** Durable project conversation storage and coordinator fencing. */
 import { randomUUID } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
+import { appendProjectEvent } from './events.ts'
 export const CONVERSATION_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS conversation_owner (
   project_id TEXT PRIMARY KEY, actor_id TEXT NOT NULL, claimed_at TEXT NOT NULL
@@ -134,6 +135,16 @@ const rowMapping = (row: Record<string, unknown>): Mapping => ({
 export class ConversationStore {
   /** The host initializes CONVERSATION_SCHEMA_SQL inside its atomic schema migration. */
   constructor(private readonly store: ConversationStoreHost) {}
+  /** Record the normalized row change in the same transaction as the message write. */
+  private changed(message: ConversationMessage, status: MessageStatus, at = message.createdAt): void {
+    const user = message.role === 'assistant' && message.userMessageId ? this.getRaw(message.userMessageId) : undefined
+    const generation = message.mappingGeneration ?? 0, stateVersion = message.expectedStateVersion ?? 0
+    appendProjectEvent(this.store.db, {
+      id: `conversation:${message.id}:${status}:${generation}:${stateVersion}`, projectId: message.projectId,
+      ticketId: message.requestTicketId ?? user?.requestTicketId ?? '', kind: 'conversation-message', version: message.id,
+      operationId: `${message.id}:${status}:${generation}:${stateVersion}`, at,
+    })
+  }
   claimProject(
     projectId: string,
     actorId: string,
@@ -213,6 +224,7 @@ export class ConversationStore {
           'INSERT INTO conversation_message (id,project_id,client_request_key,role,actor_id,text,created_at,status,request_ticket_id,request_plan_revision) VALUES (?,?,?,?,?,?,?,?,?,?)',
         )
         .run(message.id, projectId, input.clientRequestKey, 'user', actorId, input.text, message.createdAt, 'queued', input.requestTicketId ?? null, input.requestPlanRevision ?? null)
+      this.changed(message, 'queued')
       return message
     })
   }
@@ -260,10 +272,12 @@ export class ConversationStore {
             "UPDATE conversation_mapping SET status='retired', replacement_reason=? WHERE project_id=? AND generation=?",
           )
           .run(input.reason ?? 'replaced', projectId, active.generation)
-      if (running)
+      if (running) {
         this.store.db
           .prepare("UPDATE conversation_message SET status='error', error=? WHERE project_id=? AND status='running'")
           .run(input.reason ?? 'mapping replaced', projectId)
+        this.changed(this.getRaw(String(running.id))!, 'error', at)
+      }
       this.store.db
         .prepare('INSERT INTO conversation_mapping VALUES (?,?,?,?,?,?,?,?,?,?)')
         .run(projectId, generation, input.sessionId, input.workspaceId, input.cwd, 1, 'active', null, null, at)
@@ -332,6 +346,7 @@ export class ConversationStore {
           unknown
         >,
       )
+      this.changed(input, 'running', now())
       return { input, mapping, stateVersion: version }
     })
   }
@@ -392,6 +407,8 @@ export class ConversationStore {
           input.dshMessageId ?? null,
         )
       this.store.db.prepare('UPDATE conversation_state SET version=version+1 WHERE project_id=?').run(projectId)
+      this.changed({ ...user, status: 'answered' }, 'answered', now())
+      this.changed(message, 'saved')
       return message
     })
   }
@@ -409,6 +426,8 @@ export class ConversationStore {
       this.store.db.prepare('INSERT INTO conversation_message (id,project_id,client_request_key,role,actor_id,text,created_at,status,user_message_id) VALUES (?,?,?,?,?,?,?,?,?)')
         .run(id, projectId, id, 'assistant', actorId, text, createdAt, 'saved', inputId)
       this.store.db.prepare('UPDATE conversation_state SET version=version+1 WHERE project_id=?').run(projectId)
+      this.changed({ ...user, status: 'answered' }, 'answered', createdAt)
+      this.changed(message, 'saved')
       return message
     })
   }
@@ -430,7 +449,9 @@ export class ConversationStore {
         .prepare("UPDATE conversation_message SET status='error',error=? WHERE id=?")
         .run(input.error, input.inputId)
       this.store.db.prepare('UPDATE conversation_state SET version=version+1 WHERE project_id=?').run(projectId)
-      return this.getRaw(input.inputId)!
+      const message = this.getRaw(input.inputId)!
+      this.changed(message, 'error', now())
+      return message
     })
   }
   retry(projectId: string, actorId: string): ConversationMessage | undefined {
@@ -443,7 +464,9 @@ export class ConversationStore {
         .get(projectId) as Record<string, unknown> | undefined
       if (!row) return undefined
       this.store.db.prepare("UPDATE conversation_message SET status='queued',error=NULL WHERE id=?").run(String(row.id))
-      return this.getRaw(String(row.id))
+      const message = this.getRaw(String(row.id))!
+      this.changed(message, 'queued', now())
+      return message
     })
   }
   /** Freeze the exact versioned prompt for a claimed input before invoking the model. */

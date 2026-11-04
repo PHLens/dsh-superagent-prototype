@@ -12,7 +12,7 @@ import { ProjectHome } from './project-home.tsx'
 import { ProjectConversation } from './project-conversation.tsx'
 import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
 import { HOME, TABS, initialLocation, lastSettingsGroup, remember, routeLabel, settingsRoute, type Location, type Route,
-  type Tab } from './route.ts'
+  parseRouteHash, routeHash, storedLocation, type Tab } from './route.ts'
 import { SettingsPage } from './settings.tsx'
 import { SourceStatus } from './source.tsx'
 import { actorName, errorText, reasonLabel, valueLabel, type T, readableMarkers } from './text.ts'
@@ -148,7 +148,7 @@ function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
   const waiting = error ? <p className="dt-error" role="alert">{error.message}</p> : <p className="dt-hint">{t('loading')}</p>
   const page = (() => {
     switch (route.page) {
-      case 'projects': return route.id !== undefined ? <ProjectConversation key={route.id} id={route.id} /> : <ProjectHome />
+      case 'projects': return route.id !== undefined ? <ProjectConversation key={route.id} id={route.id} focusTicket={route.query?.ticket} /> : <ProjectHome />
       case 'overview': return <OverviewPage />
       case 'source': return <SourceStatus />
       case 'trigger': return route.id !== undefined ? <ThreadPage key={route.id} id={route.id} target={route.query?.trigger} />
@@ -175,14 +175,39 @@ function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
 /** Root panel component managing route history and shared panel state. */
 export function App({ t, openSession, deploymentForm }: AppProps) {
   const [location, setLocation] = useState(initialLocation)
-  useEffect(() => { remember(location) }, [location])
+  const current = useRef(location)
+  current.current = location
+  useEffect(() => {
+    remember(location)
+    const hash = routeHash(location.route)
+    if (globalThis.location.hash !== hash || JSON.stringify(history.state) !== JSON.stringify(location)) history.replaceState(location, '', hash)
+  }, [])
+  useEffect(() => {
+    const restore = () => {
+      const linked = parseRouteHash(globalThis.location.hash), next = storedLocation(history.state) ?? (linked ? { route: linked, stack: [] } : HOME)
+      const resolved: Location = 'page' in next ? { route: next, stack: [] } : next
+      current.current = resolved; remember(resolved); setLocation(resolved)
+    }
+    addEventListener('popstate', restore)
+    addEventListener('hashchange', restore)
+    return () => { removeEventListener('popstate', restore); removeEventListener('hashchange', restore) }
+  }, [])
+  const commit = useCallback((next: Location, replace: boolean) => {
+    current.current = next; remember(next)
+    const hash = routeHash(next.route)
+    if (replace) history.replaceState(next, '', hash)
+    else history.pushState(next, '', hash)
+    setLocation(next)
+  }, [])
   // Preserve the last opened settings group across navigation so the Settings tab reopens at it.
-  const move = useCallback((next: (current: Location) => Pick<Location, 'route' | 'stack'>) =>
-    setLocation(current => ({ ...next(current), group: lastSettingsGroup(current) })), [])
+  const move = useCallback((next: (value: Location) => Pick<Location, 'route' | 'stack'>, replace = false) => {
+    const value = current.current
+    commit({ ...next(value), group: lastSettingsGroup(value) }, replace)
+  }, [commit])
   /** Navigates to `route`; `replace` swaps the current entry (filters, paging) instead of pushing a back step. */
-  const navigate = useCallback((route: Route, replace = false) => move(current => ({ route,
-    stack: replace ? current.stack : [...current.stack, current.route].slice(-20) })), [move])
-  const back = useCallback(() => move(current => ({ route: current.stack.at(-1) ?? HOME, stack: current.stack.slice(0, -1) })), [move])
+  const navigate = useCallback((route: Route, replace = false) => move(value => ({ route,
+    stack: replace ? value.stack : [...value.stack, value.route].slice(-20) }), replace), [move])
+  const back = useCallback(() => { if (current.current.stack.length) history.back() }, [])
   const openTab = useCallback((tab: Tab) => move(current => ({ stack: [], route: tab === 'settings'
     ? settingsRoute(lastSettingsGroup(current)) : { page: tab, id: undefined } })), [move])
   return <PanelProvider t={t} openSession={openSession} navigate={navigate} back={back} backLabel={routeLabel(t, location.stack.at(-1) ?? HOME)}>

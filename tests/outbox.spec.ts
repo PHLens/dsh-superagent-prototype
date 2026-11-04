@@ -30,6 +30,49 @@ it('holds every message while processing is paused, and sends it once processing
   expect(JSON.stringify(lark.mock.calls)).toContain('已合并。')
 })
 
+it('keeps delivery unknown without a second provider call when post-send event writes fail', async () => {
+  const project = h.runtime.projectCoordinator.create('alice', { name: 'Event failure project', goal: 'Send exactly once' })
+  const provider = vi.spyOn(h.runtime.sources, 'send').mockResolvedValue('sent')
+  h.runtime.store.db.exec(`CREATE TRIGGER fail_delivery_event BEFORE INSERT ON project_event
+    WHEN json_extract(NEW.payload, '$.kind') = 'delivery-changed'
+      AND json_extract(NEW.payload, '$.version') = 'event-failure'
+      AND NEW.id LIKE '%:send-started'
+    BEGIN SELECT RAISE(ABORT, 'injected delivery event failure'); END`)
+  const channel = feishu('1', 'x').channel!
+  h.runtime.outbox.send({ id: 'event-failure', channel: { ...channel, address: { ...channel.address, projectId: project.id } },
+    text: 'Send once', kind: 'notice' })
+  await h.runtime.sendReplies()
+  expect(provider).toHaveBeenCalledTimes(1)
+  expect(h.runtime.store.receipts.get('event-failure')).toMatchObject({ status: 'pending', reconciliation: { state: 'unknown', phase: 'send-started' } })
+  const delivery = (h.runtime.store.db.prepare("SELECT payload FROM project_event WHERE project_id=? AND json_extract(payload, '$.kind')='delivery-changed' ORDER BY sequence").all(project.id) as { payload: string }[])
+    .map(row => JSON.parse(row.payload) as { operationId: string })
+  expect(delivery.map(event => event.operationId.split(':').at(-1))).toEqual(['queued'])
+  h.runtime.store.db.exec('DROP TRIGGER fail_delivery_event')
+  h.runtime.store.db.prepare("UPDATE effect SET due=0 WHERE kind='project-event'").run()
+  await h.runtime.effects.idle()
+  const repaired = (h.runtime.store.db.prepare("SELECT payload FROM project_event WHERE project_id=? AND json_extract(payload, '$.kind')='delivery-changed' ORDER BY sequence").all(project.id) as { payload: string }[])
+    .map(row => JSON.parse(row.payload) as { operationId: string })
+  expect(repaired.map(event => event.operationId.split(':').at(-1))).toEqual(['queued', 'send-started'])
+  expect(h.runtime.store.receipts.get('event-failure')).toMatchObject({ status: 'pending', reconciliation: { state: 'unknown', phase: 'send-started' } })
+})
+
+it('timestamps every normal project delivery transition from its durable receipt', async () => {
+  const project = h.runtime.projectCoordinator.create('alice', { name: 'Timestamped delivery', goal: 'Record delivery time' })
+  vi.spyOn(h.runtime.sources, 'send').mockResolvedValue('sent')
+  const channel = feishu('1', 'x').channel!
+  h.runtime.outbox.send({ id: 'timestamped-delivery', channel: { ...channel, address: { ...channel.address, projectId: project.id } },
+    text: 'Timestamp this', kind: 'notice' })
+  await h.runtime.sendReplies()
+  const receipt = h.runtime.store.receipts.get('timestamped-delivery')
+  expect(receipt).toMatchObject({ status: 'sent' })
+  expect(receipt?.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+  expect(receipt?.settledAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+  const events = (h.runtime.store.db.prepare("SELECT payload FROM project_event WHERE project_id=? AND json_extract(payload, '$.kind')='delivery-changed' ORDER BY sequence")
+    .all(project.id) as { payload: string }[]).map(row => JSON.parse(row.payload) as { operationId: string; at: string })
+  expect(events.map(event => event.operationId.split(':').at(-1))).toEqual(['queued', 'send-started', 'sent'])
+  for (const event of events) expect(Number.isFinite(Date.parse(event.at))).toBe(true)
+})
+
 it('keeps a message for a Source that is not installed waiting, and sends it once the Source\'s kind registers', async () => {
   const sent: OutboundMessage[] = []
   const probe: SourceKind<Record<string, never>> = { kind: 'probe', title: { zh: '探针', en: 'Probe' }, description: { zh: '', en: '' }, health: [],
