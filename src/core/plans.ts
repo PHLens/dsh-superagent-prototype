@@ -74,9 +74,14 @@ function content(plan: PlanContent): PlanContent {
   }
   // Explicitly copy the contract fields; unknown model-supplied fields grant no authority.
   if (plan.acceptance && (!Number.isSafeInteger(plan.acceptance.version) || plan.acceptance.version < 1 || !['registered-files', 'human-review'].includes(plan.acceptance.mode))) throw new UserError('invalidPlan')
+  const check = plan.acceptance?.codeCheck
+  if (check && (!text(check.command) || !text(check.profile) || !text(check.sourceVersion) || !text(check.configVersion) || !Array.isArray(check.args) || !check.args.every(text)
+    || [check.sourceResourceId, check.configResourceId, check.runtimeResourceId, check.runtimeVersion].some(id => id !== undefined && !text(id))
+    || (!!check.runtimeResourceId !== !!check.runtimeVersion)
+    || !['node', 'nodejs', 'python', 'python3', 'pytest', 'pnpm', 'npm'].includes(check.command) || !['node-smoke', 'python-smoke', 'pytest', 'package-test'].includes(check.profile))) throw new UserError('invalidPlan')
   if (plan.artifactInputs !== undefined && (!Array.isArray(plan.artifactInputs) || !plan.artifactInputs.every(item => item && text(item.artifactId) && text(item.contentVersion)))) throw new UserError('invalidPlanInput')
   return copy({ goal: plan.goal, scope: plan.scope, outputs: plan.outputs, resources: plan.resources, environment: plan.environment, cost: plan.cost, completion: plan.completion,
-    ...(plan.acceptance ? { acceptance: { version: plan.acceptance.version, mode: plan.acceptance.mode } } : {}),
+    ...(plan.acceptance ? { acceptance: { version: plan.acceptance.version, mode: plan.acceptance.mode, ...(plan.acceptance.codeCheck ? { codeCheck: { command: plan.acceptance.codeCheck.command, args: [...plan.acceptance.codeCheck.args], profile: plan.acceptance.codeCheck.profile, ...(plan.acceptance.codeCheck.sourceResourceId ? { sourceResourceId: plan.acceptance.codeCheck.sourceResourceId } : {}), ...(plan.acceptance.codeCheck.configResourceId ? { configResourceId: plan.acceptance.codeCheck.configResourceId } : {}), ...(plan.acceptance.codeCheck.runtimeResourceId ? { runtimeResourceId: plan.acceptance.codeCheck.runtimeResourceId } : {}), ...(plan.acceptance.codeCheck.runtimeVersion ? { runtimeVersion: plan.acceptance.codeCheck.runtimeVersion } : {}), sourceVersion: plan.acceptance.codeCheck.sourceVersion, configVersion: plan.acceptance.codeCheck.configVersion } } : {}) } } : {}),
     ...(plan.artifactInputs ? { artifactInputs: plan.artifactInputs.map(item => ({ artifactId: item.artifactId, contentVersion: item.contentVersion })) } : {}),
     ...(plan.assignments ? { assignments: normalizeGraphProposals(plan.assignments) } : {}) })
 }

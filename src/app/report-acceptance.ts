@@ -3,11 +3,16 @@ import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import type { Assignment, Ticket } from '../core/index.ts'
 import { activePlanAssignments } from '../core/assignment-graphs.ts'
+import { followsDone } from '../core/tickets.ts'
 import type { Store } from './store.ts'
 import { ExecutionAttempts, type Attempt } from './execution-attempts.ts'
 import { ArtifactStore, digest } from './artifact-store.ts'
 import { ConversationStore } from './conversation-store.ts'
 import { ProjectEvents } from './events.ts'
+import { CodeValidation, codeValidationOperation } from './code-validation.ts'
+import { claimPull, readPull, type Pull } from '../sources/github-pull.ts'
+import type { SourceContext } from '../sources/host.ts'
+import { sameName } from '../infra/text.ts'
 
 export interface FileReport {
   operationId: string; state: 'progress' | 'ready' | 'blocked' | 'failed'
@@ -20,21 +25,84 @@ export interface GateDecision {
 }
 /** Persists worker receipts and independently validates version-bound acceptance before completing work. */
 export class ReportAcceptance {
-  constructor(readonly store: Store, readonly attempts: ExecutionAttempts, readonly artifacts: ArtifactStore) {}
+  private githubFor?: (identity: import('./execution-environment.ts').ExecutionIdentity) => SourceContext
+  constructor(readonly store: Store, readonly attempts: ExecutionAttempts, readonly artifacts: ArtifactStore, readonly validation?: CodeValidation) {}
+  /** Project reports validate and bind a PR only inside the Attempt's execution context. */
+  setGithubContext(create: (identity: import('./execution-environment.ts').ExecutionIdentity) => SourceContext): void { this.githubFor = create }
+  /** Reads the claimed PR under the Attempt's registered account/repository before the report transaction. */
+  async pullFor(sessionId: string, url: string): Promise<Pull> {
+    const { attempt } = this.attempts.resolve(sessionId, true)
+    const identity = attempt.identity
+    if (!identity?.repository || !identity.repositoryId || !identity.accountId) throw new Error('A PR report requires a registered repository identity')
+    // The branch belongs to the persisted Attempt, not to the request or the worker's prose.
+    if (!identity.deliveryBranch) throw new Error('This Attempt has no server-owned delivery branch; start a new Attempt before reporting a PR')
+    if (this.attempts.resourceAuthority && !this.attempts.resourceAuthority.granted(attempt.projectId, identity.repositoryId)) throw new Error('The registered repository resource is revoked')
+    const match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)\/?$/.exec(url)
+    if (!match || !sameName(match[1]!, identity.repository)) throw new Error('PR report does not belong to this Attempt\'s registered repository')
+    if (!this.githubFor) throw new Error('Project GitHub execution context is unavailable')
+    const number = Number(match[2])
+    const pull = await readPull(this.githubFor(identity), number)
+    if (pull.number !== number) throw new Error('PR report resolved a different PR')
+    if (pull.head.ref !== identity.deliveryBranch) throw new Error('PR report head branch is not this Attempt\'s server-owned delivery branch')
+    if (!sameName(pull.user.login, identity.accountId)) throw new Error('PR report author is not this Attempt\'s registered account')
+    if (!pull.head.repo || !sameName(pull.head.repo.full_name, identity.repository)) throw new Error('PR report head repository is not the registered repository')
+    return pull
+  }
   reports(ticketId: string): AcceptedReport[] { return this.store.db.prepare('SELECT value FROM worker_report ORDER BY rowid').all().map(row => JSON.parse(String(row.value)) as AcceptedReport).filter(item => item.ticketId === ticketId) }
   decisions(ticketId: string): GateDecision[] { return this.store.db.prepare('SELECT value FROM acceptance_decision ORDER BY rowid').all().map(row => JSON.parse(String(row.value)) as GateDecision).filter(item => item.ticketId === ticketId) }
-  submit(sessionId: string, input: FileReport): AcceptedReport {
+  /** Whether this Session's own Attempt already committed `operationId`, independent of payload or live authority. */
+  hasReceipt(sessionId: string, operationId: string): boolean {
+    const attempt = this.attempts.bySession(sessionId)
+    return !!attempt && !!this.store.db.prepare('SELECT 1 FROM worker_report WHERE attempt_id=? AND operation_id=?').get(attempt.id, operationId)
+  }
+  /** Find the durable receipt for this native Session Attempt and exact operation/payload, without provider, resource, directory or Ticket revalidation. */
+  replay(sessionId: string, input: FileReport): AcceptedReport | undefined {
+    const attempt = this.attempts.bySession(sessionId)
+    const ticket = attempt && this.store.tickets.get(attempt.ticketId)
+    if (!attempt || !ticket || ticket.projectId !== attempt.projectId
+      || !ticket.assignments.some(item => item.id === attempt.assignmentId)) throw new Error('Stale or unauthorized worker execution')
+    return this.receiptFor(attempt.id, input)
+  }
+  private receiptFor(attemptId: string, input: FileReport): AcceptedReport | undefined {
+    const row = this.store.db.prepare('SELECT value FROM worker_report WHERE attempt_id=? AND operation_id=?').get(attemptId, input.operationId) as { value: string } | undefined
+    if (!row) return undefined
+    const previous = JSON.parse(row.value) as AcceptedReport
+    const { id: _id, attemptId: _a, lease: _l, sessionId: _s, projectId: _p, ticketId: _t, assignmentId: _as, at: _at, ...payload } = previous
+    if (!isDeepStrictEqual(payload, JSON.parse(JSON.stringify(input)))) throw new Error('Report operation id conflict')
+    return previous
+  }
+  submit(sessionId: string, input: FileReport, pull?: Pull): AcceptedReport {
     const { attempt } = this.attempts.resolve(sessionId, true)
     if (!input.operationId.trim() || !input.completed.trim() || !input.evidence.length || input.evidence.some(item => !item.trim())) throw new Error('Report needs completed work and evidence')
     return this.store.atomic(() => {
-      const { ticket, assignment } = this.attempts.resolve(sessionId, true)
-      const previous = this.reports(ticket.id).find(item => item.attemptId === attempt.id && item.operationId === input.operationId)
-      if (previous) {
-        const { id: _id, attemptId: _a, lease: _l, sessionId: _s, projectId: _p, ticketId: _t, assignmentId: _as, at: _at, ...payload } = previous
-        if (!isDeepStrictEqual(payload, JSON.parse(JSON.stringify(input)))) throw new Error('Report operation id conflict')
-        return previous
-      }
+      const initial = this.attempts.resolve(sessionId, true)
+      let ticket = initial.ticket, assignment = initial.assignment
+      const previous = this.receiptFor(attempt.id, input)
+      if (previous) return previous
       this.attempts.resolve(sessionId)
+      if (input.prUrl) {
+        if (!pull) throw new Error('PR report must be validated before submission')
+        const identity = attempt.identity
+        if (!identity?.repository || !identity.repositoryId || !identity.accountId || !identity.deliveryBranch || !this.githubFor) throw new Error('PR report requires a complete registered repository identity')
+        if (this.attempts.resourceAuthority && !this.attempts.resourceAuthority.granted(attempt.projectId, identity.repositoryId)) throw new Error('The registered repository resource is revoked')
+        const match = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)\/?$/.exec(input.prUrl)
+        if (!match || !sameName(match[1]!, identity.repository)) throw new Error('PR report does not belong to this Attempt\'s registered repository')
+        if (pull.html_url !== input.prUrl || pull.number !== Number(match[2])) throw new Error('PR report URL does not match the read PR')
+        if (!pull.head.repo || !sameName(pull.head.repo.full_name, identity.repository)) throw new Error('PR report head repository is not the registered repository')
+        if (!sameName(pull.user.login, identity.accountId)) throw new Error('PR report author is not this Attempt\'s registered account')
+        if (pull.head.ref !== identity.deliveryBranch) throw new Error('PR report head branch is not this Attempt\'s server-owned delivery branch')
+        const refused = claimPull(this.githubFor(identity), ticket.id, pull, { deliveryBranch: identity.deliveryBranch })
+        if (refused) throw new Error(refused)
+        // claimPull binds through Engine.bindThread and writes another Ticket snapshot. Continue
+        // aggregation from the durable post-claim state, never from the stale copy read above.
+        const latest = this.attempts.resolve(sessionId, true)
+        // The same Attempt/Assignment must still back the receipt after the nested Engine write.
+        if (latest.ticket.id !== ticket.id || latest.assignment.id !== assignment.id || latest.attempt.id !== attempt.id || latest.attempt.lease !== attempt.lease) throw new Error('PR claim changed the reporting Attempt')
+      }
+      // Re-read after any nested claim transaction so every later mutation starts from the latest Ticket.
+      const latest = this.attempts.resolve(sessionId, true)
+      ticket = latest.ticket; assignment = latest.assignment
+      if (ticket.id !== attempt.ticketId || assignment.id !== attempt.assignmentId) throw new Error('Report Attempt no longer matches its Ticket Assignment')
       for (const ref of input.artifacts) {
         const item = this.artifacts.read(attempt.projectId, ref.id, ref.contentVersion)
         if (item.ticketId !== ticket.id || item.assignmentId !== assignment.id || item.attemptId !== attempt.id || item.lease !== attempt.lease) throw new Error('Foreign artifact in report')
@@ -119,9 +187,13 @@ export class ReportAcceptance {
       const outputs = report.artifacts.map(ref => this.artifacts.read(attempt.projectId, ref.id, ref.contentVersion).output)
       if (assignment.contract!.plan.outputs.some(output => !outputs.includes(output))) reason = 'missing-artifacts'
       else if (report.unresolved.length) reason = 'unresolved-items'
-      else if ((ticket.attentionQuestions?.some(question => question.binding?.assignmentId === assignment.id && !question.resolvedAt)
+       else if (assignment.contract!.plan.acceptance?.codeCheck) {
+         if (!this.validation) reason = 'missing-code-validation'
+         else { try { this.validation.requirePassed(attempt.id, attempt.lease, assignment.contract!.plan.acceptance.codeCheck, codeValidationOperation(attempt.id, assignment.contract!.planRevision)) } catch { reason = 'missing-code-validation' } }
+       }
+      if (!reason && (ticket.attentionQuestions?.some(question => question.binding?.assignmentId === assignment.id && !question.resolvedAt)
         || (ticket.attention?.binding?.assignmentId === assignment.id && !ticket.attention.resolvedAt))) reason = 'unresolved-question'
-      else if (assignment.contract!.plan.acceptance?.mode !== 'registered-files' || activePlanAssignments(ticket).some(item => item.contract?.proposal?.review && item.contract.authorizationId === assignment.contract!.authorizationId && item.contract.proposal.review.target === assignment.contract!.assignmentKey)) {
+      if (!reason && (assignment.contract!.plan.acceptance?.mode !== 'registered-files' || activePlanAssignments(ticket).some(item => item.contract?.proposal?.review && item.contract.authorizationId === assignment.contract!.authorizationId && item.contract.proposal.review.target === assignment.contract!.assignmentKey))) {
         const decision = this.decisions(ticket.id).findLast(item => item.assignmentId === assignment.id && item.reportId === report.id && item.targetVersion === this.target(report)
           && item.conditionsVersion === (assignment.contract!.plan.acceptance?.version ?? assignment.contract!.planRevision) && item.judge.generation === attempt.lease)
         if (decision?.conclusion !== 'passed') reason = decision?.conclusion ?? 'semantic-review'
@@ -129,7 +201,14 @@ export class ReportAcceptance {
       if (!reason) {
         assignment.state = 'ended'; assignment.endedAt = completionAt; assignment.endedReason = 'accepted'; assignment.report = { state: 'ready', summary: report.completed, at: report.at }
         attempt.status = 'ended'; this.attempts.save(attempt)
-        if (activePlanAssignments(ticket).every(item => item.state === 'ended' && item.endedReason === 'accepted')) ticket.ended = { at: completionAt, by: 'executor', outcome: 'completed' }
+        if (activePlanAssignments(ticket).every(item => item.state === 'ended' && item.endedReason === 'accepted')) {
+          // A project Task with an open Follow remains open even after its work is accepted. The
+          // Engine's threadClosed path ends it with followsDone; ending it here would hide the PR
+          // from close/merge observation. A file Task without Follows still completes immediately.
+          const done = followsDone(ticket)
+          if (!ticket.follows?.length) ticket.ended = { at: completionAt, by: 'executor', outcome: 'completed' }
+          else if (done) ticket.ended = { at: done.at, by: 'executor', outcome: done.outcome }
+        }
       }
     }
     assignment.waitingReason = reason as Assignment['waitingReason']

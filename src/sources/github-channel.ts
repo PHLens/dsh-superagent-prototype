@@ -19,6 +19,10 @@ export async function sendGithub(host: Pick<SourceContext, 'commands'>, message:
   const { commands } = host
   const { repository, github } = commands.deployment
   if (!github) throw new Error('The GitHub Source has no working repository/account CLI')
+  const addressRepository = message.channel.address.repository
+  if (addressRepository && !sameName(addressRepository, repository)) throw new Error('GitHub reply target belongs to another repository scope')
+  const addressAccount = message.channel.address.account
+  if (addressAccount && !sameName(addressAccount, github.login)) throw new Error('GitHub reply target belongs to another account scope')
   const number = Number(message.channel.address.number)
   if (!number) throw new Error('Missing GitHub reply target')
   try {
@@ -46,8 +50,9 @@ export async function sendGithub(host: Pick<SourceContext, 'commands'>, message:
 }
 export function githubLink(address: Record<string, string>, links: ChannelLinks): ChannelLink {
   const number = address.number ?? ''
-  const review = !!links.repository && !!githubAddress(address.url ?? '', links.repository)?.discussion
-  return { url: address.url ?? (links.repository ? githubPage(links.repository, Number(number)) : ''),
+  const repository = address.repository || links.repository
+  const review = !!repository && !!githubAddress(address.url ?? '', repository)?.discussion
+  return { url: address.url ?? (repository ? githubPage(repository, Number(number)) : ''),
     label: review ? { zh: `GitHub #${number} 的 review 讨论`, en: `Review discussion on GitHub #${number}` }
       : { zh: `GitHub #${number}`, en: `GitHub #${number}` } }
 }

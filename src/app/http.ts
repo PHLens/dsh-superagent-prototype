@@ -22,6 +22,7 @@ import type { ProjectCoordinator } from './project-coordinator.ts'
 import { authenticateProjectRequest, ProjectAuthError, type ProjectAuthContext } from './project-auth.ts'
 import type { Store } from './store.ts'
 import type { TextCache } from './cache.ts'
+const resourceSnapshotSchema = z.object({ projectId: z.string(), resourceId: z.string(), path: z.string(), version: z.string(), entries: z.array(z.object({ name: z.string(), path: z.string(), kind: z.enum(['directory', 'file']), bytes: z.number().int().nonnegative(), version: z.string() }).strict()), expiresAt: z.string(), offset: z.number().int().nonnegative().optional(), total: z.number().int().nonnegative().optional(), next_offset: z.number().int().nonnegative().nullable().optional() }).strict()
 import type { LinkTarget, ViewHost } from './views/records.ts'
 import type { Variable } from './execution-environment.ts'
 import { policyHistory } from './settings-history.ts'
@@ -58,6 +59,7 @@ export interface HttpHost {
   ticketEnvironment(ticket: Ticket): Variable[]
   checkSetup(): void
   requestPass(): void
+  syncGitHubConsumers(): void
   models(): Promise<ModelCatalog>
 }
 /**
@@ -179,6 +181,14 @@ function routes(runtime: HttpHost): Routes {
       return { project: host.coordinator.create(host.actorId, input) }
     },
     'GET projects/:id/conversation': ({ actorId, params }) => { const host = projectHost(actorId); return host.coordinator.view(host.actorId, params.id) },
+    'GET projects/:id/materials': ({ actorId, params }) => { const host = projectHost(actorId); return host.coordinator.materials(host.actorId, params.id) },
+    'POST projects/:id/knowledge': async ({ actorId, params, body }) => { const host = projectHost(actorId); const { operationId, ...input } = z.object({ kind: z.enum(['goal', 'assumption', 'decision', 'rule', 'note']), title: z.string().trim().min(1), content: z.string(), source: z.object({ kind: z.enum(['message', 'file', 'import', 'system']), id: z.string().optional(), path: z.string().optional() }), operationId: z.string().min(1).max(256).optional() }).strict().parse(await body()); return host.coordinator.saveKnowledge(host.actorId, params.id, input, operationId) },
+    'POST projects/:id/knowledge/:knowledgeId/confirm': async ({ actorId, params, body }) => { const host = projectHost(actorId); const { operationId } = z.object({ operationId: z.string().min(1).max(256).optional() }).strict().parse(await body().catch(() => ({}))); return host.coordinator.confirmKnowledge(host.actorId, params.id, params.knowledgeId, operationId) },
+    'POST projects/:id/resources': async ({ actorId, params, body }) => { const host = projectHost(actorId); const { operationId, ...input } = z.object({ type: z.enum(['directory', 'file', 'repository', 'attachment']), path: z.string(), purpose: z.string().min(1), maxBytes: z.number().int().positive().max(16000000), identity: z.object({ repository: z.string().max(200), gitAuthorName: z.string().min(1).max(200), gitAuthorEmail: z.string().min(3).max(200) }).strict().optional(), operationId: z.string().min(1).max(256).optional() }).strict().parse(await body()); const created = await host.coordinator.registerResource(host.actorId, params.id, input, operationId); runtime.syncGitHubConsumers(); return created },
+    'POST projects/:id/resources/:resourceId/revoke': async ({ actorId, params, body }) => { const host = projectHost(actorId); const { operationId } = z.object({ operationId: z.string().min(1).max(256).optional() }).strict().parse(await body().catch(() => ({}))); const revoked = host.coordinator.revokeResource(host.actorId, params.id, params.resourceId, operationId); runtime.syncGitHubConsumers(); return revoked },
+    'POST projects/:id/skills': async ({ actorId, params, body }) => { const host = projectHost(actorId); const { operationId, ...input } = z.object({ name: z.string().min(1).max(120), version: z.string().min(1).max(120), description: z.string().max(2000), body: z.string().min(1).max(200_000), roles: z.array(z.enum(['coordinator', 'research', 'code', 'experiment', 'writing', 'worker'])).min(1), stages: z.array(z.string().min(1)).min(1), resources: z.array(z.string()).optional(), tools: z.array(z.string()).optional(), operationId: z.string().min(1).max(256).optional() }).strict().parse(await body()); return host.coordinator.publishSkill(host.actorId, params.id, input, operationId) },
+    'POST projects/:id/resources/:resourceId/browse': async ({ actorId, params, body }) => { const host = projectHost(actorId); const input = z.object({ path: z.string().default(''), snapshot: resourceSnapshotSchema.optional(), offset: z.number().int().nonnegative().default(0), limit: z.number().int().positive().max(500).default(100) }).strict().parse(await body()); return host.coordinator.browseResource(host.actorId, params.id, params.resourceId, input.path, input.snapshot as import('./project-resources.ts').ResourceSnapshot | undefined, input.offset, input.limit) },
+    'GET projects/:id/resources/:resourceId/preview': ({ actorId, params, query }) => { const host = projectHost(actorId); const input = z.object({ path: z.string(), version: z.string().optional() }).parse(query); return host.coordinator.previewResource(host.actorId, params.id, params.resourceId, input.path, input.version) },
     'GET projects/:id/artifacts/:artifactId/:version': ({ actorId, params }) => { const host = projectHost(actorId); return host.coordinator.artifact(host.actorId, params.id, params.artifactId, params.version) },
     'POST projects/:id/acceptance': async ({ actorId, params, body }) => {
       const host = projectHost(actorId)
@@ -316,9 +326,22 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
         // Native admission is the single gate for the entire control plane, including reads.
         const actorId = authenticateProjectRequest(authContext, req)
         await runtime.ready
+        const download = /^\/orchestrator\/api\/projects\/([^/]+)\/resources\/([^/]+)\/download$/.exec(url.pathname)
+        if (download && req.method === 'GET') {
+          if (!runtime.projectCoordinator) throw new ProjectAuthError(503, 'Project coordinator unavailable')
+          const input = z.object({ path: z.string(), version: z.string().min(1) }).strict().parse(Object.fromEntries(url.searchParams))
+          const bytes = runtime.projectCoordinator.downloadResource(actorId, decodeURIComponent(download[1]!), decodeURIComponent(download[2]!), input.path, input.version)
+          // The saved name comes from the registered path, never from a client-supplied header or the whole path.
+          const name = input.path.split('/').at(-1) || 'resource'
+          const fallback = name.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 100) || 'resource'
+          res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': bytes.length,
+            'Content-Disposition': `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(name).replace(/['()]/g, escape)}`,
+            'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); res.end(bytes); return
+        }
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))
         if (!route) throw new RouteError(404, 'Unknown operation')
-        if (runtime.safeRestore && req.method !== 'GET') throw new RouteError(400, 'Recovery profile is offline read-only')
+        const recoveryRead = req.method === 'POST' && /^\/orchestrator\/api\/projects\/[^/]+\/resources\/[^/]+\/browse$/.test(url.pathname)
+        if (runtime.safeRestore && req.method !== 'GET' && !recoveryRead) throw new RouteError(400, 'Recovery profile is offline read-only')
         const query = Object.fromEntries(url.searchParams)
         json(res, 200, await route.run({ params: route.params as never, query, actorId, body: maxBytes => readBody(req, maxBytes) }))
       } catch (error) { json(res, ...failure(error)) }

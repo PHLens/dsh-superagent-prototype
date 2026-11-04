@@ -70,6 +70,10 @@ export interface ExecutorHost {
   outboundUnknown?(ticket: Ticket): boolean
   /** Verifies producer acknowledgements; terminal JobViews alone cannot certify physical exit. */
   ownerExitKnown?(ownerId: string): boolean
+  /** Attempts trusted reconciliation of unknown native producers for this owner; never clears on labels. */
+  reconcileOwner?(ownerId: string): Promise<void>
+  /** Called once an Attempt reaches a terminal state; retirement itself re-verifies every condition. */
+  retireWorker?(attemptId: string): void
   /** DSH Cordis context: agents and their events, and the subprocess service used to run prepare commands. */
   readonly context: Context
   /** Where the Executor reports what happened to Assignments and Inputs. */
@@ -264,6 +268,7 @@ export class DshExecutor implements Executor {
     try {
       let state: 'clear' | 'unknown' = 'clear', reason: string | undefined
       for (const ownerId of ownerIds) {
+        if (this.host.reconcileOwner) await this.host.reconcileOwner(ownerId)
         const resolved = await this.host.context.sessionController.resolveAgent(ownerId as SessionId)
         // Read jobs after the await: a job registered while native state was being read is still active evidence.
         const jobs = runningJobs(this.host.context, ownerId)
@@ -301,6 +306,8 @@ export class DshExecutor implements Executor {
       current!.lifecycle!.reconciliation = { ...checking, state, observedAt, ...(reason ? { reason } : {}) }
       if (state === 'clear') for (const branch of scopedAttempts) {
         if (branch.status === 'reconcile' && branch.prepare) { branch.status = 'prepared'; this.host.attempts!.save(branch) }
+        // Recovery is where a restart finds Attempts that finished before it stopped.
+        this.host.retireWorker?.(branch.id)
       }
       const history = current!.lifecycle!.reconciliationHistory ?? []
       current!.lifecycle!.reconciliationHistory = [...history.filter(item => item.operationId !== operationId), { ...checking, state, observedAt, ...(reason ? { reason } : {}) }]
@@ -355,7 +362,7 @@ export class DshExecutor implements Executor {
       if (!current || current.lifecycle?.pause.at !== lifecycle.pause.at || current.lifecycle.stop.at !== lifecycle.stop.at) return
       if (stopping) for (const attempt of attempts) {
         const latest = this.host.attempts!.bySession(attempt.sessionId)
-        if (latest?.lease === attempt.lease && latest.status !== 'reconcile') { latest.status = 'ended'; this.host.attempts!.save(latest) }
+        if (latest?.lease === attempt.lease && latest.status !== 'reconcile') { latest.status = 'ended'; this.host.attempts!.save(latest); this.host.retireWorker?.(latest.id) }
       }
       const files = this.host.checkpointFiles?.(current) ?? []
       if (files.length) this.host.engine.checkpointTicket(ticket.id, files)
@@ -470,7 +477,7 @@ export class DshExecutor implements Executor {
         if (!attempt.fenced) this.stopProject(attempt.ticketId, attempt.assignmentId)
         continue
       }
-      attempt.status = 'ended'; attempt.fenced = true; attempts.save(attempt)
+      attempt.status = 'ended'; attempt.fenced = true; attempts.save(attempt); this.host.retireWorker?.(attempt.id)
       this.projectObserved.delete(attempt.id)
     }
     for (const ticket of this.host.store.tickets.list().filter(item => item.projectId && !item.ended)) {

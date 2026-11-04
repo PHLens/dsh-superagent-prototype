@@ -11,6 +11,8 @@ export interface Tool<S extends z.ZodType = z.ZodType> {
 }
 export type RegisterTool = <S extends z.ZodType>(name: string, description: string, schema: S, execute: Tool<S>['execute']) => void
 export const tool = <S extends z.ZodType>(definition: Tool<S>): Tool => definition as unknown as Tool
+/** Returns a genuine lossless JSON schema without Zod's non-enumerable runtime metadata. */
+export const plainJsonSchema = (schema: z.ZodType): Record<string, unknown> => JSON.parse(JSON.stringify(z.toJSONSchema(schema))) as Record<string, unknown>
 
 /** Human-facing acknowledgement text, constrained to `IM_WORDS` regardless of which channel it is posted to. */
 export const AcknowledgementSchema = z.string().trim().min(1)

@@ -4,6 +4,17 @@ import { followupOwners, reached, threadKey } from './model.ts'
 import type { Thread, ThreadRef, Ticket, Trigger } from './model.ts'
 import type { Assessor, AssessmentOutcome, DomainEvent, DomainEvents, Executor, Outbox, Policy, Repositories, SourceScope } from './ports.ts'
 
+/** The intake fact Runtime turns into one durable project-feedback event. */
+export interface ProjectFeedbackFact {
+  projectId: string
+  ticketId: string
+  triggerId: string
+  inputId: string
+  at: string
+  threads: readonly string[]
+}
+
+/** Configuration for the Engine and its parts. */
 export interface EngineOptions {
   repo: Repositories
   policy: () => Policy
@@ -13,6 +24,8 @@ export interface EngineOptions {
   executor: Executor
   outbox: Outbox
   prepareTicket?: (ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>) => Ticket
+  /** Runs inside the intake transaction for a human, non-context Trigger on a live project Ticket; throwing rolls intake back. */
+  projectFeedback?: (fact: ProjectFeedbackFact) => void
   now?: () => string
   emit?: (event: DomainEvent) => void
 }

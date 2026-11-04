@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import { workerFixture } from './fixtures/project-worker.ts'
 import { projectTools } from '../src/app/tools/main.ts'
+import { key, type Trigger } from '../src/core/index.ts'
 let directory: string, f: ReturnType<typeof workerFixture>
 beforeEach(() => { directory = mkdtempSync(join(tmpdir(), 'project-facts-')); f = workerFixture(directory, { version: 1, mode: 'human-review' }) })
 afterEach(() => { f.store.close(); rmSync(directory, { recursive: true, force: true }) })
@@ -49,4 +50,25 @@ it('rejects foreign actors, projects, tasks, versions and altered artifact bytes
   expect(() => f.plans.readFact('owner', f.project.id, { ...artifactInput, contentVersion: 'wrong' })).toThrow()
   writeFileSync(artifact.path, 'Altered after registration')
   expect(() => f.plans.readFact('owner', f.project.id, artifactInput)).toThrow(/version changed/)
+})
+
+it('reads a long project feedback Trigger input exactly through bounded authorized pages', () => {
+  const text = 'Human feedback line with unicode 中文.\n'.repeat(800)
+  const trigger: Trigger = { id: 'github-comment:long-feedback', source: 'github',
+    threads: [{ source: 'github', id: 'scoped:7' }], actor: { source: 'github', id: 'alice' }, human: true,
+    at: '2026-11-02T10:00:00Z', text, meta: { number: 7, isPr: true } }
+  f.store.triggers.save(trigger)
+  const ticket = f.store.tickets.get(f.plan.ticketId)!, inputId = key('input', ticket.id, 'trigger', trigger.id)
+  ticket.inputs.push({ id: inputId, kind: 'trigger', triggerId: trigger.id, human: true, at: trigger.at })
+  f.store.tickets.save(ticket)
+  let offset = 0, content = '', pages = 0
+  for (;;) {
+    const page = f.plans.readFact('owner', f.project.id, { ticketId: ticket.id, kind: 'input', id: inputId, offset, limit: 1000 })
+    expect(page.content.length).toBeLessThanOrEqual(1000)
+    content += page.content; pages++
+    if (page.next_offset === null) break
+    offset = page.next_offset
+  }
+  expect(pages).toBeGreaterThan(1)
+  expect(JSON.parse(content)).toMatchObject({ id: inputId, triggerId: trigger.id, human: true, text })
 })

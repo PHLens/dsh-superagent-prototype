@@ -2,8 +2,8 @@
 import { z } from 'zod'
 import type { ExecutionAttempts } from '../execution-attempts.ts'
 import type { ArtifactStore } from '../artifact-store.ts'
-import type { ReportAcceptance } from '../report-acceptance.ts'
-import { key, liveTicket, type EngineForExecutor, type Ticket } from '../../core/index.ts'
+import type { AcceptedReport, ReportAcceptance } from '../report-acceptance.ts'
+import { key, liveTicket, type Assignment, type EngineForExecutor, type Ticket } from '../../core/index.ts'
 import { IM_WORDS } from '../../infra/text.ts'
 import { claimPull, readPull } from '../../sources/github-pull.ts'
 import type { SourceContext } from '../../sources/host.ts'
@@ -11,6 +11,9 @@ import { readResource, type ResourceHost } from '../resources.ts'
 import type { Store } from '../store.ts'
 import { reportRelay, threadFollowedNotice } from '../notices.ts'
 import type { Sessions } from '../sessions.ts'
+import type { ProjectResources } from '../project-resources.ts'
+import { codeValidationOperation, type CodeValidation } from '../code-validation.ts'
+import type { Commands } from '../../infra/commands.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 
 export interface ExecutorToolsHost {
@@ -23,9 +26,24 @@ export interface ExecutorToolsHost {
   sendReplies(): Promise<void>
 }
 
-export function projectWorkerTools(attempts: ExecutionAttempts, artifacts: ArtifactStore, reports: ReportAcceptance, engineOrSession: Pick<EngineForExecutor, 'report'> | string, maybeSessionId?: string): Tool[] {
+export function projectWorkerTools(attempts: ExecutionAttempts, artifacts: ArtifactStore, reports: ReportAcceptance, engineOrSession: Pick<EngineForExecutor, 'report'> | string, maybeSessionId?: string, resources?: ProjectResources, validation?: CodeValidation, commands?: Commands): Tool[] {
   const sessionId = typeof engineOrSession === 'string' ? engineOrSession : maybeSessionId!
+  // The resource authority that governs this session is bound here so every consumer of the same
+  // Attempts set — including skill body loads — re-checks it against the live grant.
+  if (resources) attempts.claimResourceAuthority(resources)
   const tools: Tool[] = []
+  if (validation && commands && attempts.bySession(sessionId)) tools.push(tool({ name: 'project_validate_code', description: 'Run the exact server-pinned code check for this Assignment and return its structured receipt. The command, profile and source/config versions come only from the confirmed contract.', schema: z.object({ operation_id: z.string().min(1) }).strict(), execute: async (args, signal) => { const { assignment } = attempts.resolve(sessionId); const check = assignment.contract?.plan.acceptance?.codeCheck; if (!check) throw new Error('This Assignment has no approved code check'); return validation.run(sessionId, codeValidationOperation(attempts.resolve(sessionId).attempt.id, assignment.contract!.planRevision), check, commands, signal) } }))
+  if (resources && attempts.bySession(sessionId)) tools.push(tool({ name: 'project_read_resource', description: 'Read a registered resource within this execution’s immutable authorized resource range. Browse pages continue with the returned snapshot plus offset; a stale or foreign snapshot fails. Use browse entry versions for text reads.', schema: z.object({ resource_id: z.string(), path: z.string().default(''), version: z.string().optional(), action: z.enum(['browse', 'preview']).default('browse'), offset: z.number().int().nonnegative().default(0), limit: z.number().int().positive().max(500).default(100), snapshot: z.object({ path: z.string(), version: z.string().min(1), expiresAt: z.string().min(1), offset: z.number().int().nonnegative().default(0) }).strict().optional() }).strict(), execute: async args => {
+    const { attempt, assignment } = attempts.resolve(sessionId)
+    if (!attempt.context?.resources.includes(args.resource_id) || !assignment.contract!.plan.resources.includes(args.resource_id)) throw new Error('Resource is outside this execution grant')
+    if (args.action === 'browse') {
+      const page = resources.browse(attempt.projectId, args.resource_id, args.path, args.snapshot ? { projectId: attempt.projectId, resourceId: args.resource_id, path: args.snapshot.path, version: args.snapshot.version, expiresAt: args.snapshot.expiresAt, entries: [] } : undefined, args.snapshot?.offset ?? args.offset, args.limit)
+      return { projectId: page.projectId, resourceId: page.resourceId, path: page.path, version: page.version, expiresAt: page.expiresAt, entries: page.entries, total: page.total, next_offset: page.next_offset,
+        ...(page.next_offset === null ? {} : { continuation: { path: page.path, version: page.version, expiresAt: page.expiresAt, offset: page.next_offset } }) }
+    }
+    if (!args.version) throw new Error('An exact resource entry version is required')
+    return resources.preview(attempt.projectId, args.resource_id, args.path, args.version)
+  } }))
   if (typeof engineOrSession !== 'string') tools.push(tool({ name: 'project_worker_request_question', description: 'Ask the authorized project owner one concrete question. Reuse operation_id only with the same question. The server binds the question to this native Session Assignment attempt and lease.', schema: z.object({ operation_id: z.string().trim().min(1), question: z.string().trim().min(1).max(4000) }).strict(), execute: async args => attempts.store.atomic(() => {
     const receipt = attempts.resolve(sessionId, true)
     const previous = receipt.ticket.attentionQuestionOperations?.find(item => item.binding.attemptId === receipt.attempt.id && item.operationId === args.operation_id)
@@ -54,6 +72,7 @@ export function projectWorkerTools(attempts: ExecutionAttempts, artifacts: Artif
       const { attempt, assignment, ticket } = attempts.resolve(sessionId)
       const authorization = ticket.authorizations?.find(item => item.id === assignment.contract!.authorizationId)
       return { plan: assignment.contract!.plan, inputs: assignment.contract!.inputs, pinnedInputs: attempt.inputs ?? [],
+        ...(attempt.identity ? { identity: { executionId: attempt.identity.executionId, repository: attempt.identity.repository, accountId: attempt.identity.accountId, ...(attempt.identity.deliveryBranch ? { deliveryBranch: attempt.identity.deliveryBranch } : {}) } } : {}),
         ...(authorization?.originalMessage ? { originalMessage: authorization.originalMessage } : {}),
         ...(attempt.reviewTarget ? { reviewTarget: attempt.reviewTarget } : {}),
         outputs: artifacts.view(attempt.projectId).filter(item => item.ticketId === attempt.ticketId),
@@ -76,25 +95,38 @@ export function projectWorkerTools(attempts: ExecutionAttempts, artifacts: Artif
       unresolved: z.array(z.string()).describe('Only actual unfinished work or content blockers. Do not list waiting for registered independent acceptance or human review. Preserve real blockers; never clear them merely to finish.'),
       pr_url: z.string().url().optional(),
     }).strict(), execute: async args => {
-      const report = reports.submit(sessionId, { operationId: args.operation_id, state: args.state, completed: args.completed, evidence: args.evidence, artifacts: args.artifacts, unresolved: args.unresolved, ...(args.pr_url ? { prUrl: args.pr_url } : {}) })
-      const { ticket, assignment } = attempts.resolve(sessionId, true)
-      const current = reports.reports(ticket.id).findLast(item => item.assignmentId === assignment.id)!
-      const completed = assignment.state === 'ended' && assignment.endedReason === 'accepted'
-      const steps: Record<string, string> = {
-        'missing-artifacts': 'Write and register every required output, then submit a new report with exact artifact versions. Preserve any real unresolved work/content blockers.',
-        'unresolved-items': 'Resolve the actual work/content blockers and submit an updated report with a new operation_id. Keep every remaining blocker in unresolved; never clear it merely to finish. Independent acceptance is managed separately by the application.',
-        'semantic-review': 'Await the application independent authenticated review of the current report and exact artifact/conditions versions. This review is not an unresolved work item; receipt alone does not complete the task.',
-        changes_required: 'Address the independent review feedback, register revised artifacts and submit a new ready report. The new report requires a new independent review. Preserve real blockers.',
-        needs_judgment: 'Await further independent judgment of the current version. Preserve real work/content blockers and do not claim completion.',
-        blocked: 'Address the reported work/content blockers and submit an updated report. Preserve every remaining real blocker.',
-        failed: 'The current execution reported failure. Report the actual failure and remaining work; follow the authorized recovery instructions.',
+      const input = { operationId: args.operation_id, state: args.state, completed: args.completed, evidence: args.evidence, artifacts: args.artifacts, unresolved: args.unresolved, ...(args.pr_url ? { prUrl: args.pr_url } : {}) }
+      const result = (report: AcceptedReport, context?: { ticket: Ticket; assignment: Assignment }) => {
+        const { ticket, assignment } = context ?? attempts.resolve(sessionId, true)
+        const current = reports.reports(ticket.id).findLast(item => item.assignmentId === assignment.id)!
+        const completed = assignment.state === 'ended' && assignment.endedReason === 'accepted'
+        const steps: Record<string, string> = {
+          'missing-artifacts': 'Write and register every required output, then submit a new report with exact artifact versions. Preserve any real unresolved work/content blockers.',
+          'unresolved-items': 'Resolve the actual work/content blockers and submit an updated report with a new operation_id. Keep every remaining blocker in unresolved; never clear it merely to finish. Independent acceptance is managed separately by the application.',
+          'semantic-review': 'Await the application independent authenticated review of the current report and exact artifact/conditions versions. This review is not an unresolved work item; receipt alone does not complete the task.',
+          changes_required: 'Address the independent review feedback, register revised artifacts and submit a new ready report. The new report requires a new independent review. Preserve real blockers.',
+          needs_judgment: 'Await further independent judgment of the current version. Preserve real work/content blockers and do not claim completion.',
+          blocked: 'Address the reported work/content blockers and submit an updated report. Preserve every remaining real blocker.',
+          failed: 'The current execution reported failure. Report the actual failure and remaining work; follow the authorized recovery instructions.',
+        }
+        const nextStep = completed ? 'The current report satisfies all registered completion conditions. No further worker report is needed.'
+          : steps[assignment.waitingReason ?? ''] ?? 'Continue the authorized work; submit ready once all outputs are registered, preserving actual work/content blockers in unresolved.'
+        const isCurrentReport = report.id === current.id
+        return { received: true, reportId: report.id, currentReportId: current.id, isCurrentReport,
+          currentStatus: { completed, waitingReason: assignment.waitingReason ?? null, unresolved: current.unresolved },
+          nextStep: isCurrentReport ? nextStep : `This is a historical receipt only; it did not reaggregate or complete work. Follow currentReportId and currentStatus. ${nextStep}` }
       }
-      const nextStep = completed ? 'The current report satisfies all registered completion conditions. No further worker report is needed.'
-        : steps[assignment.waitingReason ?? ''] ?? 'Continue the authorized work; submit ready once all outputs are registered, preserving actual work/content blockers in unresolved.'
-      const isCurrentReport = report.id === current.id
-      return { received: true, reportId: report.id, currentReportId: current.id, isCurrentReport,
-        currentStatus: { completed, waitingReason: assignment.waitingReason ?? null, unresolved: current.unresolved },
-        nextStep: isCurrentReport ? nextStep : `This is a historical receipt only; it did not reaggregate or complete work. Follow currentReportId and currentStatus. ${nextStep}` }
+      // Recover an exact committed operation before any PR read, claim, resource/authorization check, or aggregation.
+      // A changed payload for the same operation still fails explicitly here.
+      const replay = reports.replay(sessionId, input)
+      if (replay) {
+        const attempt = attempts.bySession(sessionId), ticket = attempt && attempts.store.tickets.get(attempt.ticketId)
+        const assignment = ticket?.assignments.find(item => item.id === attempt?.assignmentId)
+        if (!ticket || !assignment) throw new Error('Stale or unauthorized worker execution')
+        return result(replay, { ticket, assignment })
+      }
+      const pull = args.pr_url ? await reports.pullFor(sessionId, args.pr_url) : undefined
+      return result(reports.submit(sessionId, input, pull))
     } }),
   ]
 }

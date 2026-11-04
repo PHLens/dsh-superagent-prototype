@@ -55,7 +55,7 @@ Each part extends `EnginePart` (`src/core/part.ts`), which provides options and 
 
 | Part | Responsibility | Depends on |
 | --- | --- | --- |
-| `Intake` | A Source's Trigger: stored once with its disposition, recorded on its Threads and their correlations, fanned out to the subscribed Tickets and, unless it is a person's message that reached one, queued for Eval on its primary Thread | Tickets |
+| `Intake` | A Source's Trigger: stored once with its disposition, recorded on its Threads and their correlations, fanned out to the subscribed Tickets, with one durable project-feedback fact for a human message on a live project Ticket in the same transaction, and, unless it is a person's message that reached one, queued for Eval on its primary Thread | Tickets |
 | `Evals` | The Evals of Threads: batching, the gate's strength, actor and basis with the Trigger that gave them (`primary`), the deadline from the candidate's delivery and its shift by a pause, the requeue of an expired Eval, candidates, replays and hand-backs, the requeue on a Policy change, and the Decision each ends with: accept, stop, ignore or unavailable | Tickets |
 | `Tickets` | The Ticket lifecycle: creation from an accept with its Mandate, Subscriptions and first Assignment, the Threads it follows and their closes (`followsDone`), attached Threads and Threads followed for context, Inputs and notes, resume and the messages a resume refuses, retry, restart, stop and end, the Subscriptions it drops, and the notice of a Policy change to the Tickets it bears on | Replies |
 | `Assignments` | What the Executor and its workers report: an Assignment started, Inputs reached it or failed to, a restart interrupted it, and a worker's Report with its question for a person | Tickets, Replies |
@@ -108,7 +108,7 @@ After a change, the Engine emits an event from `DomainEvents` in `src/core/ports
 
 `trigger.received`, `eval.started`, `decision.recorded`, `ticket.created`, `ticket.resumed`, `ticket.ended`, `assignment.started`, `assignment.ended`, `thread.subscribed`, `thread.unsubscribed`, `trigger.requeued`, or `policy.changed`.
 
-Runtime turns `ticket.ended`, `trigger.requeued` and `thread.unsubscribed` into notices. A human `trigger.received` delivered to Tickets becomes a follow-up relay. `pullEndNotices` sends one chat notice, using a stable id, when a Ticket ends merged or closed. Other events currently have no consumer.
+Runtime turns `ticket.ended`, `trigger.requeued` and `thread.unsubscribed` into notices. A human `trigger.received` delivered to ordinary Tickets becomes a follow-up relay; a project-only message stays in its project lane and never claims a legacy worker. `pullEndNotices` sends one chat notice, using a stable id, when a Ticket ends merged or closed. Other events currently have no consumer.
 
 ### Model
 
@@ -319,8 +319,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/core/model.ts` | The domain types, among them the typed Ticket and `MandateBasis`, with `threadKey`, `ticketOutcome`, `reached`, `followupOwners`, `settled`, `waitsForPerson`, `liveTicket`, `runningAssignment`, `latestAssignment` and `latestReport` |
 | `src/core/ports.ts` | The ports: `Repositories`, `Policy`, `SourceScope`, `Assessor`, `Executor`, `Outbox`, and the domain events |
 | `src/core/engine.ts` | The Engine, the core's entry point, and the role interfaces `EngineForSources`, `EngineForMainSession`, `EngineForPeople`, `EngineForSettings` and `EngineForExecutor` |
-| `src/core/part.ts` | `EnginePart`, the base of the Engine's parts, and `EngineOptions` |
-| `src/core/intake.ts` | `Intake`: Triggers from Sources, to their Tickets and, unless a person's message reached one, to Eval |
+| `src/core/part.ts` | `EnginePart`, the base of the Engine's parts, and `EngineOptions`, including the project-feedback intake hook |
+| `src/core/intake.ts` | `Intake`: Triggers from Sources, to their Tickets, with a transactional project-feedback fact for a live project Ticket, and, unless a person's message reached one, to Eval |
 | `src/core/evals.ts` | `Evals`: the Evals of Threads and their Decisions |
 | `src/core/tickets.ts` | `Tickets`: the Ticket lifecycle, the Threads a Ticket follows, Subscriptions and Inputs |
 | `src/core/assignments.ts` | `Assignments`: the Executor's facts and its workers' Reports |
@@ -335,7 +335,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/setup.ts` | Setup, and `setupChanged`, whether a save changes a field setup reads |
 | `src/app/passes.ts` | Passes, the pass scheduler |
 | `src/app/outbox.ts` | The Outbox: the Engine's `Outbox` port, the receipts and the `reply` effects that send them |
-| `src/app/backup.ts` | WAL-inclusive recovery points, immutable file inventories, and offline read-only restore profiles |
+| `src/app/backup.ts` | WAL-inclusive recovery points, immutable file inventories including explicitly registered project Resources, and offline read-only restore profiles |
 | `src/app/backup-service.ts` | Scheduled and manual recovery points, retention, health reporting and safe restore delegation |
 | `src/app/notices.ts` | The main Session's notices and relays: `eventNotice`, `reportRelay`, `resultRelay` and `followupRelay` |
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
@@ -343,15 +343,27 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/conversation-store.ts` | Durable owned business conversation, input idempotency, per-project leases, mapping generations and prompt checkpoints |
 | `src/app/project-coordinator.ts` | Independent project discussion lanes, restart reconciliation, retry and coordinator lifecycle |
 | `src/app/project-progress.ts` | Read-only task progress projection; reviewer targets resolve within their authorization's current graph, with conclusions bound to the current attempt, report, registered artifacts and conditions |
-| `src/app/events.ts` | Durable transactional project event facts and coalesced consumption |
+| `src/app/events.ts` | Durable transactional project event facts, including bounded project feedback with an authorized exact-input read pointer, and coalesced consumption |
 | `src/app/scheduler.ts` | Project-aware model, worker and background scheduling status; owned native Session exit facts rebuild unknown physical occupancy even after JobView retention, and later positive acknowledgement releases it |
 | `src/core/dependencies.ts` | Assignment graph validation, readiness and dependency planning |
 | `src/core/assignment-graphs.ts` | Immutable authorized graph versions, current necessary work, scope and cost-slot validation, and fixed input lineage |
 | `src/app/project-plans.ts` | Authenticated project-plan adapter: persisted confirmation evidence, plan version anchoring, authorization and Assignment projection |
-| `src/app/project-facts.ts` | Authorized bounded coordinator facts, exact report/decision/artifact reads, and explicit pagination |
+| `src/app/project-facts.ts` | Authorized bounded coordinator facts, exact report/decision/artifact/Trigger-input reads, and explicit pagination |
 | `src/app/execution-attempts.ts` | Server-owned Assignment execution identity, preparation evidence, filesystem boundaries and lease validation |
+| `src/app/knowledge-store.ts` | Immutable project knowledge versions, provenance, confirmation state and restore reads |
+| `src/app/skill-catalog.ts` | Versioned application skill metadata, role/stage filtering, body hashes and pinned authorization |
+| `src/app/managed-skills.ts` | Scoped native skill provider and direct-user invocation guard for execution snapshots |
+| `src/app/tools/managed-skill.ts` | Server-authorized pinned skill metadata and body consumers for model tool registration |
+| `src/app/project-resources.ts` | Registered project resource snapshots, bounded reads, revocation and version checks |
+| `src/app/code-check.ts` | Resolves a reviewed code check into registered source/config/runtime material and the exact command line it runs |
+| `src/app/execution-identity.ts` | Exposes an Attempt's pinned identity as trusted per-execution `DSH_*` shell facts; revoked or foreign bindings are denied |
+| `src/app/code-validation.ts` | Structured native code-check reservations and attempt/lease-bound result receipts |
+| `src/app/native-validation-job.ts` | Scheduler-owned background validation lease and physical-exit reconciliation adapter |
+| `src/sources/github-namespace.ts` | Project/resource/account/repository namespace keys for GitHub consumers, including exact scoping of followed PR numbers |
+| `src/app/repository-identities.ts` | Project/resource-scoped repository and account identities for execution references |
+| `src/app/worker-cleanup.ts` | Durable, idempotent retirement of finished worker Sessions and their generated Workspace registration, after semantic terminality, native quiescence and physical exit are all verified |
 | `src/app/artifact-store.ts` | Managed write intents, immutable SHA256 file versions, exact-version reads and interrupted-operation reconciliation |
-| `src/app/report-acceptance.ts` | Durable worker report receipts, independent version-bound acceptance decisions and deterministic completion returns |
+| `src/app/report-acceptance.ts` | Durable worker report receipts, provider-free exact receipt replay, independent version-bound acceptance decisions and deterministic completion returns |
 | `src/app/project-session.ts` | Verified native DSH Session/workspace/cwd adapter, completed-turn projection and restricted project reads |
 | `src/app/project-auth.ts` | Fail-closed project API authentication through DSH Host Connection admission and its stable owner principal |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
@@ -413,6 +425,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
 | `src/client/project-home.tsx` | Owned project list and the name-and-goal creation form |
 | `src/client/project-conversation.tsx` | Persistent project discussion, input status, draft distinction and retry |
+| `src/client/project-materials.tsx` | Project knowledge proposals and registered resource browsing/revocation |
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
 | `src/client/api.ts` | Calls and polls of the management API, typed by `src/app/api.ts`, and the Decision filters of the Eval status |
 | `src/client/route.ts` | The tabs, the settings groups, the typed routes that `parseRoute` reads, and the route memory with the settings group opened last |
@@ -462,7 +475,7 @@ Project context and fact tools omit absent optional properties from their return
 | `tests/bundle-patch.spec.ts` | The bundle's patch, read as DeepSeek Harness reads it, and the agent preset of Executor Sessions it defines |
 | `tests/effects.spec.ts` | The effect queue: coalescing, limits, retries with backoff, health and shutdown |
 | `tests/passes.spec.ts` | Passes: one at a time, the ones asked for during a pass run as one after it, and the runtime health a failed pass reports |
-| `tests/outbox.spec.ts` | The Outbox on a running Runtime: messages wait while processing is paused or their Source is not installed |
+| `tests/outbox.spec.ts` | The Outbox on a running Runtime: messages wait while processing is paused or their Source is not installed, and a queued project message whose repository grant was revoked before Resume settles as channelGone without a provider request |
 | `tests/cache.spec.ts` | `TextCache` |
 | `tests/queue.spec.ts` | The Runtime's work through the effect queue, and what earlier versions stored |
 | `tests/followups.spec.ts` | A person's follow-up on a Ticket's Thread: its notice to the main Session, the tools that act on it, what a burst costs; a worker's hand-back and context follow, and the main Session's note |
@@ -485,8 +498,9 @@ Project context and fact tools omit absent optional properties from their return
 | `tests/project-tool-json.spec.ts` | Actual rc.5 tool output validation of ordinary/reviewer context, absent/current facts, report pages, draft listings and ownership rejection |
 | `tests/project-progress.spec.ts` | Read-only project progress projection, exact attempt/report/artifact gates and lifecycle phases |
 | `tests/project-session.spec.ts` | Completed durable turn projection, interrupted draft exclusion and Session message references |
+| `tests/project-session-skills.spec.ts` | Real Cordis child-scope installation of coordinator and worker managed skill providers/tools, repeated coordinator prepare and empty candidate recovery |
 | `tests/project-auth.spec.ts` | Host admission, stable owner identity, authentication rejection and unavailable-host denial |
-| `tests/project-panel.spec.tsx` | Project creation, navigation, durable discussion, immutable artifact content and explicit semantic review |
+| `tests/project-panel.spec.tsx` | Project creation, navigation, durable discussion, immutable artifact content, explicit semantic review and committed-response-lost knowledge/resource retry with the frozen operation id |
 | `tests/project-assignments-panel.spec.tsx` | One-confirmation decomposition preview, all-Assignment progress, current-version gates, branch questions and read-only controls |
 | `tests/task-decomposition.spec.ts` | Atomic multi-Assignment confirmation, dependency acceptance, registration replay and cycle rejection |
 | `tests/assignment-dependencies.spec.ts` | Current submitted review receipts, bound decisions, stale reports and accepted downstream artifact snapshots |
@@ -508,9 +522,23 @@ Project context and fact tools omit absent optional properties from their return
 | `tests/t6-warm-budget-preflight.spec.ts` | Warm resume admission under another project's unknown physical owner budget occupancy |
 | `tests/t6-budget-projection-preflight.spec.ts` | Runtime model queue reason projection and clearing without overwriting semantic waits |
 | `tests/project-scheduler.spec.ts` | Shared model/worker/background budget admission, fairness, cancellation and live owner settlement |
-| `tests/project-execution.spec.ts` | Authorized worker context, file acceptance, independent owner decisions, terminal receipt replay and stale execution rejection |
+| `tests/project-execution.spec.ts` | Authorized worker context, file acceptance, independent owner decisions, terminal receipt replay, stale execution rejection, a real reported Web PR whose persisted claim keeps an open Follow until that Follow closes, and exact committed PR receipt recovery with no provider read or claim |
 | `tests/artifact-recovery.spec.ts` | Interrupted write intent/effect reconciliation, fixed input versions, corruption/isolation rejection and durable returns after reopen |
-| `tests/project-worker-runtime.spec.ts` | Registered native tools with Session guards, shared worker slots and completed confirmation replay/explicit rerun through the coordinator |
+| `tests/project-worker-runtime.spec.ts` | Registered native tools with Session guards, shared worker slots, completed confirmation replay/explicit rerun through the coordinator, and one transactional project-feedback fact for a scoped human PR follow-up after accepted work, with no false global follow_up |
+| `tests/project-knowledge.spec.ts` | Immutable knowledge provenance, confirmation history, project isolation and reopen restoration |
+| `tests/project-resources.spec.ts` | Registered resource containment, bounded reads, revocation, paging, symlink and version boundaries, and admission-only bounded content capture |
+| `tests/code-validation.spec.ts` | Required code-check receipts block completion until the structured attempt-bound result exists, a replaced lease or cancelled producer never persists a pass, and a process-death running reservation without a native record is recovered for the same operation |
+| `tests/native-validation-job.spec.ts` | Background scheduler ownership and release after validation quiescence |
+| `tests/github-namespace.spec.ts` | Project/resource GitHub namespace isolation for same-number records |
+| `tests/github-project-scope.spec.ts` | Scoped Thread/Ticket/state enumeration and actual poll-path filtering for same-numbered, same-repository project consumers, with no deployment notifications, repository-wide streams or health report from a project consumer |
+| `tests/skill-scope.spec.ts` | Project-private versus explicitly global skill discovery, body authorization, per-project versions and pre-scope migration that preserves confirmed project provenance while hiding ambiguous legacy rows |
+| `tests/repository-verification.spec.ts` | Trusted account/CLI verification of repository push access without deployment-repository equality, now asynchronous and bounded |
+| `tests/skill-catalog.spec.ts` | Role/stage/resource/tool skill filtering, body pinning, stale snapshots and disable recovery |
+| `tests/managed-skill-tools.spec.ts` | Application-managed pinned skill metadata/body loading and scope rejection through registered tool output validation |
+| `tests/project-materials-tools.spec.ts` | Paged material reads, stale/foreign snapshot rejection, confirmed-knowledge gating, retry-safe material writes, owner skill publication, and durable skill-load records |
+| `tests/execution-identity.spec.ts` | Owner-bound repository identity registration and attempt pinning, ambiguity refusal, asynchronous verification outside the write transaction, and a real shell/git boundary with two distinct executions, revoked-binding denial and corrupt/mismatched/missing identity files failing closed |
+| `tests/multi-repository.spec.ts` | Project/resource-scoped repository/account identity and same-number collision separation |
+| `tests/worker-cleanup.spec.ts` | Archive-once retirement of a finished worker Session, refusal while held, pinned, active or occupied, and a mixed workspace that stays registered |
 | `tests/lifecycle-boundaries.spec.ts` | Durable shutdown fences, missing/unloaded owner jobs, fresh retry leases, failed resume gates, pause settle coalescing, stale-worker fencing, semantic review reuse and Store reopen receipt boundaries |
 | `tests/reconciliation.spec.ts` | Authenticated owner reconciliation contract, strict operation schema and persisted server-owned evidence |
 | `tests/t5-reconcile-boundaries.spec.ts` | Permanent reconciliation boundaries for post-await jobs, intent and lease CAS, attempt repair, artifact journals, outbound receipts and failure recovery |

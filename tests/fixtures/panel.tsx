@@ -72,8 +72,8 @@ export async function type(element: HTMLInputElement | HTMLTextAreaElement | HTM
 export const text = () => [...document.body.querySelectorAll('style')].reduce((all, style) => all.replace(style.textContent ?? '', ''),
   document.body.textContent ?? '')
 export function field<E extends HTMLElement>(label: string): E {
-  const labelled = (element: HTMLElement) => !!element.id && all('label').some(item => (item as HTMLLabelElement).htmlFor === element.id
-    && item.textContent === label)
+  const labelled = (element: HTMLElement) => (!!element.id && all('label').some(item => (item as HTMLLabelElement).htmlFor === element.id
+    && item.textContent === label)) || (element.parentElement instanceof HTMLLabelElement && element.parentElement.textContent === label)
   const match = all('input, textarea, select').find(element => element.getAttribute('aria-label') === label || labelled(element))
   if (!match) throw new Error(`No field ${label}`)
   return match as unknown as E

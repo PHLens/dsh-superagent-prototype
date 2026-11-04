@@ -467,6 +467,17 @@ describe('github source', () => {
     expect(h.store.tickets.get('t4')).toMatchObject({ ended: { outcome: 'merged' } })
     h.store.close()
   })
+  it('uses each scoped repository in terminal notice URLs and receipt ids', () => {
+    const channel = { source: 'feishu', thread: 'feishu:oc_1', address: { chatId: 'oc_1' } }
+    const closed = { at: '2026-09-02T00:00:00Z', outcome: 'merged' as const }
+    const terminal = (id: string, namespace: string): Ticket => ({ ...openTicket(id), ended: { by: 'executor', outcome: 'merged', at: closed.at }, channels: [channel],
+      follows: [{ thread: `github:${namespace}:${41}`, own: true, closed }] })
+    const first = pullEndNotices(terminal('a', 'a'.repeat(64)), 'done', () => 'owner/a')[0]!
+    const second = pullEndNotices(terminal('b', 'b'.repeat(64)), 'done', () => 'owner/b')[0]!
+    expect(first.text).toContain('https://github.com/owner/a/pull/41')
+    expect(second.text).toContain('https://github.com/owner/b/pull/41')
+    expect(first.id).not.toBe(second.id)
+  })
   it('writes the terminal notice in English for a request without Han characters', async () => {
     const h = host()
     const request = feishuTrigger({ message_id: 'om_2', chat_id: 'oc_1', chat_type: 'group', sender_id: MEMBER, sender_type: 'user', content: '@bot fix the title', create_time: '1', mentions: [{ id: 'ou_bot' }] }, 'ou_bot', 'cli_bot')!

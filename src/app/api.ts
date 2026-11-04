@@ -91,6 +91,14 @@ export interface Api {
   'GET projects': { response: { projects: Project[] } }
   'POST projects': { body: { name: string; goal: string }; response: { project: Project } }
   'GET projects/:id/conversation': { response: ProjectConversationView }
+  'GET projects/:id/materials': { response: ReturnType<import('./project-coordinator.ts').ProjectCoordinator['materials']> }
+  'POST projects/:id/knowledge': { body: Omit<Parameters<import('./knowledge-store.ts').KnowledgeStore['propose']>[0], 'projectId' | 'state'> & { operationId?: string }; response: import('./knowledge-store.ts').KnowledgeVersion }
+  'POST projects/:id/knowledge/:knowledgeId/confirm': { body?: { operationId?: string }; response: import('./knowledge-store.ts').KnowledgeVersion }
+  'POST projects/:id/resources': { body: Omit<Parameters<import('./project-resources.ts').ProjectResources['register']>[0], 'projectId'> & { operationId?: string }; response: import('./project-resources.ts').Resource }
+  'POST projects/:id/resources/:resourceId/revoke': { body: { operationId?: string }; response: { revoked: true } }
+  'POST projects/:id/skills': { body: { name: string; version: string; description: string; body: string; roles: import('./skill-catalog.ts').SkillRole[]; stages: string[]; resources?: string[]; tools?: string[]; operationId?: string }; response: import('./skill-catalog.ts').SkillRecord }
+  'POST projects/:id/resources/:resourceId/browse': { body: { path?: string; snapshot?: import('./project-resources.ts').ResourceSnapshot; offset?: number; limit?: number }; response: import('./project-resources.ts').ResourceSnapshot }
+  'GET projects/:id/resources/:resourceId/preview': { query: { path: string; version?: string }; response: { content: string; truncated: boolean } }
   'POST projects/:id/messages': { body: { requestId: string; text: string; ticketId?: string; planRevision?: number }; response: { message: ConversationMessage; clarification?: string; authorization?: PlanAuthorization; target?: PlanExecutionTarget; assignment?: Assignment; ticket?: Ticket } }
   'POST projects/:id/plan-confirmation': { body: { ticketId: string; planRevision: number; operationId: string; intent?: 'execute' | 'rerun' }; response: ProjectPlanConfirmationResponse }
   'POST projects/:id/plan-revocation': { body: { ticketId: string; authorizationId: string; operationId: string }; response: PlanAuthorization }

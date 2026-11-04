@@ -7,12 +7,13 @@ import { key, threadKey, validateTicketOwnership, type ChannelRef, type Decision
   type ThreadFacts, type Ticket, type Trigger, type TriggerDisposition } from '../core/index.ts'
 import { KV, type Family, type Key } from '../kv.ts'
 import { SettingsSchema, type Settings, type SettingsOrigin, type SettingsSave } from '../policy.ts'
-import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, migrateTo16, migrateTo17, tooOld } from './migration.ts'
+import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, migrateTo16, migrateTo17, migrateTo18, tooOld } from './migration.ts'
 import { Versions } from './versions.ts'
 import { storeReads } from './store-read.ts'
 import { projectRepository } from './project-store.ts'
 import { CONVERSATION_SCHEMA_SQL } from './conversation-store.ts'
 import { EXECUTION_SCHEMA_SQL } from './execution-attempts.ts'
+import { normalizeSkillRecord } from './skill-catalog.ts'
 import { EVENT_SCHEMA_SQL } from './events.ts'
 
 /** A Trigger's position on its thread timeline, ordered by timestamp and then `id` as tie-breaker. */
@@ -101,13 +102,21 @@ export class Store implements Repositories {
             CREATE INDEX IF NOT EXISTS trigger_thread_at ON trigger_thread(thread, at);
             CREATE INDEX IF NOT EXISTS decision_thread ON decision(thread);
             CREATE INDEX IF NOT EXISTS effect_due ON effect(kind, due, seq);
+            CREATE TABLE IF NOT EXISTS project_knowledge (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, version INTEGER NOT NULL, value TEXT NOT NULL, UNIQUE(project_id, kind, title, version));
+            CREATE TABLE IF NOT EXISTS project_resource (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, value TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS project_resource_project ON project_resource(project_id);
+            CREATE TABLE IF NOT EXISTS skill_catalog (id TEXT PRIMARY KEY, scope TEXT NOT NULL DEFAULT 'global', project_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, version TEXT NOT NULL, value TEXT NOT NULL, UNIQUE(scope, project_id, name, version));
+             CREATE TABLE IF NOT EXISTS code_validation (id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, operation_id TEXT NOT NULL, value TEXT NOT NULL, UNIQUE(attempt_id, operation_id));
           `)
+          this.migrateSkillScope()
+          this.normalizeSkillRows()
           this.db.exec(CONVERSATION_SCHEMA_SQL)
           this.db.exec(`${EXECUTION_SCHEMA_SQL}\n${EVENT_SCHEMA_SQL}`)
           this.addColumns()
           if (version === 10) migrateTo11(this)
           if (version !== undefined && version < 16) migrateTo16(this)
           if (version !== undefined && version < 17) migrateTo17(this)
+           if (version !== undefined && version < 18) migrateTo18(this)
           if (version !== SCHEMA_VERSION) this.set(KV.store.schema, SCHEMA_VERSION)
         })
       } catch (error) {
@@ -141,6 +150,38 @@ export class Store implements Repositories {
     const messageColumns = columns('conversation_message')
     if (!messageColumns.has('request_ticket_id')) this.db.exec('ALTER TABLE conversation_message ADD COLUMN request_ticket_id TEXT')
     if (!messageColumns.has('request_plan_revision')) this.db.exec('ALTER TABLE conversation_message ADD COLUMN request_plan_revision INTEGER')
+  }
+  /** Rebuilds a pre-scope skill table so projects may publish the same name/version independently. */
+  private migrateSkillScope(): void {
+    const row = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='skill_catalog'").get() as { sql?: string } | undefined
+    if (!row?.sql || /\bscope\b/.test(row.sql)) return
+    this.db.exec(`ALTER TABLE skill_catalog RENAME TO skill_catalog_old;
+      CREATE TABLE skill_catalog (id TEXT PRIMARY KEY, scope TEXT NOT NULL DEFAULT 'global', project_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, version TEXT NOT NULL, value TEXT NOT NULL, UNIQUE(scope, project_id, name, version));
+      INSERT INTO skill_catalog (id, scope, project_id, name, version, value) SELECT id, 'global', '', name, version, value FROM skill_catalog_old;
+      DROP TABLE skill_catalog_old;`)
+  }
+  /**
+   * Repairs JSON rows written before provenance was normalized, and keeps the indexed scope columns
+   * consistent with the value. This also handles a database whose skill table already had columns
+   * from an earlier T7 build while its rows still lacked the new fields.
+   */
+  private normalizeSkillRows(): void {
+    const rows = this.db.prepare('SELECT id, value FROM skill_catalog ORDER BY rowid').all() as { id: string; value: string }[]
+    for (const row of rows) {
+      let value: import('./skill-catalog.ts').SkillRecord
+      try { value = JSON.parse(row.value) as import('./skill-catalog.ts').SkillRecord } catch { continue }
+      if (value.scope === 'project' && value.projectId) continue
+      if (value.scope === 'global') continue
+      const normalized = normalizeSkillRecord(value)
+      // A collision with an already-explicit project version must not make migration fail or
+      // overwrite the explicit row. Hide the ambiguous legacy duplicate instead.
+      const conflict = normalized.scope === 'project' && normalized.projectId
+        ? this.db.prepare('SELECT 1 FROM skill_catalog WHERE id<>? AND scope=? AND project_id=? AND name=? AND version=?').get(row.id, 'project', normalized.projectId, normalized.name, normalized.version)
+        : undefined
+      const safe = conflict ? { ...normalized, scope: 'global' as const, projectId: undefined, enabled: false } : normalized
+      this.db.prepare('UPDATE skill_catalog SET scope=?, project_id=?, value=? WHERE id=?')
+        .run(safe.scope, safe.scope === 'project' ? safe.projectId ?? '' : '', JSON.stringify(safe), row.id)
+    }
   }
   /** Closes the underlying SQLite database connection. */
   close(): void { this.db.close() }

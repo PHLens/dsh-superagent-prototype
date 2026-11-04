@@ -14,6 +14,20 @@ export const EXECUTOR_VARIABLES: readonly (VariableSpec & { ticket?: true })[] =
   { key: 'DSH_SUPERAGENT_BLOCKED_COMMANDS', description: { zh: '这个执行环境禁止调用的命令，以空格分隔；不要运行它们', en: 'Commands blocked in this execution environment, separated by spaces; never run them' } },
 ]
 export interface Variable { key: string; value: string; description: Localized; owner: string }
+/** Immutable server-resolved identity captured when an execution is admitted. */
+export interface ExecutionIdentity { executionId: string; projectId: string; repositoryId?: string; repository?: string; accountId?: string; accountCli?: string; gitAuthorName: string; gitAuthorEmail: string; /** Server-owned branch for a project delivery; never accepted from a worker. */ deliveryBranch?: string; capturedAt: string }
+/** One stable server-owned branch per Attempt; a reviewer can identify the delivery without trusting model input. */
+export const deliveryBranchFor = (executionId: string): string => `agent/project-${executionId}`
+export function pinExecutionIdentity(input: Omit<ExecutionIdentity, 'capturedAt'>, now = () => new Date().toISOString()): ExecutionIdentity {
+  for (const key of ['executionId', 'projectId', 'gitAuthorName', 'gitAuthorEmail'] as const) if (!input[key].trim()) throw new Error(`Execution identity ${key} is required`)
+  for (const key of ['repositoryId', 'repository', 'accountId', 'accountCli'] as const) if (input[key] !== undefined && !input[key].trim()) throw new Error(`Execution identity ${key} is invalid`)
+  if (input.deliveryBranch !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(input.deliveryBranch) || input.deliveryBranch.endsWith('/') || input.deliveryBranch.endsWith('.') || input.deliveryBranch.includes('..') || input.deliveryBranch.includes('//'))) throw new Error('Execution identity deliveryBranch is invalid')
+  return { ...input, capturedAt: now() }
+}
+export function identityVariables(identity: ExecutionIdentity): Variable[] {
+  const text = (key: string, value: string) => ({ key, value, owner: 'execution-identity', description: { zh: '本次执行固定的身份', en: 'Identity pinned to this execution' } })
+  return [text('DSH_EXECUTION_ID', identity.executionId), ...(identity.repository ? [text('DSH_REPOSITORY', identity.repository)] : []), ...(identity.accountId ? [text('DSH_GITHUB_ACCOUNT', identity.accountId)] : []), ...(identity.deliveryBranch ? [text('DSH_DELIVERY_BRANCH', identity.deliveryBranch)] : []), text('GIT_AUTHOR_NAME', identity.gitAuthorName), text('GIT_AUTHOR_EMAIL', identity.gitAuthorEmail)]
+}
 
 export const executionRoot = (settings: Settings, stateDir: string): string => settings.executor.directory || join(stateDir, 'work')
 

@@ -9,6 +9,7 @@ import { dirname } from 'node:path'
 import { realpathSync } from 'node:fs'
 import { isDeepStrictEqual } from 'node:util'
 import { ExecutionAttempts } from './execution-attempts.ts'
+import type { ReportAcceptance } from './report-acceptance.ts'
 import { PROJECT_WORKER_RULES } from './prompts.ts'
 import { z } from 'zod'
 import { key, liveTicket, type Ticket } from '../core/index.ts'
@@ -22,11 +23,17 @@ import { initializeRoleModel } from './role-models.ts'
 import { bundledSkills } from './skill-files.ts'
 import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
 import type { Store } from './store.ts'
+import type { SkillCatalog, SkillInvocationPolicy, SkillRole } from './skill-catalog.ts'
+import type { KnowledgeStore } from './knowledge-store.ts'
+import { bindManagedSkills, recordSkillLoad, type ManagedSkillSnapshot, type OnSkillLoaded } from './managed-skills.ts'
+import { managedSkillTools, MANAGED_SKILL_TOOL_NAMES } from './tools/managed-skill.ts'
 import { KV } from '../kv.ts'
-import type { RegisterTool, Tool } from './tools/tool.ts'
+import { plainJsonSchema, type RegisterTool, type Tool } from './tools/tool.ts'
 
 /** Host dependencies used by `Sessions`. */
 export interface SessionsHost {
+  readonly skillCatalog?: SkillCatalog
+  readonly knowledge?: KnowledgeStore
   /** DSH Cordis context: sessions, agents, persistence, and their events. */
   readonly context: Context
   readonly store: Pick<Store, 'tickets' | 'settings' | 'get' | 'set' | 'keys'>
@@ -36,6 +43,10 @@ export interface SessionsHost {
   readonly health: HealthEntry
   readonly masterId: string
   readonly attempts?: ExecutionAttempts
+  /** Durable report receipts used to let exact historical replay pass after live authorization is gone. */
+  readonly reports?: Pick<ReportAcceptance, 'hasReceipt'>
+  /** Live registered-resource grants; pinned skill requirements are re-checked against them. */
+  readonly resources?: Pick<import('./project-resources.ts').ProjectResources, 'granted'>
   readonly lifetime: AbortSignal
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
@@ -60,7 +71,8 @@ declare module '@deepseek-ai/cordis' {
 }
 /** Increment when the managed file-tool contract changes incompatibly; absent versions are the original T4 v1. */
 const PROJECT_WORKER_TOOL_VERSION = 1
-const PROJECT_WORKER_TOOLS = ['project_worker_context', 'project_read_input', 'project_write_artifact', 'project_worker_report', 'project_worker_request_question', 'project_worker_decide']
+const SKILL_INJECTION_TIMEOUT_MS = 3_000
+export const PROJECT_WORKER_TOOLS = ['project_worker_context', 'project_read_input', 'project_read_resource', 'project_validate_code', 'project_write_artifact', 'project_worker_report', 'project_worker_request_question', 'project_worker_decide', ...MANAGED_SKILL_TOOL_NAMES] as const
 /**
  * The DSH tools an Executor Session works with: files, search, the shell and its jobs, the web, skills, its todo list and
  * subagents. It gets no other tool the profile has, whenever it was registered: none that asks or shows a person something,
@@ -221,7 +233,7 @@ export class Sessions {
   /** Returns a tool registrar for `agent` that renders tool output as JSON text and attaches `output.image` as an image when present. */
   private registerTool(agent: Agent, binding: SessionBinding): RegisterTool {
     return (name, description, schema, execute) => {
-      binding.disposers.push(agent.ctx.tools.register({ name, description, parameters: z.toJSONSchema(schema),
+      binding.disposers.push(agent.ctx.tools.register({ name, description, parameters: plainJsonSchema(schema),
         output: { schema: { type: 'object', additionalProperties: true }, render: (_args, value) => {
           const text = { type: 'text' as const, text: JSON.stringify(value) }
           const image = value && typeof value === 'object' && 'image' in value ? (value as { image: never }).image : undefined
@@ -256,7 +268,7 @@ export class Sessions {
     const managed = this.host.attempts?.bySession(agent.id)
     if (managed) {
       const inherited = ['web_search', 'web_fetch'].filter(name => agent.ctx.tools.get(name, scopeParentOf(agent)))
-      const tools = host.tools(agent, ticket).filter(item => PROJECT_WORKER_TOOLS.includes(item.name))
+      const tools = host.tools(agent, ticket).filter(item => (PROJECT_WORKER_TOOLS as readonly string[]).includes(item.name))
       const assignment = ticket!.assignments.find(item => item.id === managed.assignmentId)!
       const reconcile = (reason: string): never => {
         const error = `Worker context reconciliation required: ${reason}`
@@ -268,9 +280,9 @@ export class Sessions {
       if (!managed.context) {
         if (managed.status !== 'prepared' || agent.session.requestHeader()) reconcile('execution snapshot missing for an existing execution')
         managed.context = { toolContractVersion: PROJECT_WORKER_TOOL_VERSION, promptRevision: host.prompts.current().revision,
-          roleRules: PROJECT_WORKER_RULES, projectConventions: 'No additional project conventions registered',
+          roleRules: PROJECT_WORKER_RULES, projectConventions: JSON.stringify(host.knowledge?.list(managed.projectId, { confirmedOnly: true }) ?? []),
           model: agent.session.requestHeader()?.config ?? host.store.settings().executor.model ?? 'Inherited native default; effective request config pending',
-          tools: [...inherited, ...tools.map(item => item.name)], resources: [...assignment.contract!.plan.resources], skills: [] }
+          tools: [...inherited, ...tools.map(item => item.name), ...(managed.skillSnapshot?.length ? MANAGED_SKILL_TOOL_NAMES : [])], resources: [...assignment.contract!.plan.resources], skills: (managed.skillSnapshot ?? []).map(item => ({ name: item.pin.name, version: item.pin.version })) }
         host.attempts!.save(managed)
       }
       const pinned = managed.context
@@ -278,13 +290,41 @@ export class Sessions {
       if (!Number.isInteger(pinned.promptRevision) || pinned.promptRevision < 0 || typeof pinned.roleRules !== 'string' || !pinned.roleRules.trim() || typeof pinned.projectConventions !== 'string') reconcile('instruction snapshot is incomplete')
       if (!Array.isArray(pinned.tools) || !pinned.tools.every(name => typeof name === 'string') || !Array.isArray(pinned.skills)
         || !pinned.skills.every(item => item && typeof item.name === 'string' && typeof item.version === 'string') || !Array.isArray(pinned.resources)) reconcile('capability snapshot is incomplete')
+      // A revoked or missing registration drops out of the grant, so a skill that requires it no longer loads.
+      const authority = host.resources ?? host.attempts?.resourceAuthority
+      const liveResources = (): string[] => pinned.resources.filter(id => authority?.granted(managed.projectId, id) ?? true)
+      const skillSnapshot = managed.skillSnapshot ?? []
+      if (host.skillCatalog && skillSnapshot.length) {
+        const authorizeSkills = () => { host.attempts!.resolve(agent.id); return { projectId: managed.projectId, role: 'worker' as const, stage: 'execute' as const, resources: liveResources(), tools: pinned.tools } }
+        const recordLoad = (value: { id: string; name: string; version: string; bodyHash: string; offset: number; nextOffset: number | null }) => {
+          const current = host.attempts!.bySession(agent.id) ?? managed
+          if (recordSkillLoad(current.skillLoads ??= [], value, new Date().toISOString())) host.attempts!.save(current)
+        }
+        await this.bindManagedSkillScope(agent, binding, host.skillCatalog, skillSnapshot, authorizeSkills, recordLoad)
+        if (this.bindings.get(agent) !== binding) return
+        tools.push(...managedSkillTools({ catalog: host.skillCatalog, snapshots: skillSnapshot, authorize: authorizeSkills, onLoaded: recordLoad }))
+      }
       const unavailable = pinned.tools.filter(name => !inherited.includes(name) && !tools.some(item => item.name === name))
       if (unavailable.length) reconcile(`pinned tools unavailable: ${unavailable.join(', ')}`)
-      if (pinned.skills.length) reconcile(`pinned skills unavailable: ${pinned.skills.map(item => `${item.name}@${item.version}`).join(', ')}`)
+      if (!isDeepStrictEqual(pinned.skills, skillSnapshot.map(item => ({ name: item.pin.name, version: item.pin.version })))) reconcile('skill snapshot differs from execution context')
       if (!isDeepStrictEqual(pinned.resources, assignment.contract!.plan.resources)) reconcile('resource range differs from the Assignment contract')
       binding.disposers.push(agent.ctx.tools.restrict({ allow: inherited.filter(name => pinned.tools.includes(name)) }), agent.ctx.tools.guard(execution => {
-        // Receipt-capable services distinguish exact historical replay from strictly authorized new writes.
-        try { this.host.attempts!.resolve(agent.id, execution.name === 'project_worker_report' || execution.name === 'project_write_artifact' || execution.name === 'project_worker_request_question' || execution.name === 'project_worker_decide') } catch (error) { return String(error) }
+        // Receipt-capable services distinguish exact historical replay from strictly authorized new writes. A durable
+        // report operation may reach its receipt after authorization/resource revocation; a new operation may not.
+        const receiptCapable = execution.name === 'project_worker_report' || execution.name === 'project_write_artifact' || execution.name === 'project_worker_request_question' || execution.name === 'project_worker_decide'
+        const argumentsValue = execution.arguments ?? (execution as { args?: unknown }).args
+        const operationId = execution.name === 'project_worker_report' && argumentsValue && typeof argumentsValue === 'object'
+          ? (argumentsValue as { operation_id?: unknown }).operation_id : undefined
+        const historicalReport = typeof operationId === 'string' && !!this.host.reports?.hasReceipt(agent.id, operationId)
+        try {
+          if (historicalReport) this.host.attempts!.receiptOwner(agent.id)
+          else {
+            this.host.attempts!.resolve(agent.id, receiptCapable)
+            // A live report write must not outrun revocation of any pinned resource it was authorized against.
+            if (execution.name === 'project_worker_report' && !pinned.resources.every(id => this.host.resources?.granted(managed.projectId, id) ?? true))
+              return 'Stale or unauthorized worker execution'
+          }
+        } catch (error) { return String(error) }
         if (!pinned.tools.includes(execution.name)) return 'Tool has no registered project worker contract'
         return undefined
       }), agent.ctx.systemPrompt.section({ name: 'project-worker', order: 9999, interpolate: false, complete: true,
@@ -330,6 +370,34 @@ export class Sessions {
       // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.
       binding.disposers.push(...this.workOnly(agent, ticket!.id))
     }
+  }
+  /** Bind worker managed skills only from the Cordis-injected child scope, then retain one releaser for replay or disposal. */
+  private async bindManagedSkillScope(agent: Agent, binding: SessionBinding, catalog: SkillCatalog, snapshots: readonly ManagedSkillSnapshot[],
+    authorize: () => Omit<SkillInvocationPolicy, 'pin'>, onLoaded: OnSkillLoaded): Promise<void> {
+    let disposeRegistration: (() => void) | undefined
+    // A dependency reload reruns the callback; replace the prior registration without retaining a stale provider.
+    const release = () => { const current = disposeRegistration; disposeRegistration = undefined; current?.() }
+    const fiber = agent.ctx.inject(['skills'], scope => {
+      try { release() } catch (error) { this.ctx.logger.warn('dsh-superagent could not release a worker managed skill registration: %s', String(error)) }
+      disposeRegistration = bindManagedSkills(agent, catalog, snapshots, authorize, scope.skills, onLoaded)
+    })
+    const cleanup = () => {
+      try { release() } catch (error) { this.ctx.logger.warn('dsh-superagent could not release a worker managed skill registration: %s', String(error)) }
+      void fiber.dispose().catch((error: unknown) => { this.ctx.logger.warn('dsh-superagent could not release a worker skill scope: %s', String(error)) })
+    }
+    binding.disposers.push(cleanup)
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([Promise.resolve(fiber), new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Worker skills capability did not become available; reconciliation is required')), SKILL_INJECTION_TIMEOUT_MS)
+      })])
+      if (!disposeRegistration) throw new Error('Worker skills capability is unavailable; reconciliation is required')
+    } catch (error) {
+      cleanup()
+      const index = binding.disposers.lastIndexOf(cleanup)
+      if (index >= 0) binding.disposers.splice(index, 1)
+      throw error
+    } finally { if (timer !== undefined) clearTimeout(timer) }
   }
   /**
    * Whether a Session runs the router preset: as DSH's preset registry last selected it, read through the session projection

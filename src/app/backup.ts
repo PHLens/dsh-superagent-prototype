@@ -63,7 +63,7 @@ function freshRoot(path: string): void {
 export function createRecoveryPoint(store: Store, options: RecoveryOptions): RecoveryManifest {
   const destination = canonicalDestination(options.destination), database = join(destination, RECOVERY_DATABASE)
   const roots = options.roots ?? {}
-  const declared = [...new Set([...roots.workspaces ?? [], ...roots.attachments ?? [], ...roots.nativeState ?? []].map(root => resolve(root)))].sort((a, b) => a.length - b.length || a.localeCompare(b)).filter((root, _, all) => !all.some(parent => parent !== root && root.startsWith(`${parent}${sep}`) && statSafe(parent)?.isDirectory()))
+  const declared = [...new Set([...roots.workspaces ?? [], ...roots.attachments ?? [], ...roots.nativeState ?? [], ...roots.externalResources ?? []].map(root => resolve(root)))].sort((a, b) => a.length - b.length || a.localeCompare(b)).filter((root, _, all) => !all.some(parent => parent !== root && root.startsWith(`${parent}${sep}`) && statSafe(parent)?.isDirectory()))
   const databasePath = resolve(options.databasePath)
   const openedPath = store.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file
   if (typeof openedPath !== 'string' || realpathSync(databasePath) !== realpathSync(openedPath)) throw new Error('Recovery databasePath must identify the open Store database')
@@ -111,6 +111,13 @@ export function createRecoveryPoint(store: Store, options: RecoveryOptions): Rec
     const path = join('managed-files', managedName(root))
     copy(root, join(destination, path))
     if (statSafe(join(destination, path))) manifest.mappings.push({ source: root, path, kind: stat.isDirectory() ? 'directory' : 'file' })
+  }
+  // A registered Resource is an exact application material boundary. A credential-shaped descendant
+  // is intentionally not exported, but its omission means this recovery point cannot be complete.
+  const externalRoots = (roots.externalResources ?? []).map(root => resolve(root))
+  for (const excluded of manifest.excluded) {
+    const path = resolve(excluded.path)
+    if (externalRoots.some(root => within(root, path)) && !manifest.incomplete.includes(path)) manifest.incomplete.push(path)
   }
   for (const session of options.nativeSessions ?? []) {
     if (!session.id || !Number.isSafeInteger(session.inheritedEventCount) || session.inheritedEventCount < 0 || !Array.isArray(session.events)) {
@@ -239,7 +246,7 @@ export function restoreRecoveryPoint(source: string, destination: string): Recov
       const update = restoredDb.prepare(`UPDATE ${table} SET value = ? WHERE id = ?`)
       for (const row of rows) update.run(JSON.stringify(rewrite(JSON.parse(row.value))), row.id)
     }
-    for (const table of ['worker_artifact', 'worker_report', 'execution_attempt', 'ticket', 'project']) rewriteRows(table)
+    for (const table of ['worker_artifact', 'worker_report', 'execution_attempt', 'ticket', 'project', 'project_resource']) rewriteRows(table)
     const mappings = restoredDb.prepare('SELECT project_id, generation, cwd FROM conversation_mapping').all() as { project_id: string; generation: number; cwd: string }[]
     const updateMapping = restoredDb.prepare('UPDATE conversation_mapping SET cwd = ? WHERE project_id = ? AND generation = ?')
     for (const mapping of mappings) updateMapping.run(relocate(mapping.cwd), mapping.project_id, mapping.generation)

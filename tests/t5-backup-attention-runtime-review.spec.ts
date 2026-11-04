@@ -1,13 +1,17 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { dirname, join } from 'node:path'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { startRuntime, type Host } from './fixtures/host.ts'
 import { waitUntil } from './fixtures/async.ts'
 import { Store } from '../src/app/store.ts'
 import { ExecutionAttempts } from '../src/app/execution-attempts.ts'
+import { ProjectResources } from '../src/app/project-resources.ts'
+import { Projects } from '../src/core/projects.ts'
+import { ConversationStore } from '../src/app/conversation-store.ts'
 import { ArtifactStore } from '../src/app/artifact-store.ts'
 import { createRecoveryPoint, restoreRecoveryPoint } from '../src/app/backup.ts'
+import { validationJobPersistence, type ValidationJobRecord } from '../src/app/native-validation-job.ts'
 
 let h: Host | undefined, root: string
 beforeEach(() => { root = mkdtempSync(join(tmpdir(), 't5-integration-review-')); h = undefined })
@@ -79,6 +83,71 @@ it('the actual Runtime backup restores managed artifacts without reading the ori
   } finally { store.close() }
 })
 
+it('captures registered external resources and restores detached exact material', async () => {
+  h = await startRuntime()
+  const c = h.runtime.projectCoordinator, project = c.create('owner', { name: 'Registered resource recovery', goal: 'Preserve one material file' })
+  const source = join(root, 'registered-resource.txt'); writeFileSync(source, 'detached resource bytes\n')
+  const tree = join(root, 'registered-tree'); mkdirSync(tree); writeFileSync(join(tree, 'nested.txt'), 'nested resource bytes\n')
+  const resource = await c.registerResource('owner', project.id, { type: 'file', path: source, purpose: 'context', maxBytes: 64_000 }, 'registered-resource')
+  const directory = await c.registerResource('owner', project.id, { type: 'directory', path: tree, purpose: 'context-tree', maxBytes: 64_000 }, 'registered-resource-tree')
+  const nested = await c.registerResource('owner', project.id, { type: 'file', path: join(tree, 'nested.txt'), purpose: 'context-nested', maxBytes: 64_000 }, 'registered-resource-nested')
+  const copies = join(root, 'registered-copies')
+  h.runtime.backup.start({ enabled: false, directory: copies, intervalMinutes: 5, retention: 7 })
+  const manifest = await h.runtime.backup.run('manual'), point = join(copies, readdirSync(copies)[0]!)
+  const canonicalSource = realpathSync(source), canonicalTree = realpathSync(tree)
+  expect(manifest.boundaries.externalResources).toEqual(expect.arrayContaining([canonicalSource, canonicalTree, realpathSync(join(tree, 'nested.txt'))]))
+  expect(manifest.mappings).toContainEqual(expect.objectContaining({ source: canonicalSource, kind: 'file' }))
+  expect(manifest.mappings).toContainEqual(expect.objectContaining({ source: canonicalTree, kind: 'directory' }))
+  const mapping = manifest.mappings.find(item => item.source === canonicalSource)!
+  expect(readFileSync(join(point, mapping.path), 'utf8')).toBe('detached resource bytes\n')
+
+  await h.runtime.stop()
+  const hidden = `${source}.hidden`; renameSync(source, hidden)
+  const restoredRoot = join(root, 'registered-restored')
+  h.runtime.backup.restore(point, restoredRoot)
+  const restored = new Store(join(restoredRoot, 'orchestrator.sqlite'))
+  try {
+    const resources = new ProjectResources(restored), saved = resources.get(project.id, resource.id), restoredDirectory = resources.get(project.id, directory.id), restoredNested = resources.get(project.id, nested.id)
+    expect(saved.path.startsWith(realpathSync(restoredRoot))).toBe(true)
+    expect(resources.download(project.id, resource.id, '').toString()).toBe('detached resource bytes\n')
+    expect(resources.browse(project.id, resource.id).entries).toHaveLength(1)
+    expect(restoredDirectory.path.startsWith(realpathSync(restoredRoot))).toBe(true)
+    expect(restoredNested.path.startsWith(`${restoredDirectory.path}/`)).toBe(true)
+    expect(resources.download(project.id, nested.id, '').toString()).toBe('nested resource bytes\n')
+  } finally { restored.close() }
+})
+
+it('refuses a complete application point when a registered directory contains an excluded child', async () => {
+  h = await startRuntime()
+  const c = h.runtime.projectCoordinator, project = c.create('owner', { name: 'Incomplete resource recovery', goal: 'Keep exact registered material' })
+  const tree = join(root, 'registered-with-secret'); mkdirSync(tree); writeFileSync(join(tree, 'public.txt'), 'public'); writeFileSync(join(tree, '.env'), 'PRIVATE=value')
+  await c.registerResource('owner', project.id, { type: 'directory', path: tree, purpose: 'context', maxBytes: 64_000 }, 'registered-with-secret')
+  const copies = join(root, 'incomplete-copies'); h.runtime.backup.start({ enabled: false, directory: copies, intervalMinutes: 5, retention: 7 })
+  await expect(h.runtime.backup.run('manual')).rejects.toThrow(/incomplete/i)
+  const point = join(copies, readdirSync(copies)[0]!), manifest = JSON.parse(readFileSync(join(point, 'manifest.json'), 'utf8'))
+  expect(manifest.excluded).toContainEqual(expect.objectContaining({ path: expect.stringMatching(/\/\.env$/) }))
+  expect(manifest.incomplete).toContainEqual(expect.stringMatching(/\/\.env$/))
+  expect(existsSync(join(point, 'INCOMPLETE'))).toBe(true)
+  expect(h.runtime.backup.list()).toEqual([])
+})
+
+it('allows the semantically read-only Resource browse POST in safe restore while rejecting writes', async () => {
+  let seededProject = '', seededResource = ''
+  h = await startRuntime(store => {
+    const db = String(store.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file)
+    writeFileSync(join(dirname(db), 'restore-profile.json'), JSON.stringify({ execution: false, model: false, outbound: false }))
+    const projects = new Projects({ repo: store }), project = projects.create({ name: 'Recovery browse', goal: 'Read materials only' })
+    const conversations = new ConversationStore(store); conversations.claimProject(project.id, 'owner', { newlyCreated: true })
+    const path = join(root, 'recovery-browse.txt'); writeFileSync(path, 'read-only resource')
+    seededProject = project.id
+    seededResource = new ProjectResources(store).register({ projectId: project.id, type: 'file', path, purpose: 'context', maxBytes: 64_000 }).id
+  })
+  expect(h.runtime.safeRestore).toBe(true)
+  expect(await h.api('POST', `projects/${seededProject}/resources/${seededResource}/browse`, { path: '', offset: 0, limit: 10 }))
+    .toMatchObject({ status: 200, body: { path: '', entries: [expect.objectContaining({ name: 'recovery-browse.txt', path: '', kind: 'file' })] } })
+  expect(await h.api('POST', 'projects', { name: 'Blocked', goal: 'Blocked' })).toMatchObject({ status: 400 })
+})
+
 it('safeRestore does not schedule backup writes or retention into the inherited destination', async () => {
   const copies = join(root, 'copies'), unrelated = join(copies, '000-user-documents')
   mkdirSync(unrelated, { recursive: true }); writeFileSync(join(unrelated, 'keep.txt'), 'Synthetic restore destination sentinel')
@@ -93,6 +162,23 @@ it('safeRestore does not schedule backup writes or retention into the inherited 
   console.log('SAFE RESTORE backup activity', { directories: readdirSync(copies), unrelatedPresent: existsSync(unrelated), health: h.runtime.health.backup })
   expect.soft(readdirSync(copies)).toEqual(['000-user-documents'])
   expect.soft(existsSync(unrelated)).toBe(true)
+})
+
+it('a read-only restore leaves an unknown native validation journal untouched', async () => {
+  const saved: ValidationJobRecord[] = []
+  h = await startRuntime(store => {
+    const db = String(store.db.prepare('PRAGMA database_list').all().find(row => row.name === 'main')?.file)
+    writeFileSync(join(dirname(db), 'restore-profile.json'), JSON.stringify({ execution: false, model: false, outbound: false }))
+    const at = '2026-11-04T00:00:00.000Z'
+    // A durable unknown producer recovered from a backup: no live handle, no trustworthy observer.
+    validationJobPersistence(store).save({ version: 1, id: 'restored-unknown', requestHash: 'prior-request', projectId: 'project-1', ownerId: 'session-1',
+      attemptId: 'attempt-1', lease: 'lease-1', cwd: '/restored/cwd', phase: 'unknown', physicalExit: false, nativeJobId: 'bash-prior', createdAt: at, updatedAt: at })
+    saved.push(...validationJobPersistence(store).list())
+  })
+  expect(h.runtime.safeRestore).toBe(true)
+  // The restore profile neither adopts the occupancy nor rewrites the journal into an exit.
+  expect(validationJobPersistence(h.runtime.store).list()).toEqual(saved)
+  expect(saved).toMatchObject([{ phase: 'unknown', physicalExit: false }])
 })
 
 it('restored database paths refer to copied files even when explicit managed roots were captured', async () => {

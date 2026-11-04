@@ -164,3 +164,48 @@ it('shows only the selected project history and drops unsent input when switchin
   expect(field<HTMLTextAreaElement>(zh.conversationLocalDraft).value).toBe('')
   expect(server.requests.some(request => request.path.includes('tickets') || request.path.includes('executor'))).toBe(false)
 })
+
+
+it('replays a committed knowledge write with the frozen operation id after its response was lost', async () => {
+  server.loseKnowledgeResponse = true
+  at({ page: 'projects', id: 'p1' }); await mount(en)
+  await type(field<HTMLInputElement>('Knowledge title'), 'Lost response note')
+  await type(field<HTMLTextAreaElement>('Content'), 'The server committed this version before the response vanished.')
+  await click('Propose knowledge version')
+  expect(server.materials.knowledge).toHaveLength(1)
+  expect(text()).toContain('Knowledge title')
+  // The fields and the pending operation are still the same user intent, so the retry reuses the
+  // exact operation id and payload; the fixture applies the first write only once.
+  await click('Propose knowledge version')
+  const writes = server.requests.filter(request => request.method === 'POST' && request.path === 'projects/p1/knowledge')
+  expect(writes).toHaveLength(2)
+  expect(writes[0]!.body).toMatchObject({ operationId: expect.any(String), title: 'Lost response note' })
+  expect(writes[1]!.body).toEqual(writes[0]!.body)
+  expect(server.materials.knowledge).toHaveLength(1)
+  expect(text()).toContain('Lost response note')
+  // A changed payload is a new intent, not a replay: it gets a new operation id.
+  await type(field<HTMLInputElement>('Knowledge title'), 'A different note')
+  await type(field<HTMLTextAreaElement>('Content'), 'Different content is a new write.')
+  await click('Propose knowledge version')
+  const changed = server.requests.filter(request => request.method === 'POST' && request.path === 'projects/p1/knowledge')
+  expect(changed).toHaveLength(3)
+  const operationId = (index: number) => (changed[index]!.body as { operationId: string }).operationId
+  expect(operationId(2)).not.toBe(operationId(0))
+  expect(server.materials.knowledge).toHaveLength(2)
+})
+
+it('replays a committed resource registration with the frozen operation id after its response was lost', async () => {
+  server.loseResourceResponse = true
+  at({ page: 'projects', id: 'p1' }); await mount(en)
+  await type(field<HTMLInputElement>('Registered path'), '/srv/project/materials')
+  await click('Register resource')
+  expect(server.materials.resources).toHaveLength(1)
+  await click('Register resource')
+  const writes = server.requests.filter(request => request.method === 'POST' && request.path === 'projects/p1/resources')
+  expect(writes).toHaveLength(2)
+  expect(writes[0]!.body).toMatchObject({ operationId: expect.any(String), path: '/srv/project/materials' })
+  expect(writes[1]!.body).toEqual(writes[0]!.body)
+  expect(server.materials.resources).toHaveLength(1)
+  expect(server.materials.resources[0]).toMatchObject({ path: '/srv/project/materials', type: 'directory', purpose: 'code-source' })
+  expect(text()).toContain('code-source · directory · active')
+})

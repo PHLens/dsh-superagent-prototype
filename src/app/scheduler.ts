@@ -278,6 +278,9 @@ export class ManagedBudgetHooks {
     const owner = this.host.resolve(ownerId)
     if (!owner) return false
     this.syncOwner(owner)
+    // A lease the scheduler still reserves for this owner is durable occupancy, even when the
+    // registry has no live view of it after a restart or an unknown producer.
+    if (this.scheduler.status().some(row => row.ownerId === ownerId)) return false
     return ![...this.uncertain.values()].includes(ownerId)
       && ![...this.shells.values()].some(row => row.owner.ownerId === ownerId)
   }

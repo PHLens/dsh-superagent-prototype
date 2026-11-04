@@ -1,6 +1,7 @@
 /** Application adapter for project plans: authenticated conversation identity and durable plan operations. */
 import { activePlanAssignments, currentAssignmentGraph, Plans, UserError, type Assignment, type AssignmentGraphRevision, type CoordinatorGraphAuthority, type PlanAssignmentInput, type PlanAuthorization, type PlanConfirmationResult, type PlanIntent, type PlanRevision, type Project, type RegisterPlanAssignment, type SavePlan, type Ticket } from '../core/index.ts'
 import type { AssignmentGraphView, ConfirmPlan, ReviseAssignments, RevokePlan } from '../core/plans.ts'
+import type { CodeCheck, PlanContent } from '../core/model.ts'
 import type { Store } from './store.ts'
 import { ConversationStore, type ConversationMessage } from './conversation-store.ts'
 import { ProjectEvents } from './events.ts'
@@ -13,7 +14,7 @@ export interface CoordinatorGraphLease extends CoordinatorGraphAuthority { autho
 /** Binds the core Plans service to the authenticated project conversation. */
 export class ProjectPlans {
   readonly conversations: ConversationStore
-  constructor(private readonly store: Store, private readonly projects: { get(id: string): Project; createDraft(projectId: string, input: { title: string }): Ticket }, conversations = new ConversationStore(store)) {
+  constructor(private readonly store: Store, private readonly projects: { get(id: string): Project; createDraft(projectId: string, input: { title: string }): Ticket }, conversations = new ConversationStore(store), private readonly resolveCheck?: (projectId: string, plan: PlanContent, check: CodeCheck) => CodeCheck) {
     this.conversations = conversations
   }
   private owner(actorId: string, projectId: string): void {
@@ -99,8 +100,53 @@ export class ProjectPlans {
       if (prior && ticket && prior.id !== ticket.id) throw new UserError('planOperationConflict')
       const target = ticket ?? this.projects.createDraft(projectId, { title: input.plan.goal.slice(0, 200) })
       if (target.projectId !== projectId) throw new UserError('projectOwnership')
-      return this.service(actorId, projectId).save({ ...input, projectId, ticketId: target.id })
+      return this.service(actorId, projectId).save({ ...input, plan: this.normalizeCodeChecks(projectId, input.plan), projectId, ticketId: target.id })
     })
+  }
+  /**
+   * The reviewed contract carries exact captured material versions. Resolve the top-level check
+   * first, then every explicit Assignment check against that Assignment's own resource subset.
+   * A matching nested check inherits the top-level result from the same capture boundary; a
+   * genuinely different check is resolved independently. Sharing a resource at two different
+   * content versions is a changed review boundary and fails closed.
+   */
+  private normalizeCodeChecks(projectId: string, plan: PlanContent): PlanContent {
+    const resolve = this.resolveCheck
+    if (!resolve) return plan
+    const captured = new Map<string, string>()
+    const remember = (check: CodeCheck): void => {
+      const refs: [string | undefined, string][] = [[check.sourceResourceId, check.sourceVersion], [check.configResourceId, check.configVersion], [check.runtimeResourceId, check.runtimeVersion ?? '']]
+      for (const [id, version] of refs) {
+        if (!id || !version) continue
+        const known = captured.get(id)
+        if (known !== undefined && known !== version) throw new Error('Code check material changed between resolution steps')
+        captured.set(id, version)
+      }
+    }
+    const topCheck = plan.acceptance?.codeCheck
+    const top = topCheck ? resolve(projectId, plan, topCheck) : undefined
+    if (top) remember(top)
+    const assignments = plan.assignments?.map(assignment => {
+      const nested = assignment.acceptance.codeCheck
+      if (!nested) return assignment
+      // An Assignment may only select from the canonical plan inventory, never from an
+      // undeclared ID placed in its own resource list.
+      const inventory = assignment.resources.filter(id => plan.resources.includes(id))
+      const check = top && this.matchesTopCheck(nested, top, inventory) ? top : resolve(projectId, { ...plan, resources: inventory }, nested)
+      if (check !== top) remember(check)
+      return { ...assignment, acceptance: { ...assignment.acceptance, codeCheck: check } }
+    })
+    return { ...plan, ...(top ? { acceptance: { ...plan.acceptance!, codeCheck: top } } : {}), ...(assignments ? { assignments } : {}) }
+  }
+  /** Compare reviewed check intent, never model-supplied versions. The resolved IDs must also be granted to the Assignment. */
+  private matchesTopCheck(nested: CodeCheck, top: CodeCheck, resources: readonly string[]): boolean {
+    const sameArgs = Array.isArray(nested.args) && Array.isArray(top.args) && nested.args.length === top.args.length
+      && nested.args.every((arg, index) => arg === top.args[index])
+    if (!sameArgs || nested.command !== top.command || nested.profile !== top.profile) return false
+    for (const [explicit, resolved] of [[nested.sourceResourceId, top.sourceResourceId], [nested.configResourceId, top.configResourceId], [nested.runtimeResourceId, top.runtimeResourceId]] as const) {
+      if (explicit !== undefined && explicit !== resolved) return false
+    }
+    return [top.sourceResourceId, top.configResourceId, top.runtimeResourceId].every(id => id === undefined || resources.includes(id))
   }
   get(actorId: string, projectId: string, ticketId: string, revision?: number): PlanRevision {
     return this.service(actorId, projectId).get(projectId, ticketId, revision)
@@ -148,7 +194,7 @@ export class ProjectPlans {
     if (!ticket || ticket.projectId !== projectId) throw new UserError('unknownProject')
     return assignmentFacts(this.store, ticket, input)
   }
-  readFact(actorId: string, projectId: string, input: { ticketId: string; kind: 'report' | 'decision' | 'assignment' | 'artifact'; id: string; contentVersion?: string; offset?: number; limit?: number }) {
+  readFact(actorId: string, projectId: string, input: { ticketId: string; kind: 'report' | 'decision' | 'assignment' | 'artifact' | 'input'; id: string; contentVersion?: string; offset?: number; limit?: number }) {
     this.owner(actorId, projectId); const ticket = this.store.tickets.get(input.ticketId)
     if (!ticket || ticket.projectId !== projectId) throw new UserError('unknownProject')
     return readFact(this.store, ticket, input)

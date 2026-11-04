@@ -1,6 +1,7 @@
 /** Actual Runtime/Sessions decoration and registered guard/tool callbacks in the in-memory DSH fixture. */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { Commands } from '../src/infra/commands.ts'
 import { join } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
@@ -13,9 +14,13 @@ import { ReportAcceptance } from '../src/app/report-acceptance.ts'
 import { projectWorkerTools } from '../src/app/tools/executor.ts'
 import { ProjectPlans } from '../src/app/project-plans.ts'
 import { Projects } from '../src/core/projects.ts'
+import { key, type Ticket } from '../src/core/index.ts'
 import { workerFixture } from './fixtures/project-worker.ts'
 import { startRuntime, type Host } from './fixtures/host.ts'
 import { waitUntil } from './fixtures/async.ts'
+import { commentTrigger } from '../src/sources/github-trigger.ts'
+import { githubFollowId, githubNamespaceOf, githubThreadId } from '../src/sources/github-namespace.ts'
+import { ProjectEvents } from '../src/app/events.ts'
 
 let h: Host
 beforeEach(async () => { h = await startRuntime() })
@@ -235,6 +240,55 @@ it('accepts exact report and artifact receipts through the registered tool guard
   await expect(h.runGuardedTool(sessionId, 'subagent', {})).rejects.toThrow()
 })
 
+it('uses registered repository scope and namespaced receipt ids for terminal PR notices', () => {
+  const c = h.runtime.projectCoordinator, project = c.create('owner', { name: 'Terminal notice scope', goal: 'Keep PR notices exact' })
+  const resource = (repository: string, label: string) => {
+    const item = c.resources.register({ projectId: project.id, type: 'repository', path: h.directory, purpose: label, maxBytes: 64_000 })
+    c.identities.register({ projectId: project.id, resourceId: item.id, repository, accountId: 'agent', accountCli: '/bin/false', gitAuthorName: 'Agent', gitAuthorEmail: 'agent@example.com' })
+    return { item, namespace: githubNamespaceOf({ projectId: project.id, repositoryId: item.id, accountId: 'agent', repository })! }
+  }
+  const a = resource('owner/a', 'repo-a'), b = resource('owner/b', 'repo-b'), channel = { source: 'feishu' as const, thread: 'feishu:oc_notice', address: { chatId: 'oc_notice', direct: 'true' } }
+  const open = (id: string, namespace: ReturnType<typeof githubNamespaceOf>): Ticket => ({ id, projectId: project.id, projectStage: 'confirmed', title: id, decisionId: `d-${id}`,
+    mandate: { strength: 'explicit', policyVersion: '', basis: { via: 'listed' }, actor: { source: 'github', id: 'owner' }, scope: '' }, channels: [channel], assignments: [], inputs: [], undelivered: [],
+    follows: [{ thread: githubFollowId(namespace, 41), own: true }], origin: { triggerId: `missing-${id}`, triggerIds: [] }, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' })
+  h.runtime.store.tickets.save(open('notice-a', a.namespace)); h.runtime.store.tickets.save(open('notice-b', b.namespace))
+  for (const namespace of [a.namespace, b.namespace]) h.runtime.engine.threadClosed({ source: 'github', id: githubFollowId(namespace, 41).replace('github:', '') }, 'merged', '2026-01-02T00:00:00Z')
+  const ids = [a.namespace, b.namespace].map(namespace => key('pr-terminal', githubFollowId(namespace, 41), 'feishu', JSON.stringify(channel.address), 'merged'))
+  expect(new Set(ids).size).toBe(2)
+  expect(h.runtime.store.receipts.get(ids[0]!)?.text).toContain('https://github.com/owner/a/pull/41')
+  expect(h.runtime.store.receipts.get(ids[1]!)?.text).toContain('https://github.com/owner/b/pull/41')
+})
+
+it('keeps a generated worker workspace while generic scheduler occupancy is still unknown', async () => {
+  const { plan, project } = confirmTask('cleanup-owner-occupancy')
+  h.runtime.executor.dispatchProjects(); await waitUntil(() => running().length === 1)
+  const attempt = running()[0]!, agent = h.agents.get(attempt.sessionId)!
+  // A durable owner reservation stands in for a native producer whose physical exit is not yet known.
+  const lease = h.runtime.scheduler.adopt({ id: `unknown-owner:${attempt.sessionId}`, projectId: project.id, ownerId: attempt.sessionId, kind: 'background' })
+  const artifact = await h.runGuardedTool(attempt.sessionId, 'project_write_artifact', { operation_id: 'cleanup-file', output: 'note', name: 'note.md', content: 'Detached material' })
+  await h.runGuardedTool(attempt.sessionId, 'project_worker_report', { operation_id: 'cleanup-ready', state: 'ready', completed: 'Completed while an owner reservation remains', evidence: ['Registered artifact'], artifacts: [{ id: artifact.id, contentVersion: artifact.contentVersion }], unresolved: [] })
+  expect(h.runtime.store.tickets.get(plan.ticketId)?.assignments[0]?.state).toBe('ended')
+  agent.status = 'idle'; agent.inbox.nextTurn.length = 0; agent.inbox.nextStep.length = 0
+
+  const registry = h.ctx.workspaceRegistry as unknown as { archivedSessionIds: string[]; pinnedSessionIds: string[]; archiveSession(id: string): Promise<void>; delete(id: unknown): Promise<boolean>; get(id: unknown): unknown }
+  const archived = new Set<string>([attempt.sessionId]), deleted: unknown[] = []
+  Object.defineProperty(registry, 'archivedSessionIds', { configurable: true, get: () => [...archived] })
+  Object.defineProperty(registry, 'pinnedSessionIds', { configurable: true, get: () => [] })
+  registry.archiveSession = async id => { archived.add(id) }
+  registry.delete = async id => { deleted.push(id); return true }
+  // Simulate a crash after archive and before workspace retirement. The existing fact must not bypass owner exit.
+  h.runtime.store.set('worker-ui-cleanup', { [attempt.id]: { sessionId: attempt.sessionId, archivedAt: new Date().toISOString(), workspaceId: attempt.workspaceId } })
+  const cleanup = (h.runtime as unknown as { workerCleanup: { consider(id: string): Promise<boolean> } }).workerCleanup
+  expect(await cleanup.consider(attempt.id)).toBe(false)
+  expect(deleted).toEqual([])
+  expect(registry.get(attempt.workspaceId as never)).toBeDefined()
+  expect((h.runtime.store.get<Record<string, { workspaceDeletedAt?: string }>>('worker-ui-cleanup') ?? {})[attempt.id]?.workspaceDeletedAt).toBeUndefined()
+
+  lease.release()
+  expect(await cleanup.consider(attempt.id)).toBe(true)
+  expect(deleted).toEqual([attempt.workspaceId])
+})
+
 it('preserves completed confirmation receipts and only reopens for a new explicit authenticated rerun through the coordinator', async () => {
   const { plan, project } = confirmTask('completed-confirmation'), c = h.runtime.projectCoordinator
   const before = h.runtime.store.tickets.get(plan.ticketId)!, originalAssignment = before.assignments[0]!, originalAuthorization = before.authorizations![0]!
@@ -307,4 +361,121 @@ it('shares maxWorkers=1 across two project tasks after the first launch reservat
   await waitUntil(() => h.runtime.projectCoordinator.attempts.all().some(item => item.ticketId === waitingTask.plan.ticketId && item.status === 'running'))
   expect(h.agents.get(firstAttempt.sessionId)?.status).toBe('idle')
   expect([...h.agents.values()].filter(agent => agent.id.startsWith('project-worker-') && agent.status === 'running')).toHaveLength(1)
+})
+
+it('records one durable project feedback fact for a human scoped PR follow-up after accepted work, without a false global follow-up', async () => {
+  const c = h.runtime.projectCoordinator
+  const project = c.create('owner', { name: 'Feedback project', goal: 'One accepted note' })
+  c.conversations.appendUser(project.id, 'owner', { clientRequestKey: 'feedback-original', text: 'Write one note' })
+  const plan = c.plans.save('owner', project.id, { expectedRevision: 0, operationId: 'feedback-plan', plan: {
+    goal: 'One accepted note', scope: 'One note', outputs: ['note'], resources: [], environment: 'Managed file worker', cost: 'One worker',
+    completion: 'Nonempty note', acceptance: { version: 1, mode: 'registered-files' },
+  } })
+  const confirmed = c.confirm('owner', project.id, { ticketId: plan.ticketId, planRevision: 1, operationId: 'feedback-confirm', intent: 'execute' })
+  const ticket = h.runtime.store.tickets.get(plan.ticketId)!
+  const assignment = ticket.assignments[0]!
+  const attempt = c.attempts.allocate(confirmed.ticket, assignment)
+  c.attempts.prepare(attempt)
+  c.attempts.pinIdentity(attempt.id, { executionId: attempt.id, projectId: project.id, repositoryId: 'feedback-resource', repository: 'acme/widgets',
+    accountId: 'agent-bot', accountCli: '/bin/false', gitAuthorName: 'Agent', gitAuthorEmail: 'agent@example.com',
+    deliveryBranch: 'agent/project-feedback', capturedAt: '2026-11-02T09:59:00Z' })
+  const artifact = c.artifacts.write(attempt.sessionId, { operationId: 'feedback-file', output: 'note', name: 'note.md', content: '# Note\nAccepted work.' })
+  const namespace = githubNamespaceOf({ projectId: project.id, repositoryId: 'feedback-resource', accountId: 'agent-bot', repository: 'acme/widgets' })!
+  const threadKey = githubThreadId(namespace, 41)
+  const pull = { number: 41, state: 'open', html_url: 'https://github.com/acme/widgets/pull/41', user: { login: 'agent-bot' },
+    head: { sha: 'abc', ref: 'agent/project-feedback', repo: { full_name: 'acme/widgets' } } }
+  c.reports.submit(attempt.sessionId, { operationId: 'feedback-report', state: 'ready', completed: 'Wrote the note',
+    evidence: ['Read the exact note'], artifacts: [{ id: artifact.id, contentVersion: artifact.contentVersion }], unresolved: [],
+    prUrl: pull.html_url }, pull)
+  const accepted = h.runtime.store.tickets.get(ticket.id)!
+  expect(accepted.ended).toBeUndefined()
+  expect(accepted.assignments[0]?.state).toBe('ended')
+  expect(c.attempts.bySession(attempt.sessionId)?.status).toBe('ended')
+
+  const trigger = commentTrigger({ id: 4101, body: 'Please continue this accepted work.', user: { login: 'alice', type: 'User' },
+    created_at: '2026-11-02T10:00:00Z', html_url: 'https://github.com/acme/widgets/pull/41#issuecomment-4101' },
+    { number: 41, isPr: true, url: 'https://github.com/acme/widgets/pull/41' }, 'conversation', 'agent-bot', namespace)
+  expect(h.runtime.receive(trigger)).toBe('stored')
+  const persisted = h.runtime.store.tickets.get(ticket.id)!
+  const input = persisted.inputs.find(item => item.kind === 'trigger' && item.triggerId === trigger.id)!
+  expect(input).not.toHaveProperty('deliveredTo')
+  expect(input).not.toHaveProperty('deliveredAt')
+  expect(persisted.undelivered).not.toContain(input.id)
+  const events = new ProjectEvents(h.runtime.store)
+  const pending = events.pending(project.id).filter(event => event.kind === 'project-feedback')
+  expect(pending).toHaveLength(1)
+  expect(pending[0]).toMatchObject({ projectId: project.id, ticketId: ticket.id, triggerId: trigger.id, inputId: input.id,
+    scope: 'assignment', assignmentId: assignment.id, attemptId: attempt.id, resourceIds: ['feedback-resource'],
+    feedback: { triggerId: trigger.id, inputId: input.id,
+      text: 'Please continue this accepted work.', threadKeys: [threadKey] } })
+  expect(h.runtime.receive(trigger)).toBe('duplicate')
+  expect(events.pending(project.id).filter(event => event.kind === 'project-feedback')).toHaveLength(1)
+  expect(h.relays(h.runtime.masterId).filter(item => item.kind === 'follow_up' && item.trigger_id === trigger.id)).toEqual([])
+
+  // The Trigger, its Ticket input and the fact are one intake transaction: a fact write failure leaves none of them.
+  const rejected = commentTrigger({ id: 4102, body: 'This must roll back.', user: { login: 'alice', type: 'User' },
+    created_at: '2026-11-02T10:01:00Z', html_url: 'https://github.com/acme/widgets/pull/41#issuecomment-4102' },
+    { number: 41, isPr: true, url: 'https://github.com/acme/widgets/pull/41' }, 'conversation', 'agent-bot', namespace)
+  const append = vi.spyOn(ProjectEvents.prototype, 'append').mockImplementationOnce(() => { throw new Error('feedback fact failed') })
+  try { expect(() => h.runtime.receive(rejected)).toThrow('feedback fact failed') } finally { append.mockRestore() }
+  expect(h.runtime.store.triggers.get(rejected.id)).toBeUndefined()
+  expect(h.runtime.store.tickets.get(ticket.id)!.inputs.some(item => item.kind === 'trigger' && item.triggerId === rejected.id)).toBe(false)
+  expect(h.runtime.receive(rejected)).toBe('stored')
+  const feedback = events.pending(project.id).filter(event => event.kind === 'project-feedback')
+  expect(feedback).toHaveLength(2)
+  expect(feedback.find(event => event.triggerId === rejected.id)).toMatchObject({ inputId: expect.any(String) })
+
+  // The project lane must not discard the fact as ordinary dependency progress: it wakes and claims it.
+  h.runtime.projectCoordinator.pumpEvents()
+  await waitUntil(() => events.feedback(project.id) !== undefined)
+  expect(events.feedback(project.id)?.events).toContainEqual(expect.objectContaining({ kind: 'project-feedback', triggerId: trigger.id }))
+})
+
+it('returns an exact committed PR report through the registered native guard after authorization revocation', async () => {
+  const c = h.runtime.projectCoordinator, project = c.create('owner', { name: 'Guarded PR replay', goal: 'Exact receipt after revocation' })
+  const cli = h.runtime.deployment.github!.cli
+  writeFileSync(cli, '#!/bin/sh\nif [ "$1" = api ] && [ "$2" = user ]; then echo agent-bot; exit 0; fi\nif [ "$1" = api ] && [ "$2" = repos/acme/widgets ]; then printf "acme/widgets\\ttrue\\n"; exit 0; fi\nexit 1\n', { mode: 0o700 })
+  const repository = mkdtempSync(join(h.directory, 'guarded-replay-repo-'))
+  const repo = await c.registerResource('owner', project.id, { type: 'repository', path: repository, purpose: 'repository', maxBytes: 10_000,
+    identity: { repository: 'acme/widgets', gitAuthorName: 'Fixture', gitAuthorEmail: 'fixture@example.invalid' } }, 'guarded-replay-repo')
+  c.conversations.appendUser(project.id, 'owner', { clientRequestKey: 'guarded-replay-origin', text: 'Deliver a reviewed PR' })
+  const plan = c.plans.save('owner', project.id, { expectedRevision: 0, operationId: 'guarded-replay-plan', plan: { goal: 'Deliver a reviewed PR',
+    scope: 'Registered repository', outputs: ['note'], resources: [repo.id], environment: 'Managed', cost: 'One worker',
+    completion: 'Reviewed delivery', acceptance: { version: 1, mode: 'registered-files' } } })
+  c.conversations.appendUser(project.id, 'owner', { clientRequestKey: 'guarded-replay-confirm', text: '按这个方案做' })
+  const confirmed = c.confirm('owner', project.id, { ticketId: plan.ticketId, planRevision: 1, operationId: 'guarded-replay-confirm', intent: 'execute' })
+  h.runtime.executor.dispatchProjects()
+  await waitUntil(() => running().length === 1)
+  const attempt = running()[0]!
+  await h.runtime.sessions.ensure(attempt.sessionId, attempt.cwd, 'Guarded replay worker', 'worker')
+
+  const pr = { number: 7, title: 'Guarded replay', state: 'open', html_url: 'https://github.com/acme/widgets/pull/7', user: { login: 'agent-bot' },
+    head: { sha: 'a'.repeat(40), ref: attempt.identity!.deliveryBranch!, repo: { full_name: 'acme/widgets' } } }
+  let reads = 0
+  const api = vi.spyOn(Commands.prototype, 'api').mockImplementation(async function(this: Commands, schema: any, ...args: any[]) {
+    const raw = typeof schema === 'string', path = raw ? schema : args[0], value = path === 'pulls/7' ? pr : path.startsWith('notifications?') ? [] : {}
+    if (path === 'pulls/7') reads++
+    return raw ? (typeof value === 'string' ? value : JSON.stringify(value)) : schema.parse(value)
+  } as any)
+  const pages = vi.spyOn(Commands.prototype, 'pages').mockResolvedValue([])
+  try {
+    const artifact = await h.runGuardedTool(attempt.sessionId, 'project_write_artifact', { operation_id: 'guarded-replay-file', output: 'note', name: 'note.md', content: 'Guarded replay evidence' })
+    const args = { operation_id: 'guarded-replay-report', state: 'progress' as const, completed: 'Opened the guarded PR', evidence: ['Read the exact PR'],
+      artifacts: [{ id: artifact.id, contentVersion: artifact.contentVersion }], unresolved: [], pr_url: pr.html_url }
+    const first = await h.runGuardedTool(attempt.sessionId, 'project_worker_report', args)
+    expect(first).toMatchObject({ received: true })
+    expect(reads).toBe(1)
+    const ticket = h.runtime.store.tickets.get(plan.ticketId)!, bind = vi.spyOn(h.runtime.engine, 'bindThread')
+    const auth = ticket.authorizations!.find(item => item.id === confirmed.authorization.id)!
+    auth.revokedAt = new Date().toISOString(); h.runtime.store.tickets.save(ticket)
+    c.revokeResource('owner', project.id, repo.id, 'guarded-replay-revoke')
+    api.mockImplementation(async (..._args: any[]) => { reads++; throw new Error('provider unavailable') })
+    const owner = vi.spyOn(c.attempts, 'receiptOwner')
+    const replay = await h.runGuardedTool(attempt.sessionId, 'project_worker_report', args)
+    expect(replay).toEqual(first); expect(owner).toHaveBeenCalled()
+    expect(reads).toBe(1); expect(bind).not.toHaveBeenCalled(); expect(c.reports.reports(ticket.id)).toHaveLength(1)
+    await expect(h.runGuardedTool(attempt.sessionId, 'project_worker_report', { ...args, completed: 'Changed content' })).rejects.toThrow(/conflict/)
+    await expect(h.runGuardedTool(attempt.sessionId, 'project_worker_report', { ...args, operation_id: 'guarded-replay-new' })).rejects.toThrow(/unauthorized|Stale/)
+    expect(reads).toBe(1); expect(bind).not.toHaveBeenCalled(); expect(c.reports.reports(ticket.id)).toHaveLength(1)
+  } finally { api.mockRestore(); pages.mockRestore(); vi.restoreAllMocks() }
 })

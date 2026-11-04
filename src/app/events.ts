@@ -4,8 +4,51 @@ import { randomUUID } from 'node:crypto'
 export type FeedbackBatch = { id: string; projectId: string; events: ProjectEvent[]; prompt: string; generation: number; stateVersion: number; inputId: string; lease: string; phase: 'claimed' | 'replied' | 'committed' | 'abandoned'; sessionId?: string; turn?: string; dshMessageId?: string; replyText?: string }
 export const EVENT_SCHEMA_SQL = `CREATE TABLE IF NOT EXISTS project_event (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, ticket_id TEXT NOT NULL, payload TEXT NOT NULL, consumed_at TEXT); CREATE INDEX IF NOT EXISTS project_event_pending ON project_event(project_id, consumed_at);
 CREATE TABLE IF NOT EXISTS project_event_delivery (event_id TEXT PRIMARY KEY, attempts INTEGER NOT NULL, retry_at INTEGER NOT NULL, error TEXT, generation INTEGER);`
-export type ProjectEventKind = 'assignment-ready' | 'report-recorded' | 'artifact-registered' | 'acceptance-changed' | 'question-answered' | 'reconcile'
-export interface ProjectEvent { id: string; projectId: string; ticketId: string; assignmentId?: string; kind: ProjectEventKind; version: string; operationId: string; at: string }
+export type ProjectEventKind = 'assignment-ready' | 'report-recorded' | 'artifact-registered' | 'acceptance-changed' | 'question-answered' | 'reconcile' | 'project-feedback'
+/** Bounded, exact human feedback carried by a project-feedback event; the input itself stays an ordinary Ticket input. */
+export interface ProjectFeedback {
+  triggerId: string
+  inputId: string
+  source: string
+  text: string
+  textTruncated: boolean
+  threadKeys: string[]
+  at: string
+  /** Authorized exact input read when this bounded preview is truncated. */
+  readExact?: { tool: 'project_read_fact'; ticket_id: string; kind: 'input'; id: string }
+  actorId?: string
+  url?: string
+  number?: number
+  isPr?: boolean
+  kind?: string
+}
+export interface ProjectEvent {
+  id: string
+  projectId: string
+  ticketId: string
+  assignmentId?: string
+  /** The Attempt named by durable report evidence for this Thread, including one that already ended; context, never a reusable lease. */
+  attemptId?: string
+  /** Whether durable PR/report evidence identified the Assignment/Attempt that owns the reached Thread, or this fact is Task-scoped. */
+  scope?: 'assignment' | 'task'
+  /** The durable report whose PR URL owned this Thread; readable even after the Assignment retired. */
+  reportId?: string
+  reportOperationId?: string
+  /** Confirmed resource ids visible to this Task at intake, for project_read_resource and authorization checks. */
+  resourceIds?: string[]
+  authorizationId?: string
+  budgetSlot?: string
+  /** The Task's pause/stop intent at intake; feedback never silently resumes a paused or stopped Task. */
+  boundary?: { pause: string; stop: string }
+  kind: ProjectEventKind
+  version: string
+  operationId: string
+  at: string
+  /** Set on project-feedback: the exact scoped Trigger, saved input, and bounded payload. */
+  triggerId?: string
+  inputId?: string
+  feedback?: ProjectFeedback
+}
 /** Persists idempotent project facts inside the caller's transaction and retains pending delivery across restarts. */
 export class ProjectEvents {
   constructor(private readonly store: Store) {}

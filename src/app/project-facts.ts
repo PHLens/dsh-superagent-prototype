@@ -32,11 +32,19 @@ export function assignmentFacts(store: Store, ticket: Ticket, input: { assignmen
         : a.waitingReason === 'blocked' ? { unresolvedChoice: 'Resolve the reported blockers within authorization or explain the required human choice.' } : {}) }
   })
   return { ticketId: ticket.id, ...(graph ? { currentGraph: { id: graph.id, version: graph.version } } : {}), offset, total: all.length, next_offset: offset + assignments.length < all.length ? offset + assignments.length : null,
-    assignments, readMore: { tool: 'project_read_assignment_facts', ticket_id: ticket.id }, readExact: { tool: 'project_read_fact', ticket_id: ticket.id, kinds: ['report', 'decision', 'assignment', 'artifact'], note: 'Use exact ids above; artifact requires content_version. Assignment pages return contentVersion; pass it as content_version on later pages and restart at offset 0 if stale. Text previews and arrays may be truncated. Page full records with offset/next_offset.' } }
+    assignments, readMore: { tool: 'project_read_assignment_facts', ticket_id: ticket.id }, readExact: { tool: 'project_read_fact', ticket_id: ticket.id, kinds: ['report', 'decision', 'assignment', 'artifact', 'input'], note: 'Use exact ids above; artifact requires content_version; input reads the bounded/exact Trigger text. Assignment pages return contentVersion; pass it as content_version on later pages and restart at offset 0 if stale. Text previews and arrays may be truncated. Page full records with offset/next_offset.' } }
 }
-export function readFact(store: Store, ticket: Ticket, input: { kind: 'report' | 'decision' | 'assignment' | 'artifact'; id: string; contentVersion?: string; offset?: number; limit?: number }) {
+export function readFact(store: Store, ticket: Ticket, input: { kind: 'report' | 'decision' | 'assignment' | 'artifact' | 'input'; id: string; contentVersion?: string; offset?: number; limit?: number }) {
   let record: unknown
   if (input.kind === 'assignment') record = activePlanAssignments(ticket).find(a => a.id === input.id)
+  else if (input.kind === 'input') {
+    const item = ticket.inputs.find(candidate => candidate.id === input.id)
+    if (!item || item.kind !== 'trigger') throw new Error('Input is not a Trigger on this project task')
+    const trigger = store.triggers.get(item.triggerId)
+    if (!trigger) throw new Error('Input Trigger is missing')
+    record = { id: item.id, kind: item.kind, triggerId: item.triggerId, at: item.at, source: trigger.source, text: trigger.text,
+      ...(item.human ? { human: true } : {}), ...(trigger.url ? { url: trigger.url } : {}) }
+  }
   else if (input.kind === 'artifact') {
     const row = store.db.prepare('SELECT value FROM worker_artifact WHERE id=?').get(input.id)
     const artifact = row && JSON.parse(String(row.value)) as Artifact | undefined
