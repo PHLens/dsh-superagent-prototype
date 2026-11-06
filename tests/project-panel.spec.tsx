@@ -24,6 +24,23 @@ it('opens a registered immutable file version and submits independent semantic e
     await click(en.artifactRead)
     expect(server.requests.some(item => item.path === `projects/${f.project.id}/artifacts/${artifact.id}/${artifact.contentVersion}`)).toBe(true)
     expect(text()).toContain('Fixture artifact content')
+    const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:t9-artifact'), revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const requestFetch = vi.spyOn(globalThis, 'fetch')
+    await click(en.artifactDownload)
+    expect(server.requests.some(item => item.path === `projects/${f.project.id}/artifacts/${artifact.id}/${artifact.contentVersion}/download`)).toBe(true)
+    const downloadCall = requestFetch.mock.calls.find(([url]) => String(url).endsWith(`/artifacts/${artifact.id}/${artifact.contentVersion}/download`))
+    expect(downloadCall?.[1]?.headers).toMatchObject({ 'x-orchestrator-request': '1' })
+    expect(createObjectURL).toHaveBeenCalledTimes(1); expect(anchorClick).toHaveBeenCalledTimes(1); expect(revokeObjectURL).toHaveBeenCalledWith('blob:t9-artifact')
+    server.failArtifactDownload = true
+    await click(en.artifactDownload)
+    expect(text()).toContain(en.artifactDownloadError)
+    expect(text()).toContain('Artifact download temporarily unavailable')
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+    server.failArtifactDownload = false
+    await click(en.artifactDownloadRetry)
+    expect(text()).not.toContain(en.artifactDownloadError)
+    expect(createObjectURL).toHaveBeenCalledTimes(2); expect(anchorClick).toHaveBeenCalledTimes(2)
     expect(all('button').find(item => item.textContent === en.acceptancePass)?.hasAttribute('disabled')).toBe(true)
     await type(field<HTMLTextAreaElement>(en.acceptanceEvidence), 'Checked sources and scope against the original request')
     await click(en.acceptancePass)
@@ -123,6 +140,17 @@ it('polls persisted assistant replies and replaces the separate live draft', asy
   expect(server.requests.filter(request => request.path === 'projects/p1/conversation').length).toBeGreaterThan(1)
 })
 
+it('restores an unsent project draft after refresh without leaking it to another project', async () => {
+  at({ page: 'projects', id: 'p1' }); await mount(en)
+  await type(field<HTMLTextAreaElement>(en.conversationLocalDraft), 'Keep this through a reconnect')
+  await remount(en)
+  expect(field<HTMLTextAreaElement>(en.conversationLocalDraft).value).toBe('Keep this through a reconnect')
+  const second = { ...server.projects[0]!, id: 'p2', name: 'Second project' }
+  server.projects.push(second); server.conversations.p2 = { project: second, messages: [], tasks: [] }; server.projectEvents.p2 = []
+  await click(en['tab.projects']); await click('Second project')
+  expect(field<HTMLTextAreaElement>(en.conversationLocalDraft).value).toBe('')
+})
+
 it('reuses the request id after an ambiguous network failure', async () => {
   at({ page: 'projects', id: 'p1' }); await mount(en)
   const actual = globalThis.fetch
@@ -137,11 +165,13 @@ it('reuses the request id after an ambiguous network failure', async () => {
     }
     return result
   })
-  await type(field<HTMLTextAreaElement>(en.conversationLocalDraft), 'Retry safely')
+  await type(field<HTMLTextAreaElement>(en.conversationLocalDraft), '  Retry safely\n')
   await click(en.conversationSend)
-  expect(field<HTMLTextAreaElement>(en.conversationLocalDraft).value).toBe('Retry safely')
+  expect(field<HTMLTextAreaElement>(en.conversationLocalDraft).value).toBe('  Retry safely\n')
   expect(text()).toContain(en.conversationSaveError)
-  await click(en.conversationRetry)
+  // Refresh restores the exact in-flight request id; resubmitting is therefore idempotent.
+  await remount(en)
+  await click(en.conversationSend)
   const requests = server.requests.filter(request => request.path === 'projects/p1/messages')
   expect(requests).toHaveLength(2)
   expect(requests[0]!.body).toEqual(requests[1]!.body)

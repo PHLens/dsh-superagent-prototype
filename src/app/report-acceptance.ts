@@ -250,8 +250,10 @@ export class ReportAcceptance {
       }
       const unresolved = report.unresolved.length ? `\n未决事项：\n${report.unresolved.map(item => `- ${item}`).join('\n')}` : ''
       const text = `${ticket.title}: ${report.completed}\n${reason ? `等待：${reasons[reason] ?? '等待执行条件满足'}` : '已按登记条件完成。'}${unresolved}\n成果：${report.artifacts.length} 个文件，可在成果区查看。`
-      this.store.db.prepare(`INSERT OR IGNORE INTO conversation_message (id,project_id,client_request_key,role,actor_id,text,created_at,status,request_ticket_id) VALUES (?,?,?,'assistant',?,?,?,'saved',?)`)
-        .run(id, attempt.projectId, id, owner.actorId, text, ticket.updatedAt, ticket.id)
+      const inserted = Number(this.store.db.prepare(`INSERT OR IGNORE INTO conversation_message (id,project_id,client_request_key,role,actor_id,text,created_at,status,request_ticket_id) VALUES (?,?,?,'assistant',?,?,?,'saved',?)`)
+        .run(id, attempt.projectId, id, owner.actorId, text, ticket.updatedAt, ticket.id).changes)
+      if (inserted) new ProjectEvents(this.store).append({ id: `conversation:${id}:saved:0:0`, projectId: attempt.projectId,
+        ticketId: ticket.id, kind: 'conversation-message', version: id, operationId: `${id}:saved:0:0`, at: ticket.updatedAt })
     }
   }
 }

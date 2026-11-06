@@ -93,6 +93,7 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
+| `publicOrigin` | no | One exact `https://` origin served by Tailscale Serve, such as `https://machine.tailnet.ts.net`. Wildcards, credentials, paths, port-normalization aliases and Funnel are not accepted. Leave empty for loopback-only access |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
 
 After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
@@ -109,6 +110,8 @@ scripts/dsh-superagent status
 `stop` and `restart` request graceful shutdown and wait up to five minutes for Executors. They never force-kill the process or touch other tmux sessions.
 
 `status` prints process ids and the minimal supervision health probe. The probe contains only runtime state and boolean component-error/setup-required flags; it does not expose accounts, paths, settings or other management state. For a different profile or port, use `--profile` and `--url`, or set `DSH_SUPERAGENT_PROFILE` and `DSH_SUPERAGENT_URL`.
+
+For an HTTPS reverse proxy such as Tailscale Serve, pass DSH Web the exact public root and trusted authority together: `--public-url https://machine.tailnet.ts.net/ --trusted-host machine.tailnet.ts.net`. Set `DSH_SUPERAGENT_PUBLIC_URL` and space-separated `DSH_SUPERAGENT_TRUSTED_HOSTS` in the environment used by `start`/`restart` when a monitor must preserve them across recovery. These configure DSH Web's browser-trust boundary; they do not replace the plugin's matching `publicOrigin`.
 
 `status`, `start` and `restart` exit with one of four codes:
 
@@ -160,7 +163,17 @@ Setup must succeed before polling or work starts. Overview lists missing require
 
 The panel uses a local HTTP API that agents can also call. `SETUP.md` uses it to save settings, and the service script reads `GET state`.
 
-Send requests to `http://127.0.0.1:<port>/orchestrator/api/` with `x-orchestrator-request: 1`. The host must be `127.0.0.1:<port>` or `localhost:<port>`. Missing headers or an `Origin` from another site receive 403.
+Send local requests to `http://127.0.0.1:<port>/orchestrator/api/` with `x-orchestrator-request: 1`. The local host must be `127.0.0.1:<port>` or `localhost:<port>`. When `publicOrigin` is configured, tailnet requests must use that exact Host and HTTPS Origin. Wildcard hosts, forwarded-host spoofing and origins from another site receive 403. The backend still binds only to loopback; Tailscale network reachability never replaces DSH login authentication.
+
+For remote browser access, run Tailscale Serve against the loopback listener and leave Funnel off:
+
+```sh
+tailscale serve --bg --https=443 http://127.0.0.1:3082
+tailscale serve status
+tailscale funnel status
+```
+
+Set the plugin's `publicOrigin` and DSH Web's advertised/trusted values to the exact Serve origin printed by `tailscale serve status`. For example, with `public_url=https://machine.tailnet.ts.net/`, set `publicOrigin` to `https://machine.tailnet.ts.net` without the trailing slash, export `DSH_SUPERAGENT_PUBLIC_URL="$public_url"` and `DSH_SUPERAGENT_TRUSTED_HOSTS="machine.tailnet.ts.net"`, then restart through `scripts/dsh-superagent`. This configures both the DSH login/browser fence and the plugin's Host/Origin fence; configuring only one leaves the remote page blocked. Verify login, project reads/writes, artifact preview/download and the project event reconnection URL from another tailnet device. A successful `GET /orchestrator/health` alone is not remote acceptance.
 
 API saves have the panel's permissions. They can change execution environment and setup account fields, unlike saves made through the main Session's tools.
 
@@ -177,6 +190,8 @@ Agents may rely on these routes and fields. The other routes in `src/app/api.ts`
 | `POST policy-sync/<source id>` | Syncs that Source's allowed list now: `policy`, the Source's part as saved |
 | `GET prompts`, `PUT prompts` with `{"config", "baseRevision"}` | Reads the prompt configuration: `current`, with its `revision` and `config`, `defaults`, `sections`, the team sections in the order Sessions read them, `skillName`, the pattern of a team skill's name, `builtin`, the names a team skill cannot take, and `skillPrefix`, which Sessions load a skill's name under. Or saves it: the new `revision` |
 | `POST tickets/<id>/retry`, `POST tickets/<id>/stop` | Retries or stops a Ticket, as the panel does |
+
+Project pages additionally use `GET projects/home` for pending-first navigation and `GET projects/:id/conversation` for the authoritative project record. `GET projects/:id/artifacts/:artifactId/:version/download` returns only the authenticated owner's exact registered content version as an attachment. `GET projects/:id/events?after=<sequence>&afterId=<id>` resumes durable facts; an unknown or expired cursor includes a fresh conversation snapshot. `GET projects/:id/events/stream` carries the same cursor over authenticated `text/event-stream`; the client keeps polling as its fallback. These routes still require the same origin protection and DSH owner admission as every management operation.
 
 Health entries are grouped by responsibility:
 

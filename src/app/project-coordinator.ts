@@ -19,7 +19,7 @@ import { ExecutionAttempts } from './execution-attempts.ts'
 import { ArtifactStore } from './artifact-store.ts'
 import { ReportAcceptance } from './report-acceptance.ts'
 import { projectProgress } from './project-progress.ts'
-import { ProjectEvents, type FeedbackBatch, type ProjectEvent } from './events.ts'
+import { ProjectEvents, type FeedbackBatch, type ProjectEvent, type ProjectEventPage } from './events.ts'
 import { assignmentFacts } from './project-facts.ts'
 import type { CodeCheck, Ticket } from '../core/model.ts'
 import { KnowledgeStore } from './knowledge-store.ts'
@@ -110,6 +110,11 @@ export class ProjectCoordinator {
   private stopped = false
   private budgetWaitResolver?: (projectId: string) => 'global-budget' | 'project-fairness' | undefined
   setBudgetWaitResolver(resolve: (projectId: string) => 'global-budget' | 'project-fairness' | undefined): void { this.budgetWaitResolver = resolve }
+  private recordHealth(projectId: string, status: 'error' | 'recovered', detail?: string): void {
+    const at = new Date().toISOString(), operationId = randomUUID()
+    this.store.atomic(() => new ProjectEvents(this.store).append({ id: `health:${projectId}:${operationId}`, projectId, ticketId: '',
+      kind: 'health-changed', version: status, operationId, at, health: { status, ...(detail ? { detail } : {}) } }))
+  }
   setScheduler(scheduler: ProjectScheduler, jobs: ValidationNativeJobs): void {
     this.validation.setScheduler(scheduler, { persistence: validationJobPersistence(this.store), jobs, inspectExit: async (record, inspectSignal) => {
       const handle = this.validationHandles.get(record.id)
@@ -215,6 +220,52 @@ export class ProjectCoordinator {
       const project = this.projects.get(owner.projectId); return project ? [project] : []
     })
   }
+  /** Home projection: actionable decisions first, then every owned project with a single operational status. */
+  home(actorId: string) {
+    const projects = this.list(actorId).map(project => {
+      const view = this.view(actorId, project.id)
+      const pending: {
+        id: string; projectId: string; projectName: string; ticketId?: string; taskTitle?: string; assignmentId?: string
+        kind: 'question' | 'confirmation' | 'semantic-review' | 'changes-required' | 'needs-judgment' | 'blocked' | 'failed' | 'coordinator-error'; summary: string; at?: string
+      }[] = []
+      for (const task of view.tasks) {
+        if (task.ended) continue
+        const plan = task.planRevisions?.at(-1)
+        const authorization = plan && task.authorizations?.findLast(item => item.planRevision === plan.revision && !item.revokedAt)
+        if (plan && !authorization) pending.push({ id: `confirmation:${task.id}:${plan.revision}`, projectId: project.id,
+          projectName: project.name, ticketId: task.id, taskTitle: task.title, kind: 'confirmation', summary: plan.goal, at: plan.createdAt })
+        for (const question of [...task.attentionQuestions ?? [], ...(task.attention ? [task.attention] : [])]) {
+          if (question.resolvedAt || pending.some(item => item.id === `question:${question.id}`)) continue
+          pending.push({ id: `question:${question.id}`, projectId: project.id, projectName: project.name, ticketId: task.id, taskTitle: task.title,
+            ...(question.binding?.assignmentId ? { assignmentId: question.binding.assignmentId } : {}), kind: 'question', summary: question.question })
+        }
+        for (const assignment of task.progress?.assignments ?? []) {
+          if (!['semantic-review', 'changes_required', 'needs_judgment', 'blocked', 'failed'].includes(assignment.phase)) continue
+          pending.push({ id: `${assignment.phase}:${assignment.assignmentId}:${assignment.reportId ?? assignment.assignmentId}`,
+            projectId: project.id, projectName: project.name, ticketId: task.id, taskTitle: task.title, assignmentId: assignment.assignmentId,
+            kind: assignment.phase as 'semantic-review' | 'changes-required' | 'needs-judgment' | 'blocked' | 'failed', summary: assignment.title,
+            ...(assignment.reportAt ? { at: assignment.reportAt } : {}) })
+        }
+      }
+      if (view.coordinator.status === 'error') pending.push({ id: `coordinator:${project.id}`, projectId: project.id, projectName: project.name,
+        kind: 'coordinator-error', summary: view.coordinator.error ?? 'Project coordinator unavailable' })
+      const paused = view.tasks.some(task => task.lifecycle?.pause.intent === 'pause' || task.lifecycle?.pause.state === 'paused')
+      const running = view.tasks.reduce((count, task) => {
+        const current = new Set(task.progress?.assignments.map(item => item.assignmentId) ?? [])
+        const tracked = (task.progress?.assignments ?? []).filter(item => ['preparing', 'retrying', 'running'].includes(item.phase)).length
+        const untracked = task.progress ? task.assignments.filter(item => item.state === 'running' && !current.has(item.id)).length : 0
+        return count + tracked + untracked
+      }, 0)
+      const checked = view.tasks.flatMap(task => [task.lifecycle?.observed.at, task.lifecycle?.reconciliation?.observedAt, task.updatedAt]).filter((value): value is string => !!value)
+        .sort().at(-1)
+      const status = view.coordinator.status === 'error' ? 'coordinator-error' as const : paused ? 'paused' as const
+        : pending.some(item => item.kind !== 'coordinator-error') ? 'needs-attention' as const : running ? 'running' as const
+          : view.coordinator.status === 'running' ? 'coordinator-running' as const : 'idle' as const
+      return { project, status, paused, runningAssignments: running, pendingCount: pending.length, ...(checked ? { lastCheckedAt: checked } : {}), pending }
+    })
+    const pending = projects.flatMap(item => item.pending).sort((left, right) => String(right.at ?? '').localeCompare(String(left.at ?? '')))
+    return { pending, projects: projects.map(({ pending: _pending, ...item }) => item) }
+  }
   private project(actorId: string, projectId: string): Project {
     const owner = this.conversations.getOwner(projectId), project = this.projects.get(projectId)
     if (!owner || owner.actorId !== actorId || !project) throw new UserError('unknownProject')
@@ -225,9 +276,19 @@ export class ProjectCoordinator {
     const failure = messages.findLast(message => message.status === 'error')
     const error = this.problems.get(projectId) ?? failure?.error ?? new ProjectEvents(this.store).failure(projectId)
     const tasks = this.plans.tickets(actorId, projectId).map(ticket => ({ ...ticket, progress: this.progress(ticket) }))
+    const reports = tasks.flatMap(task => this.reports.reports(task.id)).map(report => {
+      const message = messages.findLast(item => item.id.startsWith(`worker-result:${report.id}:`))
+      return { ...report, ...(message ? { conversationMessageId: message.id } : {}) }
+    })
     const budgetWait = this.budgetWaitResolver?.(projectId)
-    return { project, messages, tasks, artifacts: this.artifacts.view(projectId), reports: tasks.flatMap(task => this.reports.reports(task.id)), decisions: tasks.flatMap(task => this.reports.decisions(task.id)), coordinator: { status: messages.some(message => message.status === 'running') ? 'running' as const : error ? 'error' as const : 'idle' as const,
+    return { project, messages, tasks, artifacts: this.artifacts.view(projectId), reports, decisions: tasks.flatMap(task => this.reports.decisions(task.id)), coordinator: { status: messages.some(message => message.status === 'running') ? 'running' as const : error ? 'error' as const : 'idle' as const,
       ...(error ? { error } : {}), ...(budgetWait ? { budgetWait } : {}) } }
+  }
+  /** Cursor-based project fact feed; an invalid/expired cursor carries the same authoritative conversation snapshot used on reload. */
+  events(actorId: string, projectId: string, after: number, afterId: string | undefined, limit: number): ProjectEventPage & { snapshot?: ReturnType<ProjectCoordinator['view']> } {
+    this.project(actorId, projectId)
+    const page = new ProjectEvents(this.store).changes(projectId, after, afterId, limit)
+    return page.reset ? { ...page, snapshot: this.view(actorId, projectId) } : page
   }
   materials(actorId: string, projectId: string) { this.project(actorId, projectId); return { knowledge: this.knowledge.list(projectId), resources: this.resources.list(projectId) } }
   /**
@@ -341,6 +402,11 @@ export class ProjectCoordinator {
     const item = this.artifacts.read(projectId, id, version)
     return { id: item.id, name: item.name, contentVersion: item.contentVersion, content: item.content }
   }
+  /** Return immutable UTF-8 artifact bytes after the same project and content-version checks as preview. */
+  artifactDownload(actorId: string, projectId: string, id: string, version: string) {
+    const item = this.artifact(actorId, projectId, id, version)
+    return { id: item.id, name: item.name, contentVersion: item.contentVersion, bytes: Buffer.from(item.content, 'utf8') }
+  }
   private progress(ticket: Ticket) {
     return projectProgress(ticket, { attempts: this.attempts.all(), reports: this.reports.reports(ticket.id),
       decisions: this.reports.decisions(ticket.id), artifacts: this.artifacts.list(ticket.projectId!, ticket.id),
@@ -395,7 +461,7 @@ export class ProjectCoordinator {
       this.conversations.retry(projectId, actorId)
       const mapping = this.conversations.currentMapping(projectId)
       if (mapping) this.store.delete(`project-coordinator-uncertain:${mapping.sessionId}`)
-      this.problems.delete(projectId)
+      if (this.problems.delete(projectId)) this.recordHealth(projectId, 'recovered')
     })
     return { retried: true }
   }
@@ -499,7 +565,10 @@ export class ProjectCoordinator {
     this.store.atomic(() => {
       events.validateFeedback(batch, 'replied')
       const id = `feedback-result:${batch.id}`
-      this.store.db.prepare(`INSERT OR IGNORE INTO conversation_message (id,project_id,client_request_key,role,actor_id,text,created_at,status,mapping_generation,session_id,turn,dsh_message_id) VALUES (?,?,?,'assistant',?,?,?,'saved',?,?,?,?)`).run(id, batch.projectId, id, actorId, batch.replyText!, new Date().toISOString(), batch.generation, batch.sessionId ?? null, batch.turn ?? null, batch.dshMessageId ?? null)
+      const at = new Date().toISOString()
+      const inserted = Number(this.store.db.prepare(`INSERT OR IGNORE INTO conversation_message (id,project_id,client_request_key,role,actor_id,text,created_at,status,mapping_generation,session_id,turn,dsh_message_id) VALUES (?,?,?,'assistant',?,?,?,'saved',?,?,?,?)`).run(id, batch.projectId, id, actorId, batch.replyText!, at, batch.generation, batch.sessionId ?? null, batch.turn ?? null, batch.dshMessageId ?? null).changes)
+      if (inserted) events.append({ id: `conversation:${id}:saved:${batch.generation}:0`, projectId: batch.projectId, ticketId: batch.events[0]?.ticketId ?? '',
+        kind: 'conversation-message', version: id, operationId: `${id}:saved:${batch.generation}:0`, at })
       events.completeFeedback(batch)
     })
   }
@@ -511,7 +580,7 @@ export class ProjectCoordinator {
     if (this.stopped || this.signal.aborted || this.running.has(projectId)) return
     void this.schedule(projectId, actorId, async () => {
       await this.drain(projectId, actorId)
-      this.problems.delete(projectId)
+      if (this.problems.delete(projectId)) this.recordHealth(projectId, 'recovered')
     }).catch(() => {})
   }
   /** Queue retries and drains on one project without retaining a database transaction. */
@@ -520,7 +589,13 @@ export class ProjectCoordinator {
       if (this.stopped || this.signal.aborted) throw new Error('Project coordinator is stopped')
       return work()
     })
-    const tracked = operation.catch(error => { this.problems.set(projectId, error instanceof Error ? error.message : String(error)) })
+    const tracked = operation.catch(error => {
+      const detail = error instanceof Error ? error.message : String(error), firstFailure = !this.problems.has(projectId)
+      this.problems.set(projectId, detail)
+      if (firstFailure) try { this.recordHealth(projectId, 'error', detail) } catch (eventError) {
+        this.problems.set(projectId, `${detail}; health event persistence failed: ${eventError instanceof Error ? eventError.message : String(eventError)}`)
+      }
+    })
       .finally(() => {
         // An older operation must not release the lane now held by a queued retry.
         if (this.running.get(projectId) !== tracked) return

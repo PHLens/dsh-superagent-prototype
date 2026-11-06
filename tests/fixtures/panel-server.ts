@@ -83,13 +83,14 @@ export const problemOf = (code: SetupCode, values: Record<string, string> = {}) 
 // The kinds' configurations differ, and the fake reads them only as the records the views carry.
 const KINDS = [feishuKind, githubKind] as unknown as SourceKind[]
 export const MACHINE = { stateDir: '/srv/dsh-superagent', promptMaxChars: 100000, admissionContextMaxPages: 10,
-  admissionContextTimeoutMs: 15000 }
+  admissionContextTimeoutMs: 15000, publicOrigin: '' }
 
 type Settings = ReturnType<typeof SettingsSchema.parse>
 export interface PanelServer {
   backupPoints: ApiResponse<'GET backup/points'>['points']
   projects: ApiResponse<'GET projects'>['projects']
   conversations: Record<string, ApiResponse<'GET projects/:id/conversation'>>
+  projectEvents: Record<string, ApiResponse<'GET projects/:id/events'>['events']>
   joined?: Record<string, string>; joining?: Record<string, string>
   joinError?: string
   settings: Settings; revisions: Record<string, number>
@@ -116,6 +117,7 @@ export interface PanelServer {
   resourceOperations: Record<string, Resource>
   loseKnowledgeResponse: boolean
   loseResourceResponse: boolean
+  failArtifactDownload: boolean
   dropped: DroppedReply[]
   failing: Extract<Problem, { kind: 'outgoing' }>['outgoing'][]
 }
@@ -260,9 +262,10 @@ function initial(): PanelServer {
   return {
     backupPoints: [],
     health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
-    materials: { knowledge: [], resources: [] }, knowledgeOperations: {}, resourceOperations: {}, loseKnowledgeResponse: false, loseResourceResponse: false,
+    materials: { knowledge: [], resources: [] }, knowledgeOperations: {}, resourceOperations: {}, loseKnowledgeResponse: false, loseResourceResponse: false, failArtifactDownload: false,
     projects: [{ id: 'p1', name: 'Demo project', goal: 'A durable goal', createdAt: '2026-09-23T00:00:00Z', updatedAt: '2026-09-23T00:00:00Z' }],
     conversations: { p1: { project: { id: 'p1', name: 'Demo project', goal: 'A durable goal', createdAt: '2026-09-23T00:00:00Z', updatedAt: '2026-09-23T00:00:00Z' }, messages: [], tasks: [] } },
+    projectEvents: { p1: [] },
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
@@ -304,6 +307,33 @@ const page = <T>(items: T[]) => ({ items, total: items.length, next_offset: null
 const ticketOf = (id: string) =>
   [...server.tickets.open, ...server.person, ...server.tickets.ended].find(ticket => ticket.id === id) ?? server.ticketDetails[id]
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
+const projectHome = (): ApiResponse<'GET projects/home'> => {
+  const pending: ApiResponse<'GET projects/home'>['pending'] = []
+  const projects = server.projects.map(project => {
+    const conversation = server.conversations[project.id], tasks = conversation?.tasks ?? []
+    for (const task of tasks) {
+      const plan = task.planRevisions?.at(-1)
+      const authorization = plan && task.authorizations?.findLast(item => item.planRevision === plan.revision && !item.revokedAt)
+      if (plan && !authorization && !task.ended) pending.push({ id: `confirmation:${task.id}:${plan.revision}`, projectId: project.id,
+        projectName: project.name, ticketId: task.id, taskTitle: task.title, kind: 'confirmation', summary: plan.goal, at: plan.createdAt })
+      for (const question of task.attentionQuestions ?? (task.attention ? [task.attention] : [])) if (!question.resolvedAt) pending.push({
+        id: `question:${question.id}`, projectId: project.id, projectName: project.name, ticketId: task.id, taskTitle: task.title,
+        ...(question.binding?.assignmentId ? { assignmentId: question.binding.assignmentId } : {}), kind: 'question', summary: question.question })
+    }
+    const progress = tasks.flatMap(task => task.progress?.assignments ?? [])
+    const pendingCount = pending.filter(item => item.projectId === project.id).length
+    const runningAssignments = progress.filter(item => ['preparing', 'retrying', 'running'].includes(item.phase)).length
+    const paused = tasks.some(task => task.lifecycle?.pause.intent === 'pause' || task.lifecycle?.pause.state === 'paused')
+    const lastCheckedAt = tasks.flatMap(task => [task.lifecycle?.observed.at, task.lifecycle?.reconciliation?.observedAt, task.updatedAt])
+      .filter((value): value is string => !!value).sort().at(-1)
+    const status = conversation?.coordinator?.status === 'error' ? 'coordinator-error' as const : paused ? 'paused' as const
+      : pendingCount ? 'needs-attention' as const
+        : runningAssignments ? 'running' as const : conversation?.coordinator?.status === 'running' ? 'coordinator-running' as const : 'idle' as const
+    return { project, status, paused, runningAssignments, pendingCount,
+      ...(lastCheckedAt ? { lastCheckedAt } : {}) }
+  })
+  return { projects, pending }
+}
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET projects/:id/materials': { answer: () => server.materials },
@@ -334,9 +364,10 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'POST projects/:id/resources/:resourceId/browse': { body: true, answer: () => refuse(404, 'Unknown fixture resource') },
   'GET projects/:id/resources/:resourceId/preview': { answer: () => refuse(404, 'Unknown fixture resource') },
   'GET projects': { answer: () => ({ projects: server.projects }) },
+  'GET projects/home': { answer: projectHome },
   'POST projects': { body: true, answer: ({ body }) => {
     const project = { id: `p${server.projects.length + 1}`, ...body, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
-    server.projects.push(project); server.conversations[project.id] = { project, messages: [], tasks: [] }
+    server.projects.push(project); server.conversations[project.id] = { project, messages: [], tasks: [] }; server.projectEvents[project.id] = []
     return { project }
   } },
   'GET projects/:id/artifacts/:artifactId/:version': { answer: ({ params }) => {
@@ -345,6 +376,17 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   } },
   'POST projects/:id/acceptance': { body: true, answer: () => refuse(409, 'Fixture gate requires a registered report') },
   'GET projects/:id/conversation': { answer: ({ params }) => server.conversations[params.id] ?? refuse(404, 'Unknown project') },
+  'GET projects/:id/events': { query: ['after', 'afterId', 'limit'], answer: ({ params, query }) => {
+    const conversation = server.conversations[params.id]
+    if (!conversation) return refuse(404, 'Unknown project')
+    const events = server.projectEvents[params.id] ?? [], after = Number(query.after ?? 0), limit = Number(query.limit ?? 200)
+    const known = after === 0 || (!!query.afterId && events.some(item => item.sequence === after && item.event.id === query.afterId))
+    const reset = after > (events.at(-1)?.sequence ?? 0) || !known
+    const rows = events.filter(item => item.sequence > (reset ? 0 : after)).slice(0, limit)
+    const cursorId = rows.at(-1)?.event.id ?? (reset ? undefined : query.afterId)
+    return { projectId: params.id, cursor: rows.at(-1)?.sequence ?? (reset ? 0 : after), ...(cursorId ? { cursorId } : {}), oldestSequence: events[0]?.sequence ?? null, reset, events: rows,
+      ...(reset ? { snapshot: conversation } : {}) }
+  } },
   'POST projects/:id/messages': { body: true, answer: ({ params, body }) => {
     const conversation = server.conversations[params.id]
     if (!conversation) return refuse(404, 'Unknown project')
@@ -522,6 +564,7 @@ class Reply extends Response {
 export function usePanelServer(cleanup: () => void) {
   beforeEach(() => {
     sessionStorage.clear()
+    history.replaceState(null, '', '#/')
     server = initial()
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit): Promise<Response> => {
       if (server.down) return new Response(null, { status: 404 })
@@ -530,6 +573,25 @@ export function usePanelServer(cleanup: () => void) {
       const method = init?.method ?? 'GET'
       const body: unknown = init?.body ? JSON.parse(String(init.body)) : undefined
       server.requests.push({ path: decodeURIComponent(`${path}${address.search}`), method, ...body === undefined ? {} : { body } })
+      const artifactDownload = /^projects\/([^/]+)\/artifacts\/([^/]+)\/([^/]+)\/download$/.exec(path)
+      if (method === 'GET' && artifactDownload) {
+        if (server.failArtifactDownload) return new Response(JSON.stringify({ error: 'Artifact download temporarily unavailable' }), { status: 503 })
+        const projectId = decodeURIComponent(artifactDownload[1]!), artifactId = decodeURIComponent(artifactDownload[2]!), version = decodeURIComponent(artifactDownload[3]!)
+        const item = server.conversations[projectId]?.artifacts?.find(value => value.id === artifactId && value.contentVersion === version)
+        return item ? new Response('Fixture artifact content', { status: 200, headers: { 'content-type': 'application/octet-stream',
+          'content-disposition': `attachment; filename="${item.name}"` } }) : new Response(JSON.stringify({ error: 'Unknown artifact' }), { status: 404 })
+      }
+      const stream = /^projects\/([^/]+)\/events\/stream$/.exec(path)
+      if (method === 'GET' && stream) {
+        const projectId = decodeURIComponent(stream[1]!), events = server.projectEvents[projectId] ?? [], after = Number(address.searchParams.get('after') ?? 0),
+          afterId = address.searchParams.get('afterId') ?? undefined, known = after === 0 || (!!afterId && events.some(item => item.sequence === after && item.event.id === afterId)),
+          reset = after > (events.at(-1)?.sequence ?? 0) || !known, rows = events.filter(item => item.sequence > (reset ? 0 : after)).slice(0, 200),
+          cursorId = rows.at(-1)?.event.id ?? (reset ? undefined : afterId)
+        const value = { projectId, cursor: rows.at(-1)?.sequence ?? (reset ? 0 : after), ...(cursorId ? { cursorId } : {}),
+          oldestSequence: events[0]?.sequence ?? null, reset, events: rows, ...(reset && server.conversations[projectId] ? { snapshot: server.conversations[projectId] } : {}) }
+        return new Response(`event: project-events\ndata: ${JSON.stringify(value)}\n\n`, { status: 200,
+          headers: { 'content-type': 'text/event-stream; charset=utf-8' } })
+      }
       const route = match(method, path.split('/'))
       if (!route) return new Reply({ error: 'Unknown operation' }, 404)
       const answer = await run(route.key, route.params, address.searchParams, body)

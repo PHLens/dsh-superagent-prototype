@@ -100,7 +100,11 @@ export class ProjectPlans {
       if (prior && ticket && prior.id !== ticket.id) throw new UserError('planOperationConflict')
       const target = ticket ?? this.projects.createDraft(projectId, { title: input.plan.goal.slice(0, 200) })
       if (target.projectId !== projectId) throw new UserError('projectOwnership')
-      return this.service(actorId, projectId).save({ ...input, plan: this.normalizeCodeChecks(projectId, input.plan), projectId, ticketId: target.id })
+      const saved = this.service(actorId, projectId).save({ ...input, plan: this.normalizeCodeChecks(projectId, input.plan), projectId, ticketId: target.id })
+      new ProjectEvents(this.store).append({ id: `plan:${saved.ticketId}:${saved.revision}`, projectId, ticketId: saved.ticketId,
+        kind: 'task-changed', version: String(saved.revision), operationId: input.operationId ?? `plan:${saved.ticketId}:${saved.revision}`,
+        at: saved.createdAt })
+      return saved
     })
   }
   /**
@@ -162,13 +166,24 @@ export class ProjectPlans {
       const assignments = this.service(actorId, projectId).registerAssignments({ projectId, ticketId: request.ticketId,
         authorizationId: result.authorization.id, targetId: result.target.id, planRevision: request.planRevision })
       this.store.db.prepare("UPDATE conversation_message SET status='saved' WHERE id=?").run(evidence.message.id)
-      return { ...result, ticket: this.store.tickets.get(request.ticketId)!, assignment: assignments[0]!, assignments, message: { ...evidence.message, status: 'saved' as const } }
+      new ProjectEvents(this.store).append({ id: `conversation:${evidence.message.id}:saved:0:0`, projectId, ticketId: request.ticketId,
+        kind: 'conversation-message', version: evidence.message.id, operationId: `${evidence.message.id}:saved:0:0`, at: evidence.message.createdAt })
+      const ticket = this.store.tickets.get(request.ticketId)!, graph = currentAssignmentGraph(ticket, result.authorization.id)
+      if (graph) new ProjectEvents(this.store).append({ id: `graph:${graph.id}`, projectId, ticketId: graph.ticketId,
+        kind: 'assignment-ready', version: graph.id, operationId: graph.operationId, at: graph.createdAt })
+      return { ...result, ticket, assignment: assignments[0]!, assignments, message: { ...evidence.message, status: 'saved' as const } }
     })
   }
   revoke(actorId: string, projectId: string, request: RevokePlan): PlanAuthorization {
     this.owner(actorId, projectId)
     if (request.projectId !== projectId) throw new UserError('projectOwnership')
-    return this.service(actorId, projectId).revoke(request)
+    return this.store.atomic(() => {
+      const revoked = this.service(actorId, projectId).revoke(request)
+      new ProjectEvents(this.store).append({ id: `task:${revoked.ticketId}:${revoked.id}:revoked`, projectId,
+        ticketId: revoked.ticketId, authorizationId: revoked.id, kind: 'task-changed', version: revoked.id,
+        operationId: request.operationId ?? `revoke:${revoked.id}`, at: revoked.revokedAt ?? revoked.createdAt })
+      return revoked
+    })
   }
   registerAssignment(actorId: string, projectId: string, input: Omit<RegisterPlanAssignment, 'projectId'>): Assignment {
     return this.service(actorId, projectId).registerAssignment({ ...input, projectId })

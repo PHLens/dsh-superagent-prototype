@@ -1,10 +1,12 @@
 /** Durable project facts, transactionally appended with business writes and consumed by project lanes. */
 import type { Store } from './store.ts'
+import type { DatabaseSync } from 'node:sqlite'
 import { randomUUID } from 'node:crypto'
 export type FeedbackBatch = { id: string; projectId: string; events: ProjectEvent[]; prompt: string; generation: number; stateVersion: number; inputId: string; lease: string; phase: 'claimed' | 'replied' | 'committed' | 'abandoned'; sessionId?: string; turn?: string; dshMessageId?: string; replyText?: string }
-export const EVENT_SCHEMA_SQL = `CREATE TABLE IF NOT EXISTS project_event (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, ticket_id TEXT NOT NULL, payload TEXT NOT NULL, consumed_at TEXT); CREATE INDEX IF NOT EXISTS project_event_pending ON project_event(project_id, consumed_at);
-CREATE TABLE IF NOT EXISTS project_event_delivery (event_id TEXT PRIMARY KEY, attempts INTEGER NOT NULL, retry_at INTEGER NOT NULL, error TEXT, generation INTEGER);`
-export type ProjectEventKind = 'assignment-ready' | 'report-recorded' | 'artifact-registered' | 'acceptance-changed' | 'question-answered' | 'reconcile' | 'project-feedback'
+export const EVENT_SCHEMA_SQL = `CREATE TABLE IF NOT EXISTS project_event (sequence INTEGER NOT NULL, id TEXT PRIMARY KEY, project_id TEXT NOT NULL, ticket_id TEXT NOT NULL, payload TEXT NOT NULL, consumed_at TEXT, UNIQUE(sequence)); CREATE INDEX IF NOT EXISTS project_event_pending ON project_event(project_id, consumed_at);
+CREATE TABLE IF NOT EXISTS project_event_delivery (event_id TEXT PRIMARY KEY, attempts INTEGER NOT NULL, retry_at INTEGER NOT NULL, error TEXT, generation INTEGER);
+CREATE TABLE IF NOT EXISTS project_event_counter (singleton INTEGER PRIMARY KEY CHECK(singleton=1), value INTEGER NOT NULL);`
+export type ProjectEventKind = 'conversation-message' | 'assignment-ready' | 'task-changed' | 'attention-changed' | 'artifact-registered' | 'delivery-changed' | 'health-changed' | 'report-recorded' | 'acceptance-changed' | 'question-answered' | 'reconcile' | 'project-feedback'
 /** Bounded, exact human feedback carried by a project-feedback event; the input itself stays an ordinary Ticket input. */
 export interface ProjectFeedback {
   triggerId: string
@@ -48,6 +50,28 @@ export interface ProjectEvent {
   triggerId?: string
   inputId?: string
   feedback?: ProjectFeedback
+  /** Project-level coordinator health transition, persisted even though live health itself is in memory. */
+  health?: { status: 'error' | 'recovered'; detail?: string }
+  /** Terminal result of one deterministic Task reconciliation operation. */
+  reconciliation?: { state: 'clear' | 'unknown'; reason?: string }
+}
+export interface SequencedProjectEvent { sequence: number; event: ProjectEvent }
+export interface ProjectEventPage {
+  projectId: string
+  cursor: number
+  cursorId?: string
+  oldestSequence: number | null
+  reset: boolean
+  events: SequencedProjectEvent[]
+}
+/** Append one idempotent fact using the caller's database transaction. */
+export function appendProjectEvent(db: DatabaseSync, event: ProjectEvent): void {
+  const old = db.prepare('SELECT payload FROM project_event WHERE id=?').get(event.id)
+  if (old) { if (String(old.payload) !== JSON.stringify(event)) throw new Error('Event operation id conflict'); return }
+  const next = db.prepare('UPDATE project_event_counter SET value=value+1 WHERE singleton=1 RETURNING value').get() as { value?: number } | undefined
+  if (next?.value === undefined) throw new Error('Project event sequence is not initialized')
+  db.prepare('INSERT INTO project_event (sequence,id,project_id,ticket_id,payload) VALUES (?,?,?,?,?)')
+    .run(Number(next.value), event.id, event.projectId, event.ticketId, JSON.stringify(event))
 }
 /** Persists idempotent project facts inside the caller's transaction and retains pending delivery across restarts. */
 export class ProjectEvents {
@@ -105,14 +129,27 @@ export class ProjectEvents {
   completeFeedback(batch: FeedbackBatch): void {
     this.store.atomic(() => { this.validateFeedback(batch, 'replied'); this.consume(batch.events.map(event => event.id)); this.store.set(`project-feedback:${batch.projectId}`, { ...batch, phase: 'committed' }) })
   }
-  append(event: ProjectEvent): void {
-    const old = this.store.db.prepare('SELECT payload FROM project_event WHERE id=?').get(event.id)
-    if (old) { if (String(old.payload) !== JSON.stringify(event)) throw new Error('Event operation id conflict'); return }
-    this.store.db.prepare('INSERT INTO project_event (id,project_id,ticket_id,payload) VALUES (?,?,?,?)').run(event.id, event.projectId, event.ticketId, JSON.stringify(event))
-  }
+  append(event: ProjectEvent): void { appendProjectEvent(this.store.db, event) }
+
   pending(projectId?: string): ProjectEvent[] {
-    const rows = projectId ? this.store.db.prepare('SELECT payload FROM project_event WHERE consumed_at IS NULL AND project_id=? ORDER BY rowid').all(projectId) : this.store.db.prepare('SELECT payload FROM project_event WHERE consumed_at IS NULL ORDER BY rowid').all()
+    const rows = projectId ? this.store.db.prepare('SELECT payload FROM project_event WHERE consumed_at IS NULL AND project_id=? ORDER BY sequence').all(projectId) : this.store.db.prepare('SELECT payload FROM project_event WHERE consumed_at IS NULL ORDER BY sequence').all()
     return rows.map(row => JSON.parse(String(row.payload)) as ProjectEvent)
+  }
+  /** Ordered project facts after a durable cursor. A cursor no longer present asks the client to replace local state with a snapshot. */
+  changes(projectId: string, after: number, afterId: string | undefined, limit: number): ProjectEventPage {
+    const bounds = this.store.db.prepare('SELECT MIN(sequence) AS oldest, MAX(sequence) AS latest FROM project_event WHERE project_id=?').get(projectId) as
+      { oldest?: number | null; latest?: number | null }
+    const oldest = bounds.oldest === null || bounds.oldest === undefined ? null : Number(bounds.oldest)
+    const latest = bounds.latest === null || bounds.latest === undefined ? 0 : Number(bounds.latest)
+    const known = after === 0 || (!!afterId && !!this.store.db.prepare("SELECT 1 FROM project_event WHERE project_id=? AND sequence=? AND json_extract(payload,'$.id')=?")
+      .get(projectId, after, afterId))
+    const reset = after > latest || !known
+    const start = reset ? 0 : after
+    const rows = this.store.db.prepare('SELECT sequence, payload FROM project_event WHERE project_id=? AND sequence>? ORDER BY sequence LIMIT ?')
+      .all(projectId, start, limit) as { sequence: number; payload: string }[]
+    const events = rows.map(row => ({ sequence: Number(row.sequence), event: JSON.parse(String(row.payload)) as ProjectEvent }))
+    const cursorId = events.at(-1)?.event.id ?? (reset ? undefined : afterId)
+    return { projectId, cursor: events.at(-1)?.sequence ?? (reset ? 0 : after), ...(cursorId ? { cursorId } : {}), oldestSequence: oldest, reset, events }
   }
   due(projectId?: string): ProjectEvent[] {
     return this.pending(projectId).filter(event => Number(this.store.get<{ retryAt: number }>(`project-feedback-backoff:${event.projectId}`)?.retryAt ?? 0) <= Date.now()

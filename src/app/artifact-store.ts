@@ -4,6 +4,7 @@ import { existsSync, readFileSync, realpathSync, writeFileSync, openSync, fsyncS
 import { dirname, join } from 'node:path'
 import type { Store } from './store.ts'
 import { contained, managedDirectory, ExecutionAttempts, type Attempt } from './execution-attempts.ts'
+import { ProjectEvents } from './events.ts'
 
 export interface Artifact {
   id: string; projectId: string; ticketId: string; assignmentId: string; attemptId: string; lease: string
@@ -56,7 +57,12 @@ export class ArtifactStore {
     const fd = openSync(item.path, 'r'); try { fsyncSync(fd) } finally { closeSync(fd) }
     const dir = openSync(parent, 'r'); try { fsyncSync(dir) } finally { closeSync(dir) }
     if (digest(readFileSync(item.path, 'utf8')) !== item.contentVersion) throw new Error('Artifact checksum failed')
-    item.status = 'registered'; this.store.atomic(() => this.save(item))
+    item.status = 'registered'; this.store.atomic(() => {
+      this.save(item)
+      new ProjectEvents(this.store).append({ id: `artifact:${item.id}:${item.contentVersion}`, projectId: item.projectId,
+        ticketId: item.ticketId, assignmentId: item.assignmentId, attemptId: item.attemptId, kind: 'artifact-registered',
+        version: item.contentVersion, operationId: `${item.id}:${item.operationId}`, at: item.createdAt })
+    })
   }
   read(projectId: string, id: string, contentVersion: string): Artifact {
     const item = this.list(projectId).find(value => value.id === id && value.contentVersion === contentVersion && value.status === 'registered')

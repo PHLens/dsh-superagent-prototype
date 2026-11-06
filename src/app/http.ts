@@ -20,6 +20,7 @@ import type { SourceRegistry } from '../sources/registry.ts'
 import type { Sessions } from './sessions.ts'
 import type { ProjectCoordinator } from './project-coordinator.ts'
 import { authenticateProjectRequest, ProjectAuthError, type ProjectAuthContext } from './project-auth.ts'
+import { ProjectEvents } from './events.ts'
 import type { Store } from './store.ts'
 import type { TextCache } from './cache.ts'
 const resourceSnapshotSchema = z.object({ projectId: z.string(), resourceId: z.string(), path: z.string(), version: z.string(), entries: z.array(z.object({ name: z.string(), path: z.string(), kind: z.enum(['directory', 'file']), bytes: z.number().int().nonnegative(), version: z.string() }).strict()), expiresAt: z.string(), offset: z.number().int().nonnegative().optional(), total: z.number().int().nonnegative().optional(), next_offset: z.number().int().nonnegative().nullable().optional() }).strict()
@@ -80,10 +81,21 @@ async function readBody(req: IncomingMessage, maxBytes = 128 * 1024): Promise<un
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(value))
 }
-export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number): boolean {
+function downloadBytes(res: ServerResponse, name: string, bytes: Uint8Array): void {
+  const fallback = name.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 100) || 'download'
+  res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': bytes.length,
+    'Content-Disposition': `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(name).replace(/['()]/g, escape)}`,
+    'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' })
+  res.end(bytes)
+}
+export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number, publicOrigin?: string): boolean {
   const host = req.headers.host
-  if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return false
-  return req.headers['x-orchestrator-request'] === '1' && (req.headers.origin === undefined || req.headers.origin === `http://${host}`)
+  if (req.headers['x-orchestrator-request'] !== '1' || !host) return false
+  const local = host === `127.0.0.1:${port}` || host === `localhost:${port}`
+  const remote = !!publicOrigin && host === new URL(publicOrigin).host
+  if (!local && !remote) return false
+  const expected = remote ? publicOrigin : `http://${host}`
+  return req.headers.origin === undefined || req.headers.origin === expected
 }
 /** Maps errors to HTTP status codes and structured payloads that the panel localizes in the interface language. */
 function failure(error: unknown): [number, Record<string, unknown>] {
@@ -99,9 +111,9 @@ function failure(error: unknown): [number, Record<string, unknown>] {
   return [500, { error: error instanceof Error ? error.message : String(error) }]
 }
 
-function machineView({ stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }: Machine) {
+function machineView({ stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, publicOrigin }: Machine) {
   return { stateDir, promptMaxChars: promptMaxChars.get(), admissionContextMaxPages: admissionContextMaxPages.get(),
-    admissionContextTimeoutMs: admissionContextTimeoutMs.get() }
+    admissionContextTimeoutMs: admissionContextTimeoutMs.get(), publicOrigin: publicOrigin ?? '' }
 }
 function setupView(runtime: HttpHost) {
   const resolved = runtime.configured() ? runtime.deployment : undefined
@@ -166,6 +178,13 @@ const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().no
 function routes(runtime: HttpHost): Routes {
   const { store } = runtime
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
+  const recordTaskChange = (id: string, kind: 'task-changed' | 'attention-changed' | 'question-answered' | 'reconcile',
+    suffix: string, at: string, operationId: string) => {
+    const value = store.tickets.get(id)
+    if (!value?.projectId) return
+    new ProjectEvents(store).append({ id: `task:${id}:${suffix}`, projectId: value.projectId, ticketId: id,
+      kind, version: `${id}:${suffix}`, operationId, at })
+  }
   const writable = () => { if (runtime.safeRestore) throw new RouteError(400, 'Recovery profile is offline read-only') }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   const projectHost = (actorId: string | undefined) => {
@@ -175,12 +194,19 @@ function routes(runtime: HttpHost): Routes {
   }
   return {
     'GET projects': ({ actorId }) => { const host = projectHost(actorId); return { projects: host.coordinator.list(host.actorId) } },
+    'GET projects/home': ({ actorId }) => { const host = projectHost(actorId); return host.coordinator.home(host.actorId) },
     'POST projects': async ({ actorId, body }) => {
       const host = projectHost(actorId)
       const input = z.object({ name: z.string().trim().min(1).max(200), goal: z.string().trim().min(1).max(2000) }).strict().parse(await body())
       return { project: host.coordinator.create(host.actorId, input) }
     },
     'GET projects/:id/conversation': ({ actorId, params }) => { const host = projectHost(actorId); return host.coordinator.view(host.actorId, params.id) },
+    'GET projects/:id/events': ({ actorId, params, query }) => {
+      const host = projectHost(actorId)
+      const value = z.object({ after: z.coerce.number().int().nonnegative().default(0), afterId: z.string().min(1).max(500).optional(),
+        limit: z.coerce.number().int().positive().max(500).default(200) }).strict().parse(query)
+      return host.coordinator.events(host.actorId, params.id, value.after, value.afterId, value.limit)
+    },
     'GET projects/:id/materials': ({ actorId, params }) => { const host = projectHost(actorId); return host.coordinator.materials(host.actorId, params.id) },
     'POST projects/:id/knowledge': async ({ actorId, params, body }) => { const host = projectHost(actorId); const { operationId, ...input } = z.object({ kind: z.enum(['goal', 'assumption', 'decision', 'rule', 'note']), title: z.string().trim().min(1), content: z.string(), source: z.object({ kind: z.enum(['message', 'file', 'import', 'system']), id: z.string().optional(), path: z.string().optional() }), operationId: z.string().min(1).max(256).optional() }).strict().parse(await body()); return host.coordinator.saveKnowledge(host.actorId, params.id, input, operationId) },
     'POST projects/:id/knowledge/:knowledgeId/confirm': async ({ actorId, params, body }) => { const host = projectHost(actorId); const { operationId } = z.object({ operationId: z.string().min(1).max(256).optional() }).strict().parse(await body().catch(() => ({}))); return host.coordinator.confirmKnowledge(host.actorId, params.id, params.knowledgeId, operationId) },
@@ -256,15 +282,35 @@ function routes(runtime: HttpHost): Routes {
       return ticketList(views(runtime), state, offset, limit)
     },
     'GET tickets/:id': ({ params }) => ticketPage(runtime, params.id),
-    'POST tickets/:id/retry': ({ params }) => { writable(); const id = ticket(params.id); runtime.engine.retryTicket(id); return { retried: true } },
-     'POST tickets/:id/reconcile': async ({ params, body }) => { writable(); const id = ticket(params.id); const input = z.object({ operationId: z.string().min(1) }).strict().parse(await body()); return runtime.executor.reconcileTicket(id, input.operationId) },
-    'POST tickets/:id/stop': ({ params }) => { writable(); const id = ticket(params.id); runtime.engine.stopTicket(id); return { stopped: true, stopping: true } },
-    'POST tickets/:id/pause': ({ params }) => { writable(); const id = ticket(params.id); runtime.engine.pauseTicket(id); return { paused: true } },
-    'POST tickets/:id/resume': ({ params }) => { writable(); const id = ticket(params.id); runtime.engine.resumeTicket(id); return { resumed: true } },
+    'POST tickets/:id/retry': ({ params }) => { writable(); const id = ticket(params.id); return store.atomic(() => {
+      runtime.engine.retryTicket(id); const at = store.tickets.get(id)!.updatedAt
+      recordTaskChange(id, 'task-changed', `retry:${at}`, at, `ticket-retry:${id}:${at}`); return { retried: true as const }
+    }) },
+    'POST tickets/:id/reconcile': async ({ params, body }) => {
+      writable(); const id = ticket(params.id), input = z.object({ operationId: z.string().min(1) }).strict().parse(await body())
+      return runtime.executor.reconcileTicket(id, input.operationId)
+    },
+    'POST tickets/:id/stop': ({ params }) => { writable(); const id = ticket(params.id); return store.atomic(() => {
+      runtime.engine.stopTicket(id); const at = store.tickets.get(id)!.lifecycle?.stop.at ?? store.tickets.get(id)!.updatedAt
+      recordTaskChange(id, 'task-changed', `stop:${at}`, at, `ticket-stop:${id}:${at}`); return { stopped: true as const, stopping: true as const }
+    }) },
+    'POST tickets/:id/pause': ({ params }) => { writable(); const id = ticket(params.id); return store.atomic(() => {
+      runtime.engine.pauseTicket(id); const at = store.tickets.get(id)!.lifecycle?.pause.at ?? store.tickets.get(id)!.updatedAt
+      recordTaskChange(id, 'task-changed', `pause:${at}`, at, `ticket-pause:${id}:${at}`); return { paused: true as const }
+    }) },
+    'POST tickets/:id/resume': ({ params }) => { writable(); const id = ticket(params.id); return store.atomic(() => {
+      runtime.engine.resumeTicket(id); const at = store.tickets.get(id)!.lifecycle?.pause.at ?? store.tickets.get(id)!.updatedAt
+      recordTaskChange(id, 'task-changed', `resume:${at}`, at, `ticket-resume:${id}:${at}`); return { resumed: true as const }
+    }) },
      'POST tickets/:id/attention': async ({ params, actorId, body }) => {
       writable(); const id = ticket(params.id), input = z.object({ version: z.number().int().positive(), questionId: z.string().min(1), text: z.string().min(1) }).strict().parse(await body())
       const source = 'web', actor = { source, id: actorId ?? 'panel' }
-      const result = runtime.engine.answerAttention(id, input.version, actor, source, input.text, input.questionId)
+      const result = store.atomic(() => {
+        const answered = runtime.engine.answerAttention(id, input.version, actor, source, input.text, input.questionId)
+        recordTaskChange(id, answered.resolved ? 'question-answered' : 'attention-changed',
+          `attention:${answered.answer.id}`, answered.answer.at, `attention-answer:${answered.answer.id}`)
+        return answered
+      })
       if (result.resolved) await runtime.executor.continueAfterAttention(id, result.answer.id, result.answer.text)
        return { resolved: result.resolved, version: input.version }
     },
@@ -316,7 +362,7 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
   const disposers = [
     ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
-      if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
+      if (!sameOrigin(req, ctx.webServer.port, runtime.machine?.publicOrigin)) { json(res, 403, { error: 'Same-origin management request required' }); return }
       if (url.pathname === '/orchestrator/health') {
         if (req.method !== 'GET') { json(res, 405, { error: 'Health probe is read-only' }); return }
         json(res, 200, healthView(runtime)); return
@@ -326,17 +372,52 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
         // Native admission is the single gate for the entire control plane, including reads.
         const actorId = authenticateProjectRequest(authContext, req)
         await runtime.ready
-        const download = /^\/orchestrator\/api\/projects\/([^/]+)\/resources\/([^/]+)\/download$/.exec(url.pathname)
-        if (download && req.method === 'GET') {
+        const stream = /^\/orchestrator\/api\/projects\/([^/]+)\/events\/stream$/.exec(url.pathname)
+        if (stream && req.method === 'GET') {
+          if (!runtime.projectCoordinator) throw new ProjectAuthError(503, 'Project coordinator unavailable')
+          const projectId = decodeURIComponent(stream[1]!)
+          const initial = z.object({ after: z.coerce.number().int().nonnegative().default(0), afterId: z.string().min(1).max(500).optional(),
+            limit: z.coerce.number().int().positive().max(500).default(200) }).strict().parse(Object.fromEntries(url.searchParams))
+          // Authorize and validate the cursor before switching response ownership to the stream.
+          let page = runtime.projectCoordinator.events(actorId, projectId, initial.after, initial.afterId, initial.limit)
+          let closed = false
+          const close = () => { closed = true }
+          req.on?.('close', close); res.on?.('close', close)
+          res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store, no-transform',
+            connection: 'keep-alive', 'x-accel-buffering': 'no', 'x-content-type-options': 'nosniff' })
+          const openedAt = Date.now(); let heartbeat = openedAt
+          try {
+            while (!closed && Date.now() - openedAt < 25_000) {
+              if (page.events.length || page.reset) {
+                res.write(`id: ${page.cursor}\nevent: project-events\ndata: ${JSON.stringify(page)}\n\n`)
+                heartbeat = Date.now()
+              } else if (Date.now() - heartbeat >= 15_000) {
+                res.write(`: heartbeat ${new Date().toISOString()}\n\n`); heartbeat = Date.now()
+              }
+              await new Promise<void>(resolve => { const timer = setTimeout(resolve, 1_000); timer.unref?.() })
+              if (!closed) page = runtime.projectCoordinator.events(actorId, projectId, page.cursor, page.cursorId, initial.limit)
+            }
+          } catch {
+            if (!closed && !res.writableEnded) res.write('event: reconnect\n\n')
+          } finally {
+            req.off?.('close', close); res.off?.('close', close)
+            if (!res.writableEnded) res.end()
+          }
+          return
+        }
+        const resourceDownload = /^\/orchestrator\/api\/projects\/([^/]+)\/resources\/([^/]+)\/download$/.exec(url.pathname)
+        if (resourceDownload && req.method === 'GET') {
           if (!runtime.projectCoordinator) throw new ProjectAuthError(503, 'Project coordinator unavailable')
           const input = z.object({ path: z.string(), version: z.string().min(1) }).strict().parse(Object.fromEntries(url.searchParams))
-          const bytes = runtime.projectCoordinator.downloadResource(actorId, decodeURIComponent(download[1]!), decodeURIComponent(download[2]!), input.path, input.version)
+          const bytes = runtime.projectCoordinator.downloadResource(actorId, decodeURIComponent(resourceDownload[1]!), decodeURIComponent(resourceDownload[2]!), input.path, input.version)
           // The saved name comes from the registered path, never from a client-supplied header or the whole path.
-          const name = input.path.split('/').at(-1) || 'resource'
-          const fallback = name.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 100) || 'resource'
-          res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': bytes.length,
-            'Content-Disposition': `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(name).replace(/['()]/g, escape)}`,
-            'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); res.end(bytes); return
+          downloadBytes(res, input.path.split('/').at(-1) || 'resource', bytes); return
+        }
+        const artifactDownload = /^\/orchestrator\/api\/projects\/([^/]+)\/artifacts\/([^/]+)\/([^/]+)\/download$/.exec(url.pathname)
+        if (artifactDownload && req.method === 'GET') {
+          if (!runtime.projectCoordinator) throw new ProjectAuthError(503, 'Project coordinator unavailable')
+          const item = runtime.projectCoordinator.artifactDownload(actorId, decoded(artifactDownload[1]!), decoded(artifactDownload[2]!), decoded(artifactDownload[3]!))
+          downloadBytes(res, item.name, item.bytes); return
         }
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))
         if (!route) throw new RouteError(404, 'Unknown operation')

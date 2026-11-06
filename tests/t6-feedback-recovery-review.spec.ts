@@ -70,7 +70,7 @@ function savedFeedback(f: ReturnType<typeof scope>) { return f.c.conversations.l
 
 it('reuses a completed native receipt after an application commit interruption with an unchanged event set', async () => {
   const f = scope(), e = f.append('e1'), native = nativeReceipts(f), fault = failFirstFeedbackCommit(() => native.completed.size > 0)
-  await pump(f); expect(f.events.pending(f.project.id).map(e => e.id)).toEqual([e.id]); fault.mockRestore()
+  await pump(f); expect(f.events.pending(f.project.id).map(item => item.id).filter(id => id.startsWith('feedback:'))).toEqual([e.id]); fault.mockRestore()
   makeDue(); await pump(f)
   expect(native.bodies).toHaveLength(1)
   expect(f.events.pending(f.project.id)).toEqual([])

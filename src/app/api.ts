@@ -12,6 +12,7 @@ import type { DecisionListView, SearchView, ThreadDetailView, ThreadListView } f
 import type { TicketListView } from './views/tickets.ts'
 import type { Assignment, PlanAuthorization, PlanExecutionTarget, Project as ProjectModel, Ticket } from '../core/model.ts'
 import type { ProjectProgress } from './project-progress.ts'
+import type { ProjectEventPage } from './events.ts'
 
 export type Project = ProjectModel
 export type ConversationRole = 'user' | 'assistant'
@@ -36,7 +37,7 @@ export interface ProjectConversationView {
   project: Project
   messages: ConversationMessage[]
   artifacts?: ReturnType<ArtifactStore['view']>
-  reports?: AcceptedReport[]
+  reports?: (AcceptedReport & { conversationMessageId?: string })[]
   decisions?: GateDecision[]
   tasks?: ProjectTaskView[]
   coordinator?: { status: 'idle' | 'running' | 'error'; error?: string }
@@ -89,8 +90,10 @@ export interface Api {
   'POST setup/check': { response: { restarting: true } }
   'GET models': { response: ModelCatalog }
   'GET projects': { response: { projects: Project[] } }
+  'GET projects/home': { response: ReturnType<import('./project-coordinator.ts').ProjectCoordinator['home']> }
   'POST projects': { body: { name: string; goal: string }; response: { project: Project } }
   'GET projects/:id/conversation': { response: ProjectConversationView }
+  'GET projects/:id/events': { query?: { after?: number; afterId?: string; limit?: number }; response: ProjectEventPage & { snapshot?: ProjectConversationView } }
   'GET projects/:id/materials': { response: ReturnType<import('./project-coordinator.ts').ProjectCoordinator['materials']> }
   'POST projects/:id/knowledge': { body: Omit<Parameters<import('./knowledge-store.ts').KnowledgeStore['propose']>[0], 'projectId' | 'state'> & { operationId?: string }; response: import('./knowledge-store.ts').KnowledgeVersion }
   'POST projects/:id/knowledge/:knowledgeId/confirm': { body?: { operationId?: string }; response: import('./knowledge-store.ts').KnowledgeVersion }

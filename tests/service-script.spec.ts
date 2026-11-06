@@ -90,7 +90,8 @@ it('records the service PID at start, and still refuses a second instance the sc
   const pid = sleeper()
   writeFileSync(join(root, 'pane'), `${pid}\n`)
   started(service(pid))
-  const start = await run('start', '--url', url, '--timeout', '10')
+  const start = await run('start', '--url', url, '--timeout', '10', '--public-url', 'https://machine.example-tailnet.ts.net',
+    '--trusted-host', 'machine.example-tailnet.ts.net')
   expect(start).toMatchObject({ code: 0, stdout: expect.stringContaining(`"pids": [\n    ${pid}\n  ]`) })
   expect(readFileSync(join(control('superagent'), 'service.pid'), 'utf8')).toBe(`${pid}\n`)
   const tmux = readFileSync(join(root, 'tmux.log'), 'utf8').split('---\n').find(call => call.startsWith('new-session'))!.split('\n')
@@ -98,7 +99,10 @@ it('records the service PID at start, and still refuses a second instance the sc
   const checkout = realpathSync(root)
   expect(tmux).toEqual(expect.arrayContaining(['-P', '-F', '#{pane_pid}', '-c', checkout]))
   const log = new RegExp(`>> '${checkout}/\\.artifacts/dsh-superagent-superagent-\\d{8}-\\d{6}-\\d+\\.log' 2>&1$`)
-  expect(tmux.find(word => word.startsWith('umask 077; exec '))).toMatch(log)
+  const command = tmux.find(word => word.startsWith('umask 077; exec '))!
+  expect(command).toMatch(log)
+  expect(command).toContain('--public-url https://machine.example-tailnet.ts.net')
+  expect(command).toContain('--trusted-host machine.example-tailnet.ts.net')
   const second = sleeper()
   started(service(pid), `${second} node node /opt/dsh --profile superagent`)
   const again = await run('start', '--url', url, '--timeout', '10')

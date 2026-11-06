@@ -52,6 +52,7 @@ it('reopens the page this tab showed last, and the project home for a route that
 })
 it('reads each page a tab remembered with the parameters it takes, and leaves out what it does not know', () => {
   expect(parseRoute({ page: 'trigger', query: { filter: 'nope', trigger: 'e1' } })).toEqual({ page: 'trigger' })
+  expect(parseRoute({ page: 'projects', id: 'p1', query: { ticket: 't1', ignored: true } })).toEqual({ page: 'projects', id: 'p1', query: { ticket: 't1' } })
   expect(parseRoute({ page: 'trigger', id: 'github:1', query: { trigger: 'e1', filter: 'recent' } }))
     .toEqual({ page: 'trigger', id: 'github:1', query: { trigger: 'e1' } })
   expect(parseRoute({ page: 'eval', query: { filter: 'stop', window: '7d' } })).toEqual({ page: 'eval', query: { filter: 'stop' } })
